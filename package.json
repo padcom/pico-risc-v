@@ -11,6 +11,7 @@
     "test:watch": "vitest",
     "start": "npm run build --silent && node dist/cli.js",
     "linux:image": "node scripts/linux-image.ts",
+    "linux:build": "bash linux/build.sh",
     "linux": "npm run build --silent && node scripts/linux-image.ts && node dist/cli.js images/linux/Image"
   },
   "keywords": [

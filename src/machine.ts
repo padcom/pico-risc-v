@@ -216,7 +216,11 @@ export class Machine {
                 reg: 0,
                 status: 'okay',
                 compatible: 'riscv',
+                // Old-style ISA string, plus the newer binding that kernels
+                // built without CONFIG_RISCV_ISA_FALLBACK (6.x) insist on.
                 'riscv,isa': 'rv32ima',
+                'riscv,isa-base': 'rv32i',
+                'riscv,isa-extensions': ['i', 'm', 'a', 'zicsr', 'zifencei', 'zicntr'],
                 'mmu-type': 'riscv,none',
               },
               children: {

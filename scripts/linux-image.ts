@@ -4,23 +4,19 @@
  *
  *   1. already there            → nothing to do
  *   2. otherwise download the prebuilt mini-rv32ima image
- *   3. if that fails (or with --build): add cnlohr/mini-rv32ima as a git
- *      submodule and build the kernel + rootfs with its Buildroot setup
- *      (needs a Linux host; takes a long while)
+ *   3. if that fails (or with --build): build it from source with
+ *      linux/build.sh (runs Buildroot in a Podman container; see linux/README.md)
  *
  * Usage: node scripts/linux-image.ts [--build]
  */
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { inflateRawSync } from 'node:zlib'
 
 const IMAGE = 'images/linux/Image'
 const PREBUILT_URL =
   'https://github.com/cnlohr/mini-rv32ima-images/raw/master/images/linux-6.1.14-rv32nommu-cnl-1.zip'
-const SUBMODULE_URL = 'https://github.com/cnlohr/mini-rv32ima.git'
-const SUBMODULE_PATH = 'vendor/mini-rv32ima'
-const BUILT_IMAGE = `${SUBMODULE_PATH}/buildroot/output/images/Image`
 
 async function main() {
   const forceBuild = process.argv.includes('--build')
@@ -41,9 +37,8 @@ async function main() {
     }
   }
 
-  buildFromSource()
-  copyFileSync(BUILT_IMAGE, IMAGE)
-  console.log(`Linux image ready: ${IMAGE}`)
+  // Builds and installs images/linux/Image itself (or explains why it can't).
+  execFileSync('bash', ['linux/build.sh'], { stdio: 'inherit' })
 }
 
 async function download(url: string): Promise<Uint8Array> {
@@ -82,28 +77,6 @@ function extractFromZip(zip: Uint8Array, name: string): Uint8Array {
     p += 46 + nameLen + extraLen + commentLen
   }
   throw new Error(`${name} not found in zip`)
-}
-
-function buildFromSource() {
-  if (process.platform !== 'linux') {
-    throw new Error(
-      `Building the kernel uses Buildroot, which needs a Linux host (this is ${process.platform}). ` +
-        `Build on Linux (or in a Linux container) and copy the result to ${IMAGE}.`,
-    )
-  }
-  const run = (cmd: string, args: string[]) => {
-    console.log(`$ ${cmd} ${args.join(' ')}`)
-    execFileSync(cmd, args, { stdio: 'inherit' })
-  }
-
-  if (!existsSync(`${SUBMODULE_PATH}/.git`)) {
-    const registered = existsSync('.gitmodules') && readFileSync('.gitmodules', 'utf8').includes(SUBMODULE_PATH)
-    if (registered) run('git', ['submodule', 'update', '--init', SUBMODULE_PATH])
-    else run('git', ['submodule', 'add', SUBMODULE_URL, SUBMODULE_PATH])
-  }
-  // `toolchain` clones Buildroot, installs mini-rv32ima's configs and builds
-  // the cross toolchain, the kernel and its initramfs.
-  run('make', ['-C', SUBMODULE_PATH, 'toolchain'])
 }
 
 main().catch(e => {
