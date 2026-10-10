@@ -1,0 +1,7 @@
+#!/bin/sh
+# Started once by init on the console (see /etc/inittab). Runs a login session
+# and, when it ends (exit, Ctrl-D, or too many failed logins), powers the
+# machine off, which also ends the emulator.
+/sbin/getty -L console 0 vt100
+echo "Session ended, powering off."
+exec /sbin/poweroff

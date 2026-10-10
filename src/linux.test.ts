@@ -6,11 +6,11 @@ const IMAGE = new URL('../images/linux/Image', import.meta.url)
 
 /**
  * Boots the Linux image (`npm run linux:image` downloads it, `npm run linux:build` builds it),
- * logs in, runs a command and powers off. Uses the virtual clock, so the run
+ * logs in, runs a few commands and ends the session (which powers off). Uses the virtual clock, so the run
  * is deterministic and idle time costs nothing.
  */
 describe.skipIf(!existsSync(IMAGE))('Linux (mini-rv32ima nommu kernel)', () => {
-  it('boots to a shell, runs commands and powers off', { timeout: 120_000 }, () => {
+  it('boots to a shell, runs commands, and powers off when the session ends', { timeout: 120_000 }, () => {
     let screen = ''
     const machine = new Machine({ clock: 'virtual', output: b => (screen += String.fromCharCode(b)) })
     machine.boot(readFileSync(IMAGE))
@@ -41,11 +41,15 @@ describe.skipIf(!existsSync(IMAGE))('Linux (mini-rv32ima nommu kernel)', () => {
     waitFor('done-42')
     expect(screen).toMatch(/Hello from Linux \S+ on riscv32!\r\n  argv\[1\] = from-test|\(no hello\)\r\n/)
 
-    machine.terminal.type('poweroff\n')
+    // Source-built images power off when the login session ends
+    // (linux/overlay/sbin/console-session); the prebuilt one needs `poweroff`.
+    const sourceBuilt = screen.includes('Your programs from linux/programs')
+    machine.terminal.type(sourceBuilt ? 'exit\n' : 'poweroff\n')
     let result
     do result = machine.run(1_000_000)
     while (result === 'limit' && machine.cpu.instret < 1e9)
     expect(result).toBe('poweroff')
+    if (sourceBuilt) expect(screen).toContain('Session ended, powering off.')
     expect(screen).toContain('reboot: Power down')
   })
 })

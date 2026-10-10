@@ -30,6 +30,16 @@ under.
 The first build compiles a cross toolchain, the kernel and BusyBox. It needs
 a few GB of disk and takes a while. Later builds are incremental.
 
+## Console session
+
+The console runs a single login session (log in as `root`, no password).
+When it ends with `exit`, Ctrl-D or too many failed logins, the machine
+powers off, and `npm run linux` exits with it. This is set up in
+`linux/overlay/etc/inittab` and `linux/overlay/sbin/console-session`. To get
+the classic behaviour, where a new `login:` prompt appears after each logout,
+change the console line in `inittab` back to
+`console::respawn:/sbin/getty -L console 0 vt100`.
+
 ## Adding things to the image
 
 | Put it in…                    | …and it ends up as                                    |

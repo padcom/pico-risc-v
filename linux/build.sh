@@ -98,11 +98,9 @@ install_if_changed "$(config busybox_config)" "$BR/busybox_config" || true
 install_if_changed "$(config uclibc_config)" "$BR/uclibc_config" || true
 install_if_changed "$(config uclibc_config)" "$BR/uclibc_config_extra" || true
 
-# The Buildroot config, with our hooks in place of its own. mini-rv32ima
-# relies on an inittab in its own overlay that logs root in directly; we use
-# Buildroot's getty on the console instead, with a password-less root account
-# (a regular login prompt, as in the prebuilt image).
-OVERRIDES='BR2_(ROOTFS_OVERLAY|ROOTFS_POST_BUILD_SCRIPT|ROOTFS_POST_IMAGE_SCRIPT|SYSTEM_DEFAULT_PATH|DL_DIR|TARGET_GENERIC_GETTY[A-Z_]*|TARGET_ENABLE_ROOT_LOGIN|TARGET_GENERIC_ROOT_PASSWD)'
+# The Buildroot config, with our hooks in place of its own, and a password-less
+# root account (the console login is set up in linux/overlay/etc/inittab).
+OVERRIDES='BR2_(ROOTFS_OVERLAY|ROOTFS_POST_BUILD_SCRIPT|ROOTFS_POST_IMAGE_SCRIPT|SYSTEM_DEFAULT_PATH|DL_DIR|TARGET_ENABLE_ROOT_LOGIN|TARGET_GENERIC_ROOT_PASSWD)'
 {
   grep -vE "^(# )?${OVERRIDES}[= ]" "$(config buildroot_config)"
   cat <<EOF
@@ -111,10 +109,6 @@ BR2_ROOTFS_POST_BUILD_SCRIPT="$LINUX_DIR/post-build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT=""
 BR2_SYSTEM_DEFAULT_PATH="/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin"
 BR2_DL_DIR="$BUILD_DIR/dl"
-BR2_TARGET_GENERIC_GETTY=y
-BR2_TARGET_GENERIC_GETTY_PORT="console"
-BR2_TARGET_GENERIC_GETTY_BAUDRATE_KEEP=y
-BR2_TARGET_GENERIC_GETTY_TERM="vt100"
 BR2_TARGET_ENABLE_ROOT_LOGIN=y
 BR2_TARGET_GENERIC_ROOT_PASSWD=""
 EOF
