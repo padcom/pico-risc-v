@@ -124,3 +124,16 @@ export function toBytes(words: number[]): Uint8Array {
   words.forEach((w, n) => view.setUint32(n * 4, w, true))
   return out
 }
+
+/**
+ * Like toBytes, for a mix of 32-bit and compressed (16-bit) instructions: each
+ * takes as many bytes as its low two bits say (11: four, otherwise two).
+ */
+export function toCode(insts: number[]): Uint8Array {
+  const out: number[] = []
+  for (const inst of insts) {
+    const length = (inst & 3) === 3 ? 4 : 2
+    for (let i = 0; i < length; i++) out.push((inst >>> (8 * i)) & 0xff)
+  }
+  return Uint8Array.from(out)
+}

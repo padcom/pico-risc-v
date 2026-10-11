@@ -199,6 +199,30 @@ describe('Sv32 address translation', () => {
     expect(ram.read16(0x4000)).toBe(0x8877)
   })
 
+  it('a 32-bit instruction straddling two pages is fetched from both', () => {
+    // At VA+0xffe (→ 0x3ffe): addi a0, zero, 42, its upper half on the next
+    // page (→ 0x4000), followed by c.ebreak.
+    const addi = a.addi(10, 0, 42)
+    const setup = (secondPage: boolean) => (_cpu: CPU, ram: RAM) => {
+      ram.write32(L0, pte(3, V | R | X))
+      if (secondPage) ram.write32(L0 + 4, pte(4, V | R | X))
+      ram.write16(0x3ffe, addi & 0xffff)
+      ram.write16(0x4000, addi >>> 16)
+      ram.write16(0x4002, 0x9002) // c.ebreak
+    }
+    const jump = [a.lui(1, VA + 0x1000), a.jalr(0, 1, -2)]
+
+    const { cpu, stop } = run(jump, { mode: Priv.Supervisor, setup: setup(true) })
+    expect(stop).toBe('breakpoint')
+    expect([cpu.x[10], cpu.pc]).toEqual([42, VA + 0x1002])
+
+    // Without the second page: a page fault for the instruction, reporting
+    // the address of the part that's missing.
+    const r = run(jump, { mode: Priv.Supervisor, setup: setup(false) })
+    expectMachineTrap(r, TrapCause.InstructionPageFault, VA + 0x1000)
+    expect(r.cpu.mepc).toBe(VA + 0xffe)
+  })
+
   it('a straddling store faults before writing anything if the second page is read-only', () => {
     const r = run([a.sw(12, 11, 0x7fe)], {
       mode: Priv.Supervisor,

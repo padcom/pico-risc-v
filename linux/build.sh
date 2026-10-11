@@ -165,6 +165,16 @@ if [ $# -gt 0 ]; then
   exit
 fi
 
+# Buildroot doesn't rebuild what's already built when the target CPU or the
+# toolchain changes (e.g. compressed instructions switched on): everything
+# would have to be recompiled for it, so start over (downloads are kept).
+grep -E '^BR2_(RISCV|riscv|TOOLCHAIN|GCC|BINUTILS)' "$BR/.config" >"$BUILD_DIR/toolchain-config.new" || true
+if [ -d "$BR/output/host" ] && ! cmp -s "$BUILD_DIR/toolchain-config.new" "$BUILD_DIR/toolchain-config" 2>/dev/null; then
+  step "Target CPU or toolchain changed: rebuilding everything (make clean)"
+  make -C "$BR" clean
+fi
+mv "$BUILD_DIR/toolchain-config.new" "$BUILD_DIR/toolchain-config"
+
 step "Building (toolchain, packages, programs, kernel, root filesystem)"
 make -C "$BR"
 

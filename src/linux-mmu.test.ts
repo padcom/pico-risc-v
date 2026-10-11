@@ -54,6 +54,12 @@ describe.skipIf(![FIRMWARE, KERNEL, ROOTFS].every(existsSync))('Linux with MMU (
     s.type('grep -E "^(isa|mmu)" /proc/cpuinfo; echo "done-$((40+2))"\n')
     s.waitFor('done-42')
     expect(s.screen).toMatch(/mmu\s*:\s*sv32/)
+    expect(s.screen).toMatch(/isa\s*:\s*rv32imac/) // compressed instructions
+
+    // Randomness is ready right away (seeded through the device tree), even
+    // on a disk without a saved seed: /dev/random blocks until it is.
+    s.type('echo "rng-$(head -c 16 /dev/random | wc -c)"\n')
+    s.waitFor('rng-16')
 
     s.type('hello from-mmu\n')
     s.waitFor('argv[1] = from-mmu')

@@ -3,11 +3,13 @@
  *
  *   bare-metal  examples/bench: integer, memory and branch-heavy C code in
  *               M-mode without paging; checks the checksum it prints
+ *   compressed  the same, built with compressed instructions (RV32IMC)
  *   linux       the MMU Linux image (OpenSBI, Sv32 paging, ext4 on the virtio
  *               disk, read-only snapshot) booting to the login prompt
  *
- * Both run on the virtual clock, so every run executes exactly the same
- * instructions; the numbers are comparable between emulator versions.
+ * Both run on the virtual clock (Linux with a fixed date and random seed), so every run
+ * executes exactly the same instructions; the numbers are comparable between
+ * emulator versions.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { SnapshotStorage } from '../dist/block-storage.js'
@@ -22,15 +24,15 @@ interface Result {
   seconds: number
 }
 
-function bareMetal(): Result {
+function bareMetal(program = 'bench'): Result {
   let screen = ''
   const machine = new Machine({ clock: 'virtual', output: b => (screen += String.fromCharCode(b)) })
-  machine.boot(readFileSync(new URL('examples/build/bench.bin', root)))
+  machine.boot(readFileSync(new URL(`examples/build/${program}.bin`, root)))
   const start = performance.now()
   const result = machine.run(2_000_000_000)
   const seconds = (performance.now() - start) / 1000
   if (result !== 'poweroff' || !screen.includes(BENCH_CHECKSUM)) {
-    throw new Error(`bare-metal: expected "${BENCH_CHECKSUM}" and power-off, got ${result}: ${JSON.stringify(screen)}`)
+    throw new Error(`${program}: expected "${BENCH_CHECKSUM}" and power-off, got ${result}: ${JSON.stringify(screen)}`)
   }
   return { instructions: machine.cpu.instret, seconds }
 }
@@ -45,6 +47,9 @@ function linux(): Result | undefined {
   const disk = new FileStorage(rootfs.pathname, { readOnly: true })
   const machine = new Machine({
     clock: 'virtual',
+    // A fixed date and random seed: every run executes the same instructions.
+    startTime: Date.UTC(2026, 0, 1),
+    rngSeed: new Uint8Array(64).fill(42),
     ramSize: 256 * 1024 * 1024,
     bootargs: 'earlycon=uart8250,mmio,0x10000000,1000000 console=ttyS0 root=/dev/vda rw',
     disk: new SnapshotStorage(disk),
@@ -62,7 +67,11 @@ function linux(): Result | undefined {
   return { instructions: machine.cpu.instret, seconds }
 }
 
-const benchmarks: Record<string, () => Result | undefined> = { 'bare-metal': bareMetal, linux }
+const benchmarks: Record<string, () => Result | undefined> = {
+  'bare-metal': () => bareMetal(),
+  compressed: () => bareMetal('bench-c'),
+  linux,
+}
 const selected = process.argv.slice(2)
 for (const name of selected.length ? selected : Object.keys(benchmarks)) {
   const bench = benchmarks[name]

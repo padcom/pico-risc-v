@@ -9,6 +9,7 @@ use crate::hart::{Hart, Result, Trap};
 // the hart's state (devices raise interrupts and stop the CPU from inside
 // these calls, and the virtual clock reads instret), so nothing is kept in
 // registers across them.
+#[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
     /// A device read; returns the (unsigned) value, or -1 on a bus error.
@@ -17,6 +18,20 @@ unsafe extern "C" {
     fn bus_write(hart: *mut Hart, addr: u32, width: u32, value: u32) -> u32;
     /// The `time` CSR's source (mtime).
     fn read_time(hart: *mut Hart) -> f64;
+}
+
+// Native builds (cargo test) have no JavaScript side: there are no devices.
+#[cfg(not(target_arch = "wasm32"))]
+unsafe fn bus_read(_: *mut Hart, _: u32, _: u32) -> f64 {
+    -1.0
+}
+#[cfg(not(target_arch = "wasm32"))]
+unsafe fn bus_write(_: *mut Hart, _: u32, _: u32, _: u32) -> u32 {
+    1
+}
+#[cfg(not(target_arch = "wasm32"))]
+unsafe fn read_time(_: *mut Hart) -> f64 {
+    0.0
 }
 
 impl Hart {
@@ -84,10 +99,38 @@ impl Hart {
     // that straddles a page boundary is split, each part translated on its
     // own (both pages must be accessible).
 
+    /// Fetch the instruction at `pc`, as raw bits: if the low two are 11, a
+    /// 32-bit instruction, otherwise a compressed one in the low 16 bits (the
+    /// upper half is then whatever follows it).
     #[inline(always)]
     pub(crate) fn fetch(&mut self, pc: u32) -> Result<u32> {
         let pa = if self.translate_fetch { self.translate(pc, Access::Fetch, self.priv_)? } else { pc };
-        self.phys_read(pa, 4).ok_or(Trap::new(INSTRUCTION_ACCESS_FAULT, pc))
+        // Fast path: four bytes in RAM, on one page.
+        if pc & 0xfff != 0xffe {
+            if let Some(offset) = self.ram_offset(pa, 4) {
+                // SAFETY: ram_offset checked the access is inside the RAM block.
+                return Ok(unsafe { self.ram.add(offset).cast::<u32>().read_unaligned() });
+            }
+        }
+        self.fetch_halves(pc, pa)
+    }
+
+    /// Fetch in 16-bit halves: at the end of RAM or of a page (a 32-bit
+    /// instruction's upper half is translated on its own), or from a device.
+    #[inline(never)]
+    fn fetch_halves(&mut self, pc: u32, pa: u32) -> Result<u32> {
+        let low = self.phys_read(pa, 2).ok_or(Trap::new(INSTRUCTION_ACCESS_FAULT, pc))?;
+        if low & 3 != 3 {
+            return Ok(low);
+        }
+        let pc2 = pc.wrapping_add(2);
+        let pa2 = if self.translate_fetch && pc & 0xfff == 0xffe {
+            self.translate(pc2, Access::Fetch, self.priv_)?
+        } else {
+            pa.wrapping_add(2)
+        };
+        let high = self.phys_read(pa2, 2).ok_or(Trap::new(INSTRUCTION_ACCESS_FAULT, pc2))?;
+        Ok(high << 16 | low)
     }
 
     #[inline(always)]

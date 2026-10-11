@@ -153,8 +153,10 @@ shows what's available.
 
 **mmu:** the configuration is Buildroot's `configs/qemu_riscv32_virt_defconfig`
 plus `linux/mmu/buildroot.fragment`. The fragment sets the CPU features the
-emulator has (RV32IMA, no FPU, no compressed instructions), the root
-filesystem, OpenSBI and the packages. Kernel options go in
+emulator has (RV32IMAC: compressed instructions, no FPU), the root
+filesystem, OpenSBI and the packages. Changing the CPU features or the
+toolchain makes the next build start over from scratch (`linux/build.sh`
+notices), since everything has to be recompiled for them. Kernel options go in
 `linux/mmu/linux.fragment`, on top of the kernel's `rv32_defconfig`.
 
 **nommu:** the configs come from `vendor/mini-rv32ima/configs/`. To change one, copy it

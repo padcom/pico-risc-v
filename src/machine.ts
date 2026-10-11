@@ -61,6 +61,22 @@ export interface MachineOptions {
   clock?: 'realtime' | 'virtual'
   /** Virtual clock speed: instructions per microsecond (default 10, i.e. a 10 MIPS machine). */
   instructionsPerMicrosecond?: number
+  /**
+   * With the virtual clock, the time of day (RTC) at power-on, in ms since
+   * 1970; it then advances with virtual time. Defaults to the host's time at
+   * power-on; a fixed value makes runs exactly reproducible. (With the
+   * realtime clock, the RTC is the host's time.)
+   */
+  startTime?: number
+  /**
+   * Random bytes for the OS to seed its random number generator with, passed
+   * like real boot firmware does (device tree /chosen/rng-seed). Without them
+   * Linux can take minutes to have randomness ready (the emulated CPU's
+   * perfectly regular timing yields none), and until then programs that need
+   * it, such as TLS in curl, block. Defaults to 64 fresh random bytes on every
+   * power-on; fix it (with startTime) to make runs exactly reproducible.
+   */
+  rngSeed?: Uint8Array
   /** Kernel command line placed in the device tree's /chosen node. */
   bootargs?: string
 }
@@ -100,7 +116,7 @@ export class Machine {
   readonly clint: Clint
   readonly syscon: Syscon
   readonly plic: Plic
-  readonly rtc = new GoldfishRtc()
+  readonly rtc = new GoldfishRtc(() => this.timeOfDay())
   readonly disk: VirtioBlock | undefined
   readonly nic: VirtioNet | undefined
   private readonly network: NetworkBackend | undefined
@@ -110,6 +126,12 @@ export class Machine {
   private readonly virtual: boolean
   private readonly ipu: number
   private skippedMicros = 0
+  private readonly startTime: number | undefined
+  private readonly fixedRngSeed: Uint8Array | undefined
+  /** This power-on's rng-seed. */
+  private rngSeed: Uint8Array
+  /** Time of day at power-on (ms since 1970), for the virtual clock. */
+  private powerOnTime = 0
   private readonly epoch = performance.now()
   private exit: 'poweroff' | 'reboot' | undefined
   private images: { offset: number; data: Uint8Array }[] = []
@@ -120,6 +142,8 @@ export class Machine {
     output,
     clock = 'realtime',
     instructionsPerMicrosecond = 10,
+    startTime,
+    rngSeed,
     bootargs = DEFAULT_BOOTARGS,
     disk,
     network,
@@ -128,6 +152,9 @@ export class Machine {
     this.bootargs = bootargs
     this.virtual = clock === 'virtual'
     this.ipu = instructionsPerMicrosecond
+    this.startTime = startTime
+    this.fixedRngSeed = rngSeed
+    this.rngSeed = this.newRngSeed()
 
     this.terminal = new Terminal(output)
     // RAM lives inside the CPU core (fast); devices reach it through the bus.
@@ -189,6 +216,7 @@ export class Machine {
   /** Reset everything and start the last booted image(s) again. */
   reboot(): void {
     if (!this.images.length) throw new Error('Nothing to reboot: call boot() first')
+    this.rngSeed = this.newRngSeed()
     const dtb = this.deviceTree()
     const dtbOffset = this.dtbOffset(dtb.length)
     // OpenSBI's fw_dynamic_info, if any, goes right below the device tree.
@@ -206,6 +234,7 @@ export class Machine {
 
     this.exit = undefined
     this.skippedMicros = 0
+    this.powerOnTime = this.startTime ?? Date.now()
     this.cpu.reset(MemoryMap.RAM)
     this.clint.reset()
     this.plic.reset()
@@ -275,6 +304,15 @@ export class Machine {
     return Math.floor((performance.now() - this.epoch) * 1000)
   }
 
+  private newRngSeed(): Uint8Array {
+    return this.fixedRngSeed ?? crypto.getRandomValues(new Uint8Array(64))
+  }
+
+  /** What the RTC reports: ms since 1970. */
+  private timeOfDay(): number {
+    return this.virtual ? this.powerOnTime + this.now() / 1000 : Date.now()
+  }
+
   /**
    * The CPU sleeps in WFI: see whether it can be woken without waiting in the
    * real world. The timer line is only re-evaluated between slices, so a
@@ -311,12 +349,16 @@ export class Machine {
         '#address-cells': 2,
         '#size-cells': 2,
         compatible: 'riscv-minimal-nommu',
-        model: 'risc-emulator (RV32IMA)',
+        model: 'risc-emulator (RV32IMAC)',
       },
       children: {
         chosen: {
           // stdout-path tells firmware (OpenSBI) where its console is
-          props: { bootargs: this.bootargs, 'stdout-path': `/soc/uart@${hex(MemoryMap.TERMINAL)}` },
+          props: {
+            bootargs: this.bootargs,
+            'stdout-path': `/soc/uart@${hex(MemoryMap.TERMINAL)}`,
+            'rng-seed': this.rngSeed,
+          },
         },
         [`memory@${hex(MemoryMap.RAM)}`]: {
           props: { device_type: 'memory', reg: reg(MemoryMap.RAM, memSize) },
@@ -333,9 +375,9 @@ export class Machine {
                 compatible: 'riscv',
                 // Old-style ISA string, plus the newer binding that kernels
                 // built without CONFIG_RISCV_ISA_FALLBACK (6.x) insist on.
-                'riscv,isa': 'rv32ima',
+                'riscv,isa': 'rv32imac',
                 'riscv,isa-base': 'rv32i',
-                'riscv,isa-extensions': ['i', 'm', 'a', 'zicsr', 'zifencei', 'zicntr'],
+                'riscv,isa-extensions': ['i', 'm', 'a', 'c', 'zicsr', 'zifencei', 'zicntr'],
                 'mmu-type': 'riscv,sv32',
               },
               children: {

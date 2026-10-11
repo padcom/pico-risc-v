@@ -35,7 +35,7 @@ if grep -q '^BR2_BINFMT_FLAT=y' "$BR2_CONFIG"; then
   # shellcheck disable=SC2054 # the commas belong to -Wl,
   LDFLAGS=(-Wl,-elf2flt="-r -s $STACK_SIZE" -Wl,--gc-sections)
 else
-  CFLAGS=(-march=rv32ima -mabi=ilp32 -O2 -Wall)
+  CFLAGS=(-march=rv32imac -mabi=ilp32 -O2 -Wall)
   LDFLAGS=()
 fi
 

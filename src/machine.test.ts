@@ -136,6 +136,19 @@ describe('Machine.run with the virtual clock', () => {
     ])
     expect(m.run(1_000_000)).toBe('poweroff')
   })
+
+  it('the RTC starts at startTime and advances with virtual time', () => {
+    const start = Date.UTC(2030, 0, 1)
+    const m = new Machine({ ramSize: 1024 * 1024, clock: 'virtual', startTime: start })
+    m.boot(toBytes([a.jal(0, 0)])) // spin
+    const timeOfDay = () => {
+      const low = m.bus.read32(MemoryMap.RTC) // latches the high half
+      return Number((BigInt(m.bus.read32(MemoryMap.RTC + 4)) << 32n) | BigInt(low)) / 1e6 // ms
+    }
+    expect(timeOfDay()).toBe(start)
+    m.run(10_000_000) // 1 s at 10 instructions per µs
+    expect(timeOfDay()).toBe(start + 1000)
+  })
 })
 
 describe('Syscon', () => {
@@ -150,6 +163,25 @@ describe('Syscon', () => {
 })
 
 describe('Device tree', () => {
+  it('passes the OS a random seed in /chosen/rng-seed: fresh on every power-on, unless fixed', () => {
+    const seedOf = (m: Machine) => {
+      const dtb = m.deviceTree()
+      const text = new TextDecoder('latin1').decode(dtb)
+      expect(text).toContain('rng-seed')
+      return dtb
+    }
+    const m = new Machine({ ramSize: 1024 * 1024 })
+    m.boot([0x73, 0, 0, 0])
+    const first = seedOf(m)
+    m.reboot()
+    expect(seedOf(m)).not.toEqual(first)
+
+    const fixed = new Uint8Array(64).fill(0xa5)
+    const reproducible = new Machine({ ramSize: 1024 * 1024, rngSeed: fixed })
+    const dtb = seedOf(reproducible)
+    expect(Buffer.from(dtb).includes(Buffer.from(fixed))).toBe(true)
+  })
+
   it('is a valid FDT that describes the RAM below itself', () => {
     const m = new Machine({ ramSize: 8 * 1024 * 1024, bootargs: 'console=ttyS0 quiet' })
     const dtb = m.deviceTree()
@@ -209,5 +241,20 @@ describe('C programs compiled with GNU toolchain', () => {
     expect(screen()).toBe(MATMUL_OUTPUT)
     expect(result).toBe('poweroff')
     expect(machine.cpu.instret).toBeLessThan(soft / 2)
+  })
+
+  it('the benchmark built with compressed instructions computes the same as when built without', () => {
+    // 'checksum 991869f2' is also what the same C code prints compiled for the host.
+    const run = (program: string) => {
+      let screen = ''
+      const machine = new Machine({ clock: 'virtual', output: b => (screen += String.fromCharCode(b)) })
+      machine.boot(readFileSync(new URL(`../examples/build/${program}.bin`, import.meta.url)))
+      return { result: machine.run(500_000_000), screen, instret: machine.cpu.instret }
+    }
+    const plain = run('bench')
+    const compressed = run('bench-c')
+    expect(compressed.result).toBe('poweroff')
+    expect(compressed.screen).toBe('checksum 991869f2\n')
+    expect(compressed.screen).toBe(plain.screen)
   })
 })

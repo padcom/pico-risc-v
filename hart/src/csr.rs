@@ -89,7 +89,6 @@ pub const PRIV_S: u32 = 1;
 pub const PRIV_M: u32 = 3;
 
 /// Exception causes.
-pub const INSTRUCTION_ADDRESS_MISALIGNED: u32 = 0;
 pub const INSTRUCTION_ACCESS_FAULT: u32 = 1;
 pub const ILLEGAL_INSTRUCTION: u32 = 2;
 pub const BREAKPOINT: u32 = 3;

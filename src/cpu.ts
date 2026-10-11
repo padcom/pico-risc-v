@@ -64,7 +64,7 @@ function coreModule(): WebAssembly.Module {
 }
 
 /**
- * RV32IMA hart with machine, supervisor and user privilege modes (Zicsr,
+ * RV32IMAC hart with machine, supervisor and user privilege modes (Zicsr,
  * Zifencei) and Sv32 virtual memory.
  *
  * The instruction set is implemented in Rust (hart/), compiled to WebAssembly;

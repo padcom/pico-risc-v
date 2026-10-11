@@ -1,4 +1,4 @@
-//! RV32IMA hart with machine, supervisor and user privilege modes (Zicsr,
+//! RV32IMAC hart with machine, supervisor and user privilege modes (Zicsr,
 //! Zifencei) and Sv32 virtual memory.
 //!
 //! Exceptions and interrupts are taken architecturally: into M-mode
@@ -8,6 +8,7 @@
 use crate::csr::*;
 use crate::memory::Access;
 use crate::mmu::{TLB_EMPTY, TLB_SIZE};
+use crate::rvc;
 
 /// A synchronous exception: aborts the instruction, then the hart enters the
 /// trap handler. `tval` is the value the spec puts in mtval/stval.
@@ -35,8 +36,8 @@ pub const WFI_STALL: u32 = 1;
 pub const STOPPED_AT_BREAKPOINT: u32 = 2;
 pub const STOPPED: u32 = 3;
 
-/// misa: MXL=1 (32-bit), extensions A, I, M, S, U.
-const MISA_VALUE: u32 = 1 << 30 | 1 << 0 | 1 << 8 | 1 << 12 | 1 << 18 | 1 << 20;
+/// misa: MXL=1 (32-bit), extensions A, C, I, M, S, U.
+const MISA_VALUE: u32 = 1 << 30 | 1 << 0 | 1 << 2 | 1 << 8 | 1 << 12 | 1 << 18 | 1 << 20;
 
 const MSTATUS_WRITABLE: u32 = MSTATUS_SIE | MSTATUS_MIE | MSTATUS_SPIE | MSTATUS_MPIE | MSTATUS_SPP
     | MSTATUS_MPP | MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_TVM | MSTATUS_TW | MSTATUS_TSR;
@@ -230,7 +231,18 @@ impl Hart {
 
         let pc = self.pc;
         let result = match self.fetch(pc) {
-            Ok(inst) => self.execute(inst, pc),
+            Ok(word) => 'run: {
+                // A compressed instruction runs as its 32-bit equivalent (0: illegal).
+                let (inst, length) = if word & 3 == 3 {
+                    (word, 4)
+                } else {
+                    match rvc::expanded(word & 0xffff) {
+                        0 => break 'run Err(illegal(word & 0xffff)),
+                        inst => (inst, 2),
+                    }
+                };
+                self.execute(inst, pc, pc.wrapping_add(length))
+            }
             Err(trap) => Err(trap),
         };
         match result {
@@ -308,9 +320,14 @@ impl Hart {
         self.translate_data = paging && self.data_priv != PRIV_M;
     }
 
-    /// Execute one instruction; returns the next pc.
+    /// Execute one instruction (a compressed one expanded); returns the next
+    /// pc, `next_pc` unless it jumps.
+    ///
+    /// With the C extension, instructions only need 2-byte alignment, and no
+    /// jump can produce an odd target (JALR clears bit 0, offsets are even),
+    /// so there are no instruction-address-misaligned exceptions.
     #[inline(always)]
-    fn execute(&mut self, inst: u32, pc: u32) -> Result<u32> {
+    fn execute(&mut self, inst: u32, pc: u32, mut next_pc: u32) -> Result<u32> {
         let opcode = inst & 0x7f;
         let rd = ((inst >> 7) & 0x1f) as usize;
         let funct3 = (inst >> 12) & 0x7;
@@ -318,20 +335,14 @@ impl Hart {
         let rs2 = ((inst >> 20) & 0x1f) as usize;
         let funct7 = inst >> 25;
 
-        let mut next_pc = pc.wrapping_add(4);
-
         match opcode {
             LUI => self.x[rd] = (inst & 0xfffff000) as i32,
 
             AUIPC => self.x[rd] = pc.wrapping_add(inst & 0xfffff000) as i32,
 
             JAL => {
-                let target = pc.wrapping_add(imm_j(inst) as u32);
-                if target & 3 != 0 {
-                    return Err(Trap::new(INSTRUCTION_ADDRESS_MISALIGNED, target));
-                }
                 self.x[rd] = next_pc as i32;
-                next_pc = target;
+                next_pc = pc.wrapping_add(imm_j(inst) as u32);
             }
 
             JALR => {
@@ -339,9 +350,6 @@ impl Hart {
                     return Err(illegal(inst));
                 }
                 let target = (self.x[rs1].wrapping_add(imm_i(inst)) & !1) as u32;
-                if target & 3 != 0 {
-                    return Err(Trap::new(INSTRUCTION_ADDRESS_MISALIGNED, target));
-                }
                 self.x[rd] = next_pc as i32;
                 next_pc = target;
             }
@@ -359,11 +367,7 @@ impl Hart {
                     _ => return Err(illegal(inst)),
                 };
                 if taken {
-                    let target = pc.wrapping_add(imm_b(inst) as u32);
-                    if target & 3 != 0 {
-                        return Err(Trap::new(INSTRUCTION_ADDRESS_MISALIGNED, target));
-                    }
-                    next_pc = target;
+                    next_pc = pc.wrapping_add(imm_b(inst) as u32);
                 }
             }
 
@@ -622,7 +626,7 @@ impl Hart {
             MTVEC => self.mtvec = tvec(value),
             MCOUNTEREN => self.mcounteren = value & COUNTEREN_WRITABLE,
             MSCRATCH => self.mscratch = value,
-            MEPC => self.mepc = value & !3,
+            MEPC => self.mepc = value & !1,
             MCAUSE => self.mcause = value,
             MTVAL => self.mtval = value,
 
@@ -638,7 +642,7 @@ impl Hart {
             STVEC => self.stvec = tvec(value),
             SCOUNTEREN => self.scounteren = value & COUNTEREN_WRITABLE,
             SSCRATCH => self.sscratch = value,
-            SEPC => self.sepc = value & !3,
+            SEPC => self.sepc = value & !1,
             SCAUSE => self.scause = value,
             STVAL => self.stval = value,
             SATP => {

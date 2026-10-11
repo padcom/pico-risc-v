@@ -12,6 +12,7 @@ mod csr;
 mod hart;
 mod memory;
 mod mmu;
+mod rvc;
 
 use core::cell::UnsafeCell;
 use hart::Hart;
@@ -35,6 +36,7 @@ const HAS_TIME: u32 = 2;
 #[unsafe(no_mangle)]
 pub extern "C" fn init(reset_vector: u32, flags: u32) {
     let h = hart();
+    rvc::fill_table();
     h.reset(reset_vector);
     h.break_on_ebreak = flags & BREAK_ON_EBREAK != 0;
     h.has_time = flags & HAS_TIME != 0;

@@ -52,10 +52,14 @@ tty=() # (expanded below in a way that also works with macOS's bash 3.2 and set 
 [ -t 0 ] && [ -t 1 ] && tty=(--interactive --tty) # e.g. for linux-menuconfig
 
 step "Running linux/build.sh in the container"
-# :z relabels the bind mount on SELinux hosts (Fedora, ...); it's a no-op elsewhere.
+# No SELinux separation (the podman machine, Fedora, ... enforce it): this is
+# our own build tool, and with it, files in the build volume can end up with
+# labels a later container may not touch (seen as "Permission denied" for root).
+# It also leaves the project directory's labels alone.
 exec podman run --rm ${tty[@]+"${tty[@]}"} \
+  --security-opt label=disable \
   --volume "$VOLUME:/build" \
-  --volume "$ROOT:/work:z" \
+  --volume "$ROOT:/work" \
   --workdir /work \
   --env BUILD_DIR=/build \
   --env FLAVOR="$FLAVOR" \

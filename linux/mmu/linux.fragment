@@ -1,12 +1,11 @@
 # Kernel config fragment for the mmu flavor, applied on top of the kernel's
 # rv32_defconfig (see linux/mmu/buildroot.fragment).
 
-# Match the emulated CPU: RV32IMA, no FPU, no compressed or vector instructions.
-# CONFIG_RISCV_ISA_C is not set
+# Match the emulated CPU: RV32IMAC, no FPU or vector instructions.
+CONFIG_RISCV_ISA_C=y
 # CONFIG_FPU is not set
 # CONFIG_RISCV_ISA_V is not set
-# UEFI support forces compressed instructions on (it selects RISCV_ISA_C), and
-# we boot through OpenSBI anyway.
+# No UEFI: we boot through OpenSBI.
 # CONFIG_EFI is not set
 
 # Everything is built in (no module loading). That turns every "m" in

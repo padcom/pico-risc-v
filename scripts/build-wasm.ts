@@ -3,6 +3,8 @@
  * loads. Cargo only rebuilds what changed, so this is cheap to run often;
  * build/hart.wasm is only replaced when its contents change.
  *
+ * `node scripts/build-wasm.ts test` runs the core's own (Rust) tests instead.
+ *
  * Needs Rust with the wasm32-unknown-unknown target:
  *   brew install rustup && rustup default stable && rustup target add wasm32-unknown-unknown
  * (or the installer from https://rustup.rs). cargo is found on PATH, in
@@ -17,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const output = join(root, 'build', 'hart.wasm')
 
-export function buildWasm(): void {
+function cargo(...args: string[]): void {
   const extraPath = [join(homedir(), '.cargo', 'bin'), '/opt/homebrew/opt/rustup/bin', '/usr/local/opt/rustup/bin']
   const PATH = [process.env.PATH ?? '', ...extraPath].join(delimiter)
   const cargo = PATH.split(delimiter).map(dir => join(dir, 'cargo')).find(existsSync)
@@ -27,15 +29,21 @@ export function buildWasm(): void {
         '  brew install rustup && rustup default stable && rustup target add wasm32-unknown-unknown',
     )
   }
-  execFileSync(
-    cargo,
-    ['build', '--quiet', '--release', '--target', 'wasm32-unknown-unknown', '--manifest-path', join(root, 'hart', 'Cargo.toml')],
-    { stdio: 'inherit', env: { ...process.env, PATH } },
-  )
+  execFileSync(cargo, [...args, '--quiet', '--manifest-path', join(root, 'hart', 'Cargo.toml')], {
+    stdio: 'inherit',
+    env: { ...process.env, PATH },
+  })
+}
+
+export function buildWasm(): void {
+  cargo('build', '--release', '--target', 'wasm32-unknown-unknown')
   const wasm = readFileSync(join(root, 'hart', 'target', 'wasm32-unknown-unknown', 'release', 'hart.wasm'))
   if (existsSync(output) && readFileSync(output).equals(wasm)) return
   mkdirSync(join(root, 'build'), { recursive: true })
   writeFileSync(output, wasm)
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) buildWasm()
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  if (process.argv[2] === 'test') cargo('test')
+  else buildWasm()
+}

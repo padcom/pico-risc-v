@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { asm as a, toBytes } from './asm.js'
+import { asm as a, toBytes, toCode } from './asm.js'
 import { CPU } from './cpu.js'
 import { Csr, MIP_MTIP, MSTATUS_MIE, MSTATUS_MPIE, MSTATUS_MPP, Priv } from './csr.js'
 import { RAM } from './ram.js'
@@ -258,11 +258,16 @@ describe('Zicsr', () => {
     expect(cpu.mscratch).toBe(0x50)
   })
 
-  it('misa reports RV32 with I, M, A and U', () => {
+  it('misa reports RV32 with I, M, A, C, S and U', () => {
     const { cpu } = run([a.csrrs(1, Csr.misa, 0), a.ebreak()])
     const misa = cpu.x[1]! >>> 0
     expect(misa >>> 30).toBe(1)
-    for (const ext of 'IMAU') expect(misa & (1 << (ext.charCodeAt(0) - 65))).not.toBe(0)
+    for (const ext of 'IMACSU') expect(misa & (1 << (ext.charCodeAt(0) - 65))).not.toBe(0)
+  })
+
+  it('mepc keeps bit 1 (instructions are 2-byte aligned)', () => {
+    const { cpu } = run([a.addi(1, 0, 7), a.csrrw(0, Csr.mepc, 1), a.csrrs(2, Csr.mepc, 0), a.ebreak()])
+    expect(cpu.x[2]).toBe(6)
   })
 
   it('cycle / instret count retired instructions', () => {
@@ -319,9 +324,11 @@ describe('traps', () => {
     expect([store.mcause, store.mtval]).toEqual([TrapCause.StoreAccessFault, 0x80000000])
   })
 
-  it('misaligned jump target', () => {
-    const { cpu } = runTrapping([a.addi(1, 0, 6), a.jalr(0, 1, 0)])
-    expect([cpu.mcause, cpu.mtval]).toEqual([TrapCause.InstructionAddressMisaligned, 6])
+  it('an illegal compressed instruction reports its 16 bits in mtval', () => {
+    const { cpu } = runTrapping([0x6081]) // C.LUI with immediate 0 (reserved)
+    expect([cpu.mcause, cpu.mepc, cpu.mtval]).toEqual([TrapCause.IllegalInstruction, 0, 0x6081])
+    const zero = runTrapping([0]).cpu // all zeros is illegal by design
+    expect([zero.mcause, zero.mtval]).toEqual([TrapCause.IllegalInstruction, 0])
   })
 
   it('misaligned AMO', () => {
@@ -425,3 +432,43 @@ describe('interrupts', () => {
     expect(cpu.x[1]).toBe(7)
   })
 })
+
+describe('compressed instructions (C extension)', () => {
+  // A few compressed encodings (from GNU as; the core's own tests cover all of them).
+  const C_LI_A0_5 = 0x4515 // c.li a0, 5
+  const C_ADDI_A0_1 = 0x0505 // c.addi a0, 1
+  const C_MV_A1_A0 = 0x85aa // c.mv a1, a0
+  const C_NOP = 0x0001
+  const C_EBREAK = 0x9002
+
+  function runCode(insts: number[]) {
+    const ram = new RAM(4096)
+    ram.load(0, toCode(insts))
+    const cpu = new CPU(ram, { breakOnEbreak: true })
+    return { cpu, stop: cpu.run(100) }
+  }
+
+  it('mix with 32-bit instructions, which may then sit at 2-byte aligned addresses', () => {
+    const { cpu, stop } = runCode([C_LI_A0_5, a.addi(12, 0, 7), C_ADDI_A0_1, C_MV_A1_A0, C_EBREAK])
+    expect(stop).toBe('breakpoint')
+    expect([cpu.x[10], cpu.x[11], cpu.x[12]]).toEqual([6, 6, 7])
+    expect(cpu.pc).toBe(10) // 2 + 4 + 2 + 2 bytes in
+    expect(cpu.instret).toBe(4)
+  })
+
+  it('jumps may target 2-byte aligned addresses (no misaligned-target exceptions)', () => {
+    const { cpu, stop } = runCode([a.addi(1, 0, 10), a.jalr(0, 1, 0), C_NOP, C_EBREAK])
+    expect(stop).toBe('breakpoint')
+    expect(cpu.pc).toBe(10)
+  })
+
+  it('c.jalr links to the next 2-byte instruction', () => {
+    const ram = new RAM(4096)
+    ram.load(0, toCode([0x9582, C_EBREAK, C_NOP, C_EBREAK])) // c.jalr a1; c.ebreak; c.nop; c.ebreak
+    const cpu = new CPU(ram, { breakOnEbreak: true })
+    cpu.x[11] = 6
+    expect(cpu.run(10)).toBe('breakpoint')
+    expect([cpu.pc, cpu.x[1]]).toEqual([6, 2])
+  })
+})
+
