@@ -12,8 +12,7 @@ import { VirtioBlock } from './virtio-blk.js'
 import { type NetworkBackend, VirtioNet } from './virtio-net.js'
 
 /**
- * Physical memory map. Compatible with mini-rv32ima, so its Linux kernel
- * images boot unmodified (and close to QEMU's `virt` board):
+ * Physical memory map (close to QEMU's `virt` board):
  *
  *   0x0010_1000 - 0x0010_1fff   RTC (Goldfish, host time of day), PLIC source 3
  *   0x0c00_0000 - 0x0fff_ffff   PLIC (external interrupts)
@@ -42,8 +41,6 @@ export const TIMEBASE_HZ = 1_000_000
 export const DEFAULT_BOOTARGS = 'earlycon=uart8250,mmio,0x10000000,1000000 console=ttyS0'
 
 export interface MachineOptions {
-  /** Register width: RV32 (default) or RV64. */
-  xlen?: 32 | 64
   /** RAM size in bytes (default 64 MiB). */
   ramSize?: number
   /** Disk attached as a virtio block device (/dev/vda in Linux). */
@@ -140,7 +137,6 @@ export class Machine {
   private next: BootOptions['next']
 
   constructor({
-    xlen = 32,
     ramSize = 64 * 1024 * 1024,
     output,
     clock = 'realtime',
@@ -162,7 +158,6 @@ export class Machine {
     this.terminal = new Terminal(output)
     // RAM lives inside the CPU core (fast); devices reach it through the bus.
     this.cpu = new CPU(this.bus, {
-      xlen,
       resetVector: MemoryMap.RAM,
       readTime: () => this.clint.mtime,
       ram: { base: MemoryMap.RAM, size: ramSize },
@@ -248,7 +243,7 @@ export class Machine {
     this.cpu.setRegister(11, MemoryMap.RAM + dtbOffset) // a1: device tree
     if (this.next) {
       // struct fw_dynamic_info (OpenSBI include/sbi/fw_dynamic.h), passed in
-      // a2: `unsigned long` fields, XLEN bits each (little-endian, < 2^32 here).
+      // a2: `unsigned long` fields, 64 bits each (little-endian, < 2^32 here).
       const info = [
         0x4942534f, // magic "OSBI"
         2, // version
@@ -257,8 +252,7 @@ export class Machine {
         0, // options
         0, // boot_hart
       ]
-      const size = this.cpu.xlen / 8
-      info.forEach((value, i) => this.ram.write32(infoOffset + i * size, value))
+      info.forEach((value, i) => this.ram.write32(infoOffset + i * 8, value))
       this.cpu.setRegister(12, MemoryMap.RAM + infoOffset)
     }
   }
@@ -345,7 +339,6 @@ export class Machine {
   }
 
   private describe(memSize: number): FdtNode {
-    const xlen = this.cpu.xlen
     const reg = (addr: number, size: number) => [0, addr, 0, size] // 2 address + 2 size cells
     const CPU_PHANDLE = 1
     const INTC_PHANDLE = 2
@@ -355,8 +348,8 @@ export class Machine {
       props: {
         '#address-cells': 2,
         '#size-cells': 2,
-        compatible: 'riscv-minimal-nommu',
-        model: `risc-emulator (RV${xlen}GC)`,
+        compatible: 'risc-emulator',
+        model: 'risc-emulator (RV64GC)',
       },
       children: {
         chosen: {
@@ -382,10 +375,10 @@ export class Machine {
                 compatible: 'riscv',
                 // Old-style ISA string, plus the newer binding that kernels
                 // built without CONFIG_RISCV_ISA_FALLBACK (6.x) insist on.
-                'riscv,isa': `rv${xlen}imafdc`,
-                'riscv,isa-base': `rv${xlen}i`,
+                'riscv,isa': 'rv64imafdc',
+                'riscv,isa-base': 'rv64i',
                 'riscv,isa-extensions': ['i', 'm', 'a', 'f', 'd', 'c', 'zicsr', 'zifencei', 'zicntr'],
-                'mmu-type': xlen === 64 ? 'riscv,sv39' : 'riscv,sv32',
+                'mmu-type': 'riscv,sv39',
               },
               children: {
                 'interrupt-controller': {
@@ -408,9 +401,7 @@ export class Machine {
               props: {
                 'clock-frequency': 0x1000000,
                 reg: reg(MemoryMap.TERMINAL, Terminal.SIZE),
-                // Linux picks the first (as mini-rv32ima's kernel expects);
-                // OpenSBI's console driver knows the second.
-                compatible: ['ns16850', 'ns16550a'],
+                compatible: 'ns16550a',
               },
             },
             poweroff: {

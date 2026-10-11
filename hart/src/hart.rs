@@ -1,12 +1,5 @@
-//! RV32GC / RV64GC hart (IMAFDC, Zicsr, Zifencei) with machine, supervisor
-//! and user privilege modes and virtual memory (Sv32 / Sv39). Floating point
-//! is in fpu.rs.
-//!
-//! The register width (XLEN) is chosen when the hart is set up. The code is
-//! written once, generic over it (`X64`), and compiled for each, so neither
-//! pays for the other at run time. Registers are 64 bits wide; on RV32 they
-//! always hold sign-extended 32-bit values, which is how RV64 itself treats
-//! 32-bit values, so most instructions need no special case.
+//! RV64GC hart (IMAFDC, Zicsr, Zifencei) with machine, supervisor and user
+//! privilege modes and virtual memory (Sv39). Floating point is in fpu.rs.
 //!
 //! Exceptions and interrupts are taken architecturally: into M-mode
 //! (mepc/mcause/mtval, mtvec), or into S-mode when delegated through
@@ -43,15 +36,15 @@ pub const WFI_STALL: u32 = 1;
 pub const STOPPED_AT_BREAKPOINT: u32 = 2;
 pub const STOPPED: u32 = 3;
 
-/// misa extensions: A, C, D, F, I, M, S, U (MXL, the XLEN, goes on top).
-const MISA_EXTENSIONS: u64 = 1 << 0 | 1 << 2 | 1 << 3 | 1 << 5 | 1 << 8 | 1 << 12 | 1 << 18 | 1 << 20;
+/// misa: MXL = 2 (64-bit), extensions A, C, D, F, I, M, S, U.
+const MISA_VALUE: u64 = 2 << 62 | 1 << 0 | 1 << 2 | 1 << 3 | 1 << 5 | 1 << 8 | 1 << 12 | 1 << 18 | 1 << 20;
 
 const MSTATUS_WRITABLE: u64 = MSTATUS_SIE | MSTATUS_MIE | MSTATUS_SPIE | MSTATUS_MPIE | MSTATUS_SPP
     | MSTATUS_MPP | MSTATUS_FS | MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_TVM | MSTATUS_TW
     | MSTATUS_TSR;
 /// The part of mstatus writable through sstatus...
 const SSTATUS_WRITABLE: u64 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_FS | MSTATUS_SUM | MSTATUS_MXR;
-/// ...and visible through it (on RV64 also UXL; SD is added when read).
+/// ...and visible through it (also UXL; SD is added when read).
 const SSTATUS_VISIBLE: u64 = SSTATUS_WRITABLE | 3 << 32;
 const MIE_WRITABLE: u64 = MIP_SSIP | MIP_MSIP | MIP_STIP | MIP_MTIP | MIP_SEIP | MIP_MEIP;
 /// mip bits software may write; the machine ones are driven by devices (CLINT).
@@ -97,13 +90,10 @@ const SFENCE_VMA: u32 = 0x12000073; // funct7 0001001, rs2/rs1 vary
 
 #[repr(C)]
 pub struct Hart {
-    /// x0..x31; x0 is re-zeroed after every instruction. On RV32 the values
-    /// are sign-extended from 32 bits.
+    /// x0..x31; x0 is re-zeroed after every instruction.
     pub x: [u64; 32],
     pub pc: u64,
     pub priv_: u32,
-    /// RV64 (else RV32); set once, before running.
-    pub xlen64: bool,
     /// f0..f31 (single-precision values NaN-boxed), and fcsr's two fields.
     pub f: [u64; 32],
     pub fflags: u32,
@@ -151,8 +141,6 @@ pub struct Hart {
     pub(crate) translate_data: bool,
     pub(crate) data_priv: u32,
     pub(crate) paging: Paging,
-    /// Addresses are XLEN bits wide.
-    pub(crate) address_mask: u64,
     /// Physical address reserved by LR.
     reservation: u64,
 
@@ -172,7 +160,6 @@ impl Hart {
             x: [0; 32],
             pc: 0,
             priv_: PRIV_M,
-            xlen64: false,
             f: [0; 32],
             fflags: 0,
             frm: 0,
@@ -205,7 +192,6 @@ impl Hart {
             translate_data: false,
             data_priv: PRIV_M,
             paging: Paging::Bare,
-            address_mask: 0xffff_ffff,
             reservation: NO_RESERVATION,
             ram: core::ptr::null_mut(),
             ram_base: 0,
@@ -218,14 +204,13 @@ impl Hart {
 
     /// Return to the power-on state and start executing at `pc`.
     pub fn reset(&mut self, pc: u64) {
-        self.address_mask = if self.xlen64 { u64::MAX } else { 0xffff_ffff };
         self.x = [0; 32];
         self.f = [0; 32];
         self.fflags = 0;
         self.frm = 0;
-        self.pc = pc & self.address_mask;
+        self.pc = pc;
         self.priv_ = PRIV_M;
-        self.mstatus = if self.xlen64 { MSTATUS_UXL_SXL_64 } else { 0 };
+        self.mstatus = MSTATUS_UXL_SXL_64;
         self.mie = 0;
         self.mip = 0;
         self.mtvec = 0;
@@ -253,13 +238,13 @@ impl Hart {
     }
 
     /// Execute up to `max_steps` steps (instructions or trap entries).
-    pub fn run<const X64: bool>(&mut self, max_steps: u32) -> u32 {
+    pub fn run(&mut self, max_steps: u32) -> u32 {
         self.stop_reason = 0;
         for _ in 0..max_steps {
             if self.waiting && self.mip & self.mie == 0 {
                 return WFI_STALL;
             }
-            self.step::<X64>();
+            self.step();
             if self.stop_reason != 0 {
                 return self.stop_reason;
             }
@@ -268,7 +253,7 @@ impl Hart {
     }
 
     /// Take a pending interrupt, or fetch, decode and execute one instruction.
-    pub fn step<const X64: bool>(&mut self) {
+    pub fn step(&mut self) {
         let pending = self.mip & self.mie;
         if self.waiting {
             if pending == 0 {
@@ -276,7 +261,7 @@ impl Hart {
             }
             self.waiting = false;
         }
-        if pending != 0 && self.take_interrupt::<X64>(pending) {
+        if pending != 0 && self.take_interrupt(pending) {
             return;
         }
 
@@ -287,12 +272,12 @@ impl Hart {
                 let (inst, length) = if word & 3 == 3 {
                     (word, 4)
                 } else {
-                    match rvc::expanded::<X64>(word & 0xffff) {
+                    match rvc::expanded(word & 0xffff) {
                         0 => break 'run Err(illegal(word & 0xffff)),
                         inst => (inst, 2),
                     }
                 };
-                match self.execute::<X64>(inst, pc, addr::<X64>(pc.wrapping_add(length))) {
+                match self.execute(inst, pc, pc.wrapping_add(length)) {
                     // An illegal compressed instruction reports its own 16 bits.
                     Err(trap) if trap.cause == ILLEGAL_INSTRUCTION && length == 2 => Err(illegal(word & 0xffff)),
                     result => result,
@@ -307,14 +292,14 @@ impl Hart {
                 self.retired += 1;
             }
             Err(trap) if trap.cause == STOP_AT_BREAKPOINT => self.stop_reason = STOPPED_AT_BREAKPOINT,
-            Err(trap) => self.enter_trap::<X64>(trap.cause, false, pc, trap.tval),
+            Err(trap) => self.enter_trap(trap.cause, false, pc, trap.tval),
         }
     }
 
     /// Take the highest-priority pending interrupt that is enabled at the current
     /// privilege: non-delegated ones trap to M-mode (enabled below M, or in M with
     /// MIE), delegated ones to S-mode (enabled in U, or in S with SIE; never in M).
-    fn take_interrupt<const X64: bool>(&mut self, pending: u64) -> bool {
+    fn take_interrupt(&mut self, pending: u64) -> bool {
         let machine = pending & !self.mideleg;
         let supervisor = pending & self.mideleg;
         let candidates = if machine != 0 && (self.priv_ < PRIV_M || self.mstatus & MSTATUS_MIE != 0) {
@@ -328,17 +313,16 @@ impl Hart {
         };
         for cause in INTERRUPT_PRIORITY {
             if candidates & (1 << cause) != 0 {
-                self.enter_trap::<X64>(cause, true, self.pc, 0);
+                self.enter_trap(cause, true, self.pc, 0);
                 return true;
             }
         }
         false
     }
 
-    fn enter_trap<const X64: bool>(&mut self, cause: u32, interrupt: bool, epc: u64, tval: u64) {
+    fn enter_trap(&mut self, cause: u32, interrupt: bool, epc: u64, tval: u64) {
         let delegated = (if interrupt { self.mideleg } else { self.medeleg }) & (1 << cause) != 0;
-        let interrupt_bit = if X64 { 1 << 63 } else { 1 << 31 };
-        let cause_value = if interrupt { interrupt_bit | cause as u64 } else { cause as u64 };
+        let cause_value = if interrupt { 1 << 63 | cause as u64 } else { cause as u64 };
         if self.priv_ <= PRIV_S && delegated {
             self.sepc = epc;
             self.scause = cause_value;
@@ -367,13 +351,7 @@ impl Hart {
     /// Recompute which accesses need translating, and how; call after any
     /// change to priv, mstatus or satp.
     pub(crate) fn update_translation(&mut self) {
-        self.paging = if self.xlen64 {
-            if self.satp >> SATP64_MODE_SHIFT == SATP64_MODE_SV39 { Paging::Sv39 } else { Paging::Bare }
-        } else if self.satp & SATP32_MODE_SV32 != 0 {
-            Paging::Sv32
-        } else {
-            Paging::Bare
-        };
+        self.paging = if self.satp >> SATP_MODE_SHIFT == SATP_MODE_SV39 { Paging::Sv39 } else { Paging::Bare };
         let paging = self.paging != Paging::Bare;
         self.data_priv = if self.priv_ == PRIV_M && self.mstatus & MSTATUS_MPRV != 0 {
             ((self.mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT) as u32
@@ -384,12 +362,6 @@ impl Hart {
         self.translate_data = paging && self.data_priv != PRIV_M;
     }
 
-    /// Write a destination register (RV32: sign-extended from 32 bits).
-    #[inline(always)]
-    pub(crate) fn set<const X64: bool>(&mut self, rd: usize, value: u64) {
-        self.x[rd] = if X64 { value } else { sext32(value) };
-    }
-
     /// Execute one instruction (a compressed one expanded); returns the next
     /// pc, `next_pc` unless it jumps.
     ///
@@ -397,7 +369,7 @@ impl Hart {
     /// jump can produce an odd target (JALR clears bit 0, offsets are even),
     /// so there are no instruction-address-misaligned exceptions.
     #[inline(always)]
-    fn execute<const X64: bool>(&mut self, inst: u32, pc: u64, mut next_pc: u64) -> Result<u64> {
+    fn execute(&mut self, inst: u32, pc: u64, mut next_pc: u64) -> Result<u64> {
         let opcode = inst & 0x7f;
         let rd = ((inst >> 7) & 0x1f) as usize;
         let funct3 = (inst >> 12) & 0x7;
@@ -406,27 +378,25 @@ impl Hart {
         let funct7 = inst >> 25;
 
         match opcode {
-            LUI => self.set::<X64>(rd, sext32((inst & 0xfffff000) as u64)),
+            LUI => self.x[rd] = sext32((inst & 0xfffff000) as u64),
 
-            AUIPC => self.set::<X64>(rd, pc.wrapping_add(sext32((inst & 0xfffff000) as u64))),
+            AUIPC => self.x[rd] = pc.wrapping_add(sext32((inst & 0xfffff000) as u64)),
 
             JAL => {
-                self.set::<X64>(rd, next_pc);
-                next_pc = addr::<X64>(pc.wrapping_add(imm_j(inst)));
+                self.x[rd] = next_pc;
+                next_pc = pc.wrapping_add(imm_j(inst));
             }
 
             JALR => {
                 if funct3 != 0 {
                     return Err(illegal(inst));
                 }
-                let target = addr::<X64>(self.x[rs1].wrapping_add(imm_i(inst)) & !1);
-                self.set::<X64>(rd, next_pc);
+                let target = self.x[rs1].wrapping_add(imm_i(inst)) & !1;
+                self.x[rd] = next_pc;
                 next_pc = target;
             }
 
             BRANCH => {
-                // On RV32 the values are sign-extended, which keeps both
-                // signed and unsigned order: one comparison serves both XLENs.
                 let a = self.x[rs1];
                 let b = self.x[rs2];
                 let taken = match funct3 {
@@ -439,32 +409,32 @@ impl Hart {
                     _ => return Err(illegal(inst)),
                 };
                 if taken {
-                    next_pc = addr::<X64>(pc.wrapping_add(imm_b(inst)));
+                    next_pc = pc.wrapping_add(imm_b(inst));
                 }
             }
 
             LOAD => {
-                let addr = addr::<X64>(self.x[rs1].wrapping_add(imm_i(inst)));
+                let addr = self.x[rs1].wrapping_add(imm_i(inst));
                 let value = match funct3 {
                     0b000 => self.load(addr, 1)? as i8 as u64,  // LB
                     0b001 => self.load(addr, 2)? as i16 as u64, // LH
                     0b010 => self.load(addr, 4)? as i32 as u64, // LW
-                    0b011 if X64 => self.load(addr, 8)?,        // LD
+                    0b011 => self.load(addr, 8)?,               // LD
                     0b100 => self.load(addr, 1)?,               // LBU
                     0b101 => self.load(addr, 2)?,               // LHU
-                    0b110 if X64 => self.load(addr, 4)?,        // LWU
+                    0b110 => self.load(addr, 4)?,               // LWU
                     _ => return Err(illegal(inst)),
                 };
-                self.set::<X64>(rd, value);
+                self.x[rd] = value;
             }
 
             STORE => {
-                let addr = addr::<X64>(self.x[rs1].wrapping_add(imm_s(inst)));
+                let addr = self.x[rs1].wrapping_add(imm_s(inst));
                 let width = match funct3 {
                     0b000 => 1,        // SB
                     0b001 => 2,        // SH
                     0b010 => 4,        // SW
-                    0b011 if X64 => 8, // SD
+                    0b011 => 8, // SD
                     _ => return Err(illegal(inst)),
                 };
                 self.store(addr, width, self.x[rs2])?;
@@ -473,96 +443,94 @@ impl Hart {
             OP_IMM => {
                 let a = self.x[rs1];
                 let imm = imm_i(inst);
-                // Shifts: RV64 has 6-bit amounts (and a 6-bit funct above them).
-                let shamt = (inst >> 20) & if X64 { 0x3f } else { 0x1f };
-                let shift_funct = inst >> if X64 { 26 } else { 25 };
-                let sra = if X64 { 0x10 } else { 0x20 };
+                // Shifts: 6-bit amounts, and a 6-bit funct above them.
+                let shamt = (inst >> 20) & 0x3f;
+                let shift_funct = inst >> 26;
                 let value = match funct3 {
-                    0b000 => a.wrapping_add(imm),                         // ADDI
-                    0b010 => ((a as i64) < (imm as i64)) as u64,          // SLTI
-                    0b011 => (a < imm) as u64,                            // SLTIU
-                    0b100 => a ^ imm,                                     // XORI
-                    0b110 => a | imm,                                     // ORI
-                    0b111 => a & imm,                                     // ANDI
-                    0b001 if shift_funct == 0 => shl::<X64>(a, shamt),    // SLLI
-                    0b101 if shift_funct == 0 => shr::<X64>(a, shamt),    // SRLI
-                    0b101 if shift_funct == sra => sra_::<X64>(a, shamt), // SRAI
+                    0b000 => a.wrapping_add(imm),                               // ADDI
+                    0b010 => ((a as i64) < (imm as i64)) as u64,                // SLTI
+                    0b011 => (a < imm) as u64,                                  // SLTIU
+                    0b100 => a ^ imm,                                           // XORI
+                    0b110 => a | imm,                                           // ORI
+                    0b111 => a & imm,                                           // ANDI
+                    0b001 if shift_funct == 0 => a << shamt,                    // SLLI
+                    0b101 if shift_funct == 0 => a >> shamt,                    // SRLI
+                    0b101 if shift_funct == 0x10 => ((a as i64) >> shamt) as u64, // SRAI
                     _ => return Err(illegal(inst)),
                 };
-                self.set::<X64>(rd, value);
+                self.x[rd] = value;
             }
 
             OP => {
                 let a = self.x[rs1];
                 let b = self.x[rs2];
-                let shamt = (b & if X64 { 0x3f } else { 0x1f }) as u32;
+                let shamt = b & 0x3f;
                 let value = match funct7 << 3 | funct3 {
                     0x000 => a.wrapping_add(b),                // ADD
                     0x100 => a.wrapping_sub(b),                // SUB
-                    0x001 => shl::<X64>(a, shamt),             // SLL
+                    0x001 => a << shamt,                       // SLL
                     0x002 => ((a as i64) < (b as i64)) as u64, // SLT
                     0x003 => (a < b) as u64,                   // SLTU
                     0x004 => a ^ b,                            // XOR
-                    0x005 => shr::<X64>(a, shamt),             // SRL
-                    0x105 => sra_::<X64>(a, shamt),            // SRA
+                    0x005 => a >> shamt,                       // SRL
+                    0x105 => ((a as i64) >> shamt) as u64,     // SRA
                     0x006 => a | b,                            // OR
                     0x007 => a & b,                            // AND
                     // M extension
                     0x008 => a.wrapping_mul(b),                // MUL
-                    0x009 => mulh::<X64>(a, b),                // MULH
-                    0x00a => mulhsu::<X64>(a, b),              // MULHSU
-                    0x00b => mulhu::<X64>(a, b),               // MULHU
-                    0x00c => div::<X64>(a, b),                 // DIV
-                    0x00d => divu::<X64>(a, b),                // DIVU
-                    0x00e => rem::<X64>(a, b),                 // REM
-                    0x00f => remu::<X64>(a, b),                // REMU
+                    0x009 => mulh(a, b),                       // MULH
+                    0x00a => mulhsu(a, b),                     // MULHSU
+                    0x00b => mulhu(a, b),                      // MULHU
+                    0x00c => div(a, b),                        // DIV
+                    0x00d => divu(a, b),                       // DIVU
+                    0x00e => rem(a, b),                        // REM
+                    0x00f => remu(a, b),                       // REMU
                     _ => return Err(illegal(inst)),
                 };
-                self.set::<X64>(rd, value);
+                self.x[rd] = value;
             }
 
-            // RV64: 32-bit operations, results sign-extended. They are RV32's
-            // own operations, so they share its code.
-            OP_IMM_32 if X64 => {
-                let a = self.x[rs1];
+            // 32-bit operations (the *W instructions), results sign-extended.
+            OP_IMM_32 => {
+                let a = self.x[rs1] as u32;
                 let shamt = (inst >> 20) & 0x1f;
                 let value = match funct3 {
-                    0b000 => a.wrapping_add(imm_i(inst)),                   // ADDIW
-                    0b001 if funct7 == 0 => shl::<false>(a, shamt),         // SLLIW
-                    0b101 if funct7 == 0 => shr::<false>(a, shamt),         // SRLIW
-                    0b101 if funct7 == 0x20 => sra_::<false>(a, shamt),     // SRAIW
+                    0b000 => a.wrapping_add(imm_i(inst) as u32),     // ADDIW
+                    0b001 if funct7 == 0 => a << shamt,               // SLLIW
+                    0b101 if funct7 == 0 => a >> shamt,               // SRLIW
+                    0b101 if funct7 == 0x20 => ((a as i32) >> shamt) as u32, // SRAIW
                     _ => return Err(illegal(inst)),
                 };
-                self.x[rd] = sext32(value);
+                self.x[rd] = value as i32 as u64;
             }
 
-            OP_32 if X64 => {
-                let a = self.x[rs1];
-                let b = self.x[rs2];
-                let shamt = (b & 0x1f) as u32;
+            OP_32 => {
+                let a = self.x[rs1] as u32;
+                let b = self.x[rs2] as u32;
+                let shamt = b & 0x1f;
                 let value = match funct7 << 3 | funct3 {
-                    0x000 => a.wrapping_add(b),         // ADDW
-                    0x100 => a.wrapping_sub(b),         // SUBW
-                    0x001 => shl::<false>(a, shamt),    // SLLW
-                    0x005 => shr::<false>(a, shamt),    // SRLW
-                    0x105 => sra_::<false>(a, shamt),   // SRAW
-                    0x008 => a.wrapping_mul(b),         // MULW
-                    0x00c => div::<false>(a, b),        // DIVW
-                    0x00d => divu::<false>(a, b),       // DIVUW
-                    0x00e => rem::<false>(a, b),        // REMW
-                    0x00f => remu::<false>(a, b),       // REMUW
+                    0x000 => a.wrapping_add(b),              // ADDW
+                    0x100 => a.wrapping_sub(b),              // SUBW
+                    0x001 => a << shamt,                     // SLLW
+                    0x005 => a >> shamt,                     // SRLW
+                    0x105 => ((a as i32) >> shamt) as u32,   // SRAW
+                    0x008 => a.wrapping_mul(b),              // MULW
+                    0x00c => div32(a, b),                    // DIVW
+                    0x00d => divu32(a, b),                   // DIVUW
+                    0x00e => rem32(a, b),                    // REMW
+                    0x00f => remu32(a, b),                   // REMUW
                     _ => return Err(illegal(inst)),
                 };
-                self.x[rd] = sext32(value);
+                self.x[rd] = value as i32 as u64;
             }
 
             AMO => {
                 let width = match funct3 {
                     0b010 => 4,
-                    0b011 if X64 => 8,
+                    0b011 => 8,
                     _ => return Err(illegal(inst)),
                 };
-                self.amo::<X64>(inst, rd, addr::<X64>(self.x[rs1]), self.x[rs2], width)?;
+                self.amo(inst, rd, self.x[rs1], self.x[rs2], width)?;
             }
 
             // FENCE / FENCE.I: a single in-order hart with no caches has nothing to do.
@@ -572,13 +540,13 @@ impl Hart {
                 }
             }
 
-            LOAD_FP | STORE_FP | FMADD | FMSUB | FNMSUB | FNMADD | OP_FP => self.execute_fp::<X64>(inst)?,
+            LOAD_FP | STORE_FP | FMADD | FMSUB | FNMSUB | FNMADD | OP_FP => self.execute_fp(inst)?,
 
             SYSTEM => {
                 if funct3 == 0 {
                     next_pc = self.system(inst, pc, next_pc)?;
                 } else {
-                    self.csr_instruction::<X64>(inst, rd, funct3, rs1)?;
+                    self.csr_instruction(inst, rd, funct3, rs1)?;
                 }
             }
 
@@ -641,7 +609,7 @@ impl Hart {
         }
     }
 
-    fn csr_instruction<const X64: bool>(&mut self, inst: u32, rd: usize, funct3: u32, rs1: usize) -> Result<()> {
+    fn csr_instruction(&mut self, inst: u32, rd: usize, funct3: u32, rs1: usize) -> Result<()> {
         let csr = inst >> 20;
         if self.priv_ < (csr >> 8) & 3 {
             return Err(illegal(inst));
@@ -651,26 +619,26 @@ impl Hart {
         if op == 0 {
             return Err(illegal(inst));
         }
-        // CSRR*I take a 5-bit immediate; on RV32 CSRs are 32 bits wide.
-        let src = addr::<X64>(if funct3 & 4 != 0 { rs1 as u64 } else { self.x[rs1] });
+        // CSRR*I take a 5-bit immediate.
+        let src = if funct3 & 4 != 0 { rs1 as u64 } else { self.x[rs1] };
         let writes = op == 1 || rs1 != 0; // CSRRS/CSRRC with x0/0 only read
         if writes && csr >> 10 == 3 {
             return Err(illegal(inst)); // read-only CSR
         }
 
-        let old = self.read_csr::<X64>(csr, inst)?;
+        let old = self.read_csr(csr, inst)?;
         if writes {
-            self.write_csr::<X64>(csr, match op { 1 => src, 2 => old | src, _ => old & !src });
+            self.write_csr(csr, match op { 1 => src, 2 => old | src, _ => old & !src });
         }
-        self.set::<X64>(rd, old);
+        self.x[rd] = old;
         Ok(())
     }
 
-    fn read_csr<const X64: bool>(&mut self, csr: u32, inst: u32) -> Result<u64> {
+    fn read_csr(&mut self, csr: u32, inst: u32) -> Result<u64> {
         let value = match csr {
             FFLAGS | FRM | FCSR => self.read_fcsr(csr).ok_or(illegal(inst))?,
-            MSTATUS => self.mstatus | self.state_dirty::<X64>(),
-            MISA => MISA_EXTENSIONS | if X64 { 2 << 62 } else { 1 << 30 },
+            MSTATUS => self.mstatus | self.state_dirty(),
+            MISA => MISA_VALUE,
             MEDELEG => self.medeleg,
             MIDELEG => self.mideleg,
             MIE => self.mie,
@@ -681,10 +649,9 @@ impl Hart {
             MCAUSE => self.mcause,
             MTVAL => self.mtval,
             MIP => self.mip,
-            MSTATUSH if !X64 => 0,
             MCOUNTINHIBIT | MVENDORID | MARCHID | MIMPID | MHARTID | MCONFIGPTR => 0,
 
-            SSTATUS => self.mstatus & SSTATUS_VISIBLE | self.state_dirty::<X64>(),
+            SSTATUS => self.mstatus & SSTATUS_VISIBLE | self.state_dirty(),
             SIE => self.mie & self.mideleg,
             SIP => self.mip & self.mideleg,
             STVEC => self.stvec,
@@ -702,34 +669,24 @@ impl Hart {
 
             MCYCLE => self.retired.wrapping_add(self.cycle_offset),
             MINSTRET => self.retired.wrapping_add(self.instret_offset),
-            MCYCLEH if !X64 => self.retired.wrapping_add(self.cycle_offset) >> 32,
-            MINSTRETH if !X64 => self.retired.wrapping_add(self.instret_offset) >> 32,
             CYCLE | INSTRET => {
                 self.check_counter_access(csr, inst)?;
                 self.retired.wrapping_add(if csr == CYCLE { self.cycle_offset } else { self.instret_offset })
-            }
-            CYCLEH | INSTRETH if !X64 => {
-                self.check_counter_access(csr, inst)?;
-                self.retired.wrapping_add(if csr == CYCLEH { self.cycle_offset } else { self.instret_offset }) >> 32
             }
             TIME => {
                 self.check_time_access(csr, inst)?;
                 self.time()
             }
-            TIMEH if !X64 => {
-                self.check_time_access(csr, inst)?;
-                self.time() >> 32
-            }
             PMPCFG0..=PMPADDR63 => 0, // no PMP entries
             TSELECT..=TDATA3 => 0,    // no debug triggers
             _ => return Err(illegal(inst)),
         };
-        Ok(addr::<X64>(value))
+        Ok(value)
     }
 
     /// mstatus.SD (the top bit): some extension state (here only FP) is dirty.
-    fn state_dirty<const X64: bool>(&self) -> u64 {
-        if self.mstatus & MSTATUS_FS == MSTATUS_FS { 1 << if X64 { 63 } else { 31 } } else { 0 }
+    fn state_dirty(&self) -> u64 {
+        if self.mstatus & MSTATUS_FS == MSTATUS_FS { 1 << 63 } else { 0 }
     }
 
     fn check_time_access(&self, csr: u32, inst: u32) -> Result<()> {
@@ -751,7 +708,7 @@ impl Hart {
         Ok(())
     }
 
-    fn write_csr<const X64: bool>(&mut self, csr: u32, value: u64) {
+    fn write_csr(&mut self, csr: u32, value: u64) {
         match csr {
             FFLAGS | FRM | FCSR => self.write_fcsr(csr, value), // readable, so FP is on
             MSTATUS => {
@@ -759,7 +716,7 @@ impl Hart {
                 if v & MSTATUS_MPP == 2 << MSTATUS_MPP_SHIFT {
                     v &= !MSTATUS_MPP; // no H-mode: 2 → U
                 }
-                self.mstatus = v | if X64 { MSTATUS_UXL_SXL_64 } else { 0 };
+                self.mstatus = v | MSTATUS_UXL_SXL_64;
                 self.update_translation();
             }
             MEDELEG => self.medeleg = value & MEDELEG_WRITABLE,
@@ -789,36 +746,24 @@ impl Hart {
             SCAUSE => self.scause = value,
             STVAL => self.stval = value,
             SATP => {
-                // No ASIDs (ASIDLEN = 0, so those bits read as zero). On RV64,
-                // a write selecting an unsupported mode (Sv48, Sv57) has no
-                // effect at all: that's how Linux finds out which it may use.
-                if X64 {
-                    let mode = value >> SATP64_MODE_SHIFT;
-                    if mode != 0 && mode != SATP64_MODE_SV39 {
-                        return;
-                    }
-                    self.satp = value & (0xf << SATP64_MODE_SHIFT | SATP64_PPN);
-                } else {
-                    self.satp = value & (SATP32_MODE_SV32 | SATP32_PPN);
+                // No ASIDs (ASIDLEN = 0, so those bits read as zero). A write
+                // selecting an unsupported mode (Sv48, Sv57) has no effect at
+                // all: that's how Linux finds out which it may use.
+                let mode = value >> SATP_MODE_SHIFT;
+                if mode != 0 && mode != SATP_MODE_SV39 {
+                    return;
                 }
+                self.satp = value & (0xf << SATP_MODE_SHIFT | SATP_PPN);
                 self.flush_tlb();
                 self.update_translation();
             }
 
             // The counters count on from what software writes. The writing
             // instruction itself isn't counted (the next reads the value written).
-            MCYCLE | MINSTRET | MCYCLEH | MINSTRETH => {
+            MCYCLE | MINSTRET => {
                 let retired = self.retired;
-                let offset = if csr & 2 != 0 { &mut self.instret_offset } else { &mut self.cycle_offset };
-                let current = retired.wrapping_add(*offset);
-                let new = if csr & 0x80 != 0 {
-                    value << 32 | (current & 0xffff_ffff) // RV32 upper half
-                } else if X64 {
-                    value
-                } else {
-                    (current & !0xffff_ffff) | value // RV32 lower half
-                };
-                *offset = new.wrapping_sub(retired + 1);
+                let offset = if csr == MINSTRET { &mut self.instret_offset } else { &mut self.cycle_offset };
+                *offset = value.wrapping_sub(retired + 1);
             }
             // Everything else that reads successfully is WARL read-only here:
             // no PMP, no debug triggers, counters can't be inhibited.
@@ -827,7 +772,7 @@ impl Hart {
     }
 
     /// LR / SC / AMO*, on 4 (.W) or 8 (.D) bytes. .W values are sign-extended.
-    fn amo<const X64: bool>(&mut self, inst: u32, rd: usize, vaddr: u64, src: u64, width: u32) -> Result<()> {
+    fn amo(&mut self, inst: u32, rd: usize, vaddr: u64, src: u64, width: u32) -> Result<()> {
         let op = inst >> 27;
         let lr = op == 0b00010;
         if vaddr & (width as u64 - 1) != 0 {
@@ -841,7 +786,7 @@ impl Hart {
 
         if lr {
             let value = self.phys_read(pa, width).ok_or(fault)?;
-            self.set::<X64>(rd, extend(value));
+            self.x[rd] = extend(value);
             self.reservation = pa;
             return Ok(());
         }
@@ -852,12 +797,12 @@ impl Hart {
             if ok && !self.phys_write(pa, width, src) {
                 return Err(fault);
             }
-            self.set::<X64>(rd, !ok as u64);
+            self.x[rd] = !ok as u64;
             return Ok(());
         }
 
         let old = self.phys_read(pa, width).ok_or(fault)?;
-        // Compare as XLEN- or 32-bit values: sign-extend both to 64 bits.
+        // Compare as 64- or 32-bit values: sign-extend both to 64 bits.
         let (a, b) = (extend(old), extend(src));
         let value = match op {
             0b00001 => b,                               // AMOSWAP
@@ -874,7 +819,7 @@ impl Hart {
         if !self.phys_write(pa, width, value) {
             return Err(fault);
         }
-        self.set::<X64>(rd, a);
+        self.x[rd] = a;
         Ok(())
     }
 }
@@ -885,89 +830,52 @@ pub(crate) const fn sext32(v: u64) -> u64 {
     v as i32 as i64 as u64
 }
 
-/// An address: on RV32, 32 bits.
+// M extension: the upper half of a 128-bit product, and division (by zero
+// and overflowing ones have defined results, no trap), 64-bit and, for the
+// *W instructions, 32-bit.
 #[inline(always)]
-pub(crate) const fn addr<const X64: bool>(v: u64) -> u64 {
-    if X64 { v } else { v & 0xffff_ffff }
-}
-
-// Shifts by an amount already masked to XLEN. On RV32 (and for RV64's *W
-// instructions) they work on the low 32 bits; callers sign-extend the result.
-#[inline(always)]
-fn shl<const X64: bool>(a: u64, shamt: u32) -> u64 {
-    if X64 { a << shamt } else { ((a as u32) << shamt) as u64 }
+fn mulh(a: u64, b: u64) -> u64 {
+    ((a as i64 as i128 * b as i64 as i128) >> 64) as u64
 }
 #[inline(always)]
-fn shr<const X64: bool>(a: u64, shamt: u32) -> u64 {
-    if X64 { a >> shamt } else { ((a as u32) >> shamt) as u64 }
+fn mulhsu(a: u64, b: u64) -> u64 {
+    ((a as i64 as i128 * b as i128) >> 64) as u64
 }
 #[inline(always)]
-fn sra_<const X64: bool>(a: u64, shamt: u32) -> u64 {
-    if X64 { ((a as i64) >> shamt) as u64 } else { ((a as i32) >> shamt) as u64 }
-}
-
-// M extension: the upper half of a 2·XLEN-bit product, and division (by zero
-// and overflowing ones have defined results, no trap). The 32-bit versions
-// also serve RV64's *W instructions.
-#[inline(always)]
-fn mulh<const X64: bool>(a: u64, b: u64) -> u64 {
-    if X64 {
-        ((a as i64 as i128 * b as i64 as i128) >> 64) as u64
-    } else {
-        ((a as i32 as i64 * b as i32 as i64) >> 32) as u64
-    }
+fn mulhu(a: u64, b: u64) -> u64 {
+    ((a as u128 * b as u128) >> 64) as u64
 }
 #[inline(always)]
-fn mulhsu<const X64: bool>(a: u64, b: u64) -> u64 {
-    if X64 {
-        ((a as i64 as i128 * b as i128) >> 64) as u64
-    } else {
-        ((a as i32 as i64 * b as u32 as i64) >> 32) as u64
-    }
+fn div(a: u64, b: u64) -> u64 {
+    if b == 0 { u64::MAX } else { (a as i64).wrapping_div(b as i64) as u64 }
 }
 #[inline(always)]
-fn mulhu<const X64: bool>(a: u64, b: u64) -> u64 {
-    if X64 { ((a as u128 * b as u128) >> 64) as u64 } else { (a as u32 as u64 * b as u32 as u64) >> 32 }
+fn divu(a: u64, b: u64) -> u64 {
+    a.checked_div(b).unwrap_or(u64::MAX)
 }
 #[inline(always)]
-fn div<const X64: bool>(a: u64, b: u64) -> u64 {
-    if X64 {
-        if b == 0 { u64::MAX } else { (a as i64).wrapping_div(b as i64) as u64 }
-    } else if b as u32 == 0 {
-        u64::MAX
-    } else {
-        (a as i32).wrapping_div(b as i32) as u64
-    }
+fn rem(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { (a as i64).wrapping_rem(b as i64) as u64 }
 }
 #[inline(always)]
-fn divu<const X64: bool>(a: u64, b: u64) -> u64 {
-    if X64 {
-        if b == 0 { u64::MAX } else { a / b }
-    } else if b as u32 == 0 {
-        u64::MAX
-    } else {
-        (a as u32 / b as u32) as u64
-    }
+fn remu(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { a % b }
 }
 #[inline(always)]
-fn rem<const X64: bool>(a: u64, b: u64) -> u64 {
-    if X64 {
-        if b == 0 { a } else { (a as i64).wrapping_rem(b as i64) as u64 }
-    } else if b as u32 == 0 {
-        a
-    } else {
-        (a as i32).wrapping_rem(b as i32) as u64
-    }
+fn div32(a: u32, b: u32) -> u32 {
+    if b == 0 { u32::MAX } else { (a as i32).wrapping_div(b as i32) as u32 }
 }
 #[inline(always)]
-fn remu<const X64: bool>(a: u64, b: u64) -> u64 {
-    if X64 {
-        if b == 0 { a } else { a % b }
-    } else if b as u32 == 0 {
-        a
-    } else {
-        (a as u32 % b as u32) as u64
-    }
+fn divu32(a: u32, b: u32) -> u32 {
+    a.checked_div(b).unwrap_or(u32::MAX)
+}
+#[inline(always)]
+fn rem32(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { (a as i32).wrapping_rem(b as i32) as u32 }
+}
+#[inline(always)]
+fn remu32(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { a % b }
 }
 
 pub(crate) const fn illegal(inst: u32) -> Trap {

@@ -10,13 +10,14 @@ import {
   MSTATUS_MIE,
   MSTATUS_MPRV,
   MSTATUS_MXR,
-  MSTATUS_SD32,
+  MSTATUS_SD,
   MSTATUS_SIE,
   MSTATUS_SPIE,
   MSTATUS_SPP,
   MSTATUS_SUM,
+  MSTATUS_UXL_SXL_64,
   Priv,
-  SATP_MODE_SV32,
+  SATP_MODE_SV39,
 } from './csr.js'
 import { RAM } from './ram.js'
 import { TrapCause } from './trap.js'
@@ -29,24 +30,37 @@ import { TrapCause } from './trap.js'
  *           not WFI, which wouldn't stall while an interrupt is still pending)
  *   0x0200  S-mode trap handler (EBREAK)
  *   0x0400  the code under test, entered in S- or U-mode
- *   0x1000  root page table: entry 0 identity-maps the first 4 MiB (megapage)
- *   0x2000  second-level table for virtual 0x40000000-0x403fffff
+ *   0x1000  root page table (Sv39: three levels, 8-byte entries): entry 0
+ *           identity-maps the first GiB (a gigapage), entry 1 (virtual
+ *           0x4000_0000-0x7fff_ffff) points to the middle-level table at L1
+ *   0x2000  last-level table (L0) for virtual 0x4000_0000-0x401f_ffff
  *   0x3000, 0x4000  data pages
+ *   0x5000  middle-level table (L1): entry 0 points to L0
  */
 const M_HANDLER = 0x100
 const S_HANDLER = 0x200
 const CODE = 0x400
 const ROOT = 0x1000
 const L0 = 0x2000
-const VA = 0x40000000 // → L0 table
+const L1 = 0x5000
+const VA = 0x40000000 // → L1 → L0
 
 const V = 1, R = 2, W = 4, X = 8, U = 16, A = 64, D = 128
+/** A page table entry (the emulator's physical addresses fit in its low 32 bits). */
 const pte = (ppn: number, flags: number) => ((ppn << 10) | flags) >>> 0
+const SATP = SATP_MODE_SV39 | BigInt(ROOT >>> 12)
+
+/** Page tables for `run()`'s mappings, user-accessible or not. */
+function mapPages(ram: RAM, user: boolean) {
+  ram.write32(ROOT, pte(0, V | R | W | X | A | D | (user ? U : 0)))
+  ram.write32(ROOT + 8, pte(L1 >>> 12, V))
+  ram.write32(L1, pte(L0 >>> 12, V))
+}
 
 interface Options {
   /** Mode the code at CODE runs in. */
   mode: Priv.Supervisor | Priv.User
-  /** Enable Sv32 paging (identity megapage for the low 4 MiB, plus VA → L0). */
+  /** Enable Sv39 paging (the identity-mapped first GiB, plus VA → L0). */
   paging?: boolean
   /** Extra mstatus bits to set on entry (SUM, MXR, ...). */
   mstatus?: number
@@ -59,12 +73,10 @@ function run(code: number[], { mode, paging = true, mstatus = 0, setup }: Option
   ram.write32(M_HANDLER, a.ebreak())
   ram.write32(S_HANDLER, a.ebreak())
   ram.load(CODE, toBytes(code))
-  // Low 4 MiB identity-mapped for code, handlers and page tables.
-  ram.write32(ROOT, pte(0, V | R | W | X | A | D | (mode === Priv.User ? U : 0)))
-  ram.write32(ROOT + (VA >>> 22) * 4, pte(L0 >>> 12, V))
+  mapPages(ram, mode === Priv.User)
 
   const cpu = new CPU(ram, { breakOnEbreak: true })
-  cpu.x[5] = paging ? SATP_MODE_SV32 | (ROOT >>> 12) : 0
+  cpu.x64[5] = paging ? SATP : 0n
   cpu.x[6] = (mode << 11) | mstatus
   cpu.x[7] = CODE
   cpu.mtvec = M_HANDLER
@@ -82,7 +94,7 @@ function expectMachineTrap(r: ReturnType<typeof run>, cause: number, tval?: numb
   if (tval !== undefined) expect(r.cpu.mtval).toBe(tval)
 }
 
-describe('Sv32 address translation', () => {
+describe('Sv39 address translation', () => {
   it('loads and stores through a 4 KiB page, setting the A and D bits', () => {
     const { cpu, ram, stop } = run([a.lw(10, 11, 4), a.sw(12, 11, 8), a.ebreak()], {
       mode: Priv.Supervisor,
@@ -172,15 +184,28 @@ describe('Sv32 address translation', () => {
     expect(cpu.x[10]).toBe(7)
   })
 
-  it('a megapage whose physical page number is not 4 MiB aligned faults', () => {
+  it('a megapage whose physical page number is not 2 MiB aligned faults', () => {
     const r = run([a.lw(10, 11, 0)], {
       mode: Priv.Supervisor,
       setup: (cpu, ram) => {
-        ram.write32(ROOT + (VA >>> 22) * 4, pte(3, V | R | W))
+        ram.write32(L1, pte(3, V | R | W)) // a leaf one level up: a 2 MiB page
         cpu.x[11] = VA
       },
     })
     expectMachineTrap(r, TrapCause.LoadPageFault, VA)
+  })
+
+  it('non-canonical addresses (bits 63:39 not all equal to bit 38) fault', () => {
+    const r = run([a.lw(10, 11, 0)], { mode: Priv.Supervisor, setup: cpu => (cpu.x64[11] = 1n << 38n) })
+    expectMachineTrap(r, TrapCause.LoadPageFault, 2 ** 38)
+  })
+
+  it('satp ignores writes selecting a mode it lacks (Sv48), as Linux expects', () => {
+    const { cpu } = run([a.csrrw(0, Csr.satp, 11), a.ebreak()], {
+      mode: Priv.Supervisor,
+      setup: cpu => (cpu.x64[11] = BigInt.asIntN(64, (9n << 60n) | 7n)),
+    })
+    expect(cpu.read('satp')).toBe(SATP)
   })
 
   it('an access straddling two pages is translated per page', () => {
@@ -189,7 +214,7 @@ describe('Sv32 address translation', () => {
       mode: Priv.Supervisor,
       setup: (cpu, ram) => {
         ram.write32(L0, pte(3, V | R | W)) // VA        → 0x3000
-        ram.write32(L0 + 4, pte(4, V | R | W)) // VA+4K → 0x4000 (adjacent here, but walked separately)
+        ram.write32(L0 + 8, pte(4, V | R | W)) // VA+4K → 0x4000 (adjacent here, but walked separately)
         ram.write16(0x3ffe, 0x2211)
         ram.write16(0x4000, 0x4433)
         cpu.x[11] = VA + 0x800
@@ -207,7 +232,7 @@ describe('Sv32 address translation', () => {
     const addi = a.addi(10, 0, 42)
     const setup = (secondPage: boolean) => (_cpu: CPU, ram: RAM) => {
       ram.write32(L0, pte(3, V | R | X))
-      if (secondPage) ram.write32(L0 + 4, pte(4, V | R | X))
+      if (secondPage) ram.write32(L0 + 8, pte(4, V | R | X))
       ram.write16(0x3ffe, addi & 0xffff)
       ram.write16(0x4000, addi >>> 16)
       ram.write16(0x4002, 0x9002) // c.ebreak
@@ -230,7 +255,7 @@ describe('Sv32 address translation', () => {
       mode: Priv.Supervisor,
       setup: (cpu, ram) => {
         ram.write32(L0, pte(3, V | R | W))
-        ram.write32(L0 + 4, pte(4, V | R))
+        ram.write32(L0 + 8, pte(4, V | R))
         cpu.x[11] = VA + 0x800
         cpu.x[12] = -1
       },
@@ -278,11 +303,11 @@ describe('Sv32 address translation', () => {
   it('MPRV makes M-mode loads use the MPP privilege (and translation)', () => {
     const ram = new RAM(64 * 1024)
     ram.load(0, toBytes([a.csrrw(0, Csr.satp, 5), a.csrrw(0, Csr.mstatus, 6), a.lw(10, 11, 0), a.ebreak()]))
-    ram.write32(ROOT + (VA >>> 22) * 4, pte(L0 >>> 12, V))
+    mapPages(ram, false)
     ram.write32(L0, pte(3, V | R | W))
     ram.write32(0x3000, 31337)
     const cpu = new CPU(ram, { breakOnEbreak: true })
-    cpu.x[5] = SATP_MODE_SV32 | (ROOT >>> 12)
+    cpu.x64[5] = SATP
     cpu.x[6] = MSTATUS_MPRV | (Priv.Supervisor << 11)
     cpu.x[11] = VA
     expect(cpu.run(100)).toBe('breakpoint') // fetches stayed physical (M-mode)
@@ -350,9 +375,11 @@ describe('supervisor mode and delegation', () => {
       mode: Priv.Supervisor,
       paging: false,
     })
-    // FS written as dirty (3) also shows as SD, the top bit.
-    expect(cpu.x[11]! >>> 0).toBe(
-      (MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_FS | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_SD32) >>> 0,
+    // FS written as dirty (3) also shows as SD, the top bit; UXL (64-bit U-mode) is read-only.
+    expect(BigInt.asUintN(64, cpu.x64[11]!)).toBe(
+      BigInt(MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_FS | MSTATUS_SUM | MSTATUS_MXR) |
+        (MSTATUS_UXL_SXL_64 & (3n << 32n)) |
+        MSTATUS_SD,
     )
     expect(cpu.mstatus & MSTATUS_MIE).toBe(0) // M bits untouched
   })
@@ -391,7 +418,7 @@ describe('supervisor interrupts', () => {
   it('a delegated timer interrupt is taken in U-mode, into S-mode', () => {
     const { cpu } = run([a.addi(0, 0, 0)], { mode: Priv.User, paging: false, setup: pendingSupervisorTimer })
     expect(cpu.pc).toBe(S_HANDLER)
-    expect(cpu.scause).toBe(0x80000005)
+    expect(cpu.read('scause')).toBe(1n << 63n | 5n)
     expect(cpu.sepc).toBe(CODE)
   })
 
@@ -404,7 +431,7 @@ describe('supervisor interrupts', () => {
       mstatus: MSTATUS_SIE,
       setup: pendingSupervisorTimer,
     })
-    expect(enabled.cpu.scause).toBe(0x80000005)
+    expect(enabled.cpu.read('scause')).toBe(1n << 63n | 5n)
   })
 
   it('is never taken in M-mode', () => {
@@ -427,6 +454,6 @@ describe('supervisor interrupts', () => {
       },
     })
     expect(cpu.pc).toBe(M_HANDLER)
-    expect(cpu.mcause).toBe(0x80000007)
+    expect(cpu.read('mcause')).toBe(1n << 63n | 7n)
   })
 })

@@ -5,3 +5,4 @@ images/
 .buildroot/
 build/
 hart/target/
+.claude/scheduled_tasks.lock

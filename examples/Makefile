@@ -6,56 +6,48 @@ CC      := $(CROSS)gcc
 OBJCOPY := $(CROSS)objcopy
 OBJDUMP := $(CROSS)objdump
 
-MARCH   := rv32i
-MABI    := ilp32
-CFLAGS   = -mabi=$(MABI) -O2 -Wall -Wextra -ffreestanding -nostdlib -nostartfiles -fno-pic
+# RAM at 0x8000_0000 is beyond the ±2 GiB the default code model reaches
+# from address 0, hence medany (pc-relative addressing).
+MARCH   := rv64i
+MABI    := lp64
+CFLAGS   = -mabi=$(MABI) -mcmodel=medany -O2 -Wall -Wextra -ffreestanding -nostdlib -nostartfiles -fno-pic
 LDFLAGS := -T link.ld -Wl,--gc-sections -Wl,--no-warn-rwx-segments
 COMMON  := crt0.S link.ld terminal.h
+# libgcc (software multiply and divide, ...): the toolchain only has it built
+# for some instruction sets, so name the soft-float one (its routines use no
+# M instructions) instead of letting the -march pick, which would fail.
+LIBGCC   = $(shell $(CC) -march=rv64imac -mabi=lp64 -print-libgcc-file-name)
 
-# matmul-m: same source as matmul, compiled for hardware multiply (RV32IM).
-# bench: CPU benchmark (npm run bench), also RV32IM; bench-c the same with
-# compressed instructions (RV32IMC), bench64 for RV64 (RV64IMC).
-# fbench32 / fbench64: floating-point test program for RV32GC / RV64GC.
-PROGRAMS := hello matmul matmul-m bench bench-c bench64 fbench32 fbench64
+# hello, matmul: the base instruction set (RV64I; multiplication in libgcc).
+# matmul-m: same source as matmul, compiled for hardware multiply (RV64IM).
+# bench: CPU benchmark (npm run bench), also RV64IM; bench-c the same with
+# compressed instructions (RV64IMC).
+# fbench: floating-point test program (RV64GC).
+PROGRAMS := hello matmul matmul-m bench bench-c fbench
 
 all: $(PROGRAMS:%=build/%.bin)
 
 define link
-	$(CC) -march=$(MARCH) $(CFLAGS) $(LDFLAGS) -o $@ crt0.S $(filter %.c,$^) -lgcc
+	$(CC) -march=$(MARCH) $(CFLAGS) $(LDFLAGS) -o $@ crt0.S $(filter %.c,$^) $(LIBGCC)
 endef
 
 build/%.elf: %/*.c $(COMMON) | build
 	$(link)
 
-build/matmul-m.elf build/bench.elf: MARCH := rv32im
-
-build/bench-c.elf: MARCH := rv32imc
-build/bench-c.elf: bench/*.c $(COMMON) | build
+build/matmul-m.elf build/bench.elf: MARCH := rv64im
+build/matmul-m.elf: matmul/*.c $(COMMON) | build
 	$(link)
 
-# RV64: RAM at 0x8000_0000 is beyond the ±2 GiB the default code model
-# reaches from address 0, hence medany (pc-relative addressing).
-build/bench64.elf: MARCH := rv64imc
-build/bench64.elf: MABI := lp64
-build/bench64.elf: CFLAGS += -mcmodel=medany
-build/bench64.elf: bench/*.c $(COMMON) | build
+build/bench-c.elf: MARCH := rv64imc
+build/bench-c.elf: bench/*.c $(COMMON) | build
 	$(link)
 
 # Floating point: no fused multiply-adds, no libm (sqrt is the instruction),
 # so the results are exact functions of the program and match other CPUs.
-FPFLAGS := -ffp-contract=off -fno-math-errno
-build/fbench32.elf: MARCH := rv32gc
-build/fbench32.elf: MABI := ilp32d
-build/fbench32.elf: CFLAGS += $(FPFLAGS)
-build/fbench32.elf: fbench/*.c $(COMMON) | build
-	$(link)
-build/fbench64.elf: MARCH := rv64gc
-build/fbench64.elf: MABI := lp64d
-build/fbench64.elf: CFLAGS += $(FPFLAGS) -mcmodel=medany
-build/fbench64.elf: fbench/*.c $(COMMON) | build
-	$(link)
-build/matmul-m.elf: matmul/*.c $(COMMON) | build
-	$(link)
+build/fbench.elf: MARCH := rv64gc
+build/fbench.elf: MABI := lp64d
+build/fbench.elf: CFLAGS += -ffp-contract=off -fno-math-errno
+build/fbench.elf: LIBGCC := -lgcc
 
 build/%.bin: build/%.elf
 	$(OBJCOPY) -O binary $< $@

@@ -1,8 +1,7 @@
-# Build environment for linux/build.sh (used through linux/podman.sh).
+# Build environment for linux/kernel/build.sh (used through linux/podman.sh).
 #
-# Pinned on purpose: the Buildroot snapshot we use (2023.11) expects a host
-# compiler of its era. GCC 15's C23 default breaks several of its host
-# packages, so use Debian 12 with GCC 12.
+# Pinned, so the host tools Buildroot builds the toolchain with don't change
+# under an existing build (Debian 12, GCC 12).
 FROM docker.io/library/debian:12
 
 RUN apt-get update \
@@ -17,5 +16,5 @@ RUN apt-get update \
 # packages' configure scripts refuse to run as uid 0 without this.
 ENV FORCE_UNSAFE_CONFIGURE=1
 
-# Tells linux/build.sh it is already inside the build container.
+# Tells linux/kernel/build.sh it is already inside the build container.
 ENV RISC_EMULATOR_BUILD_CONTAINER=1

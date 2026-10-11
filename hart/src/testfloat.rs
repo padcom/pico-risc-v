@@ -74,7 +74,6 @@ fn testfloat() {
         return;
     };
     let mut hart = Box::new(Hart::new());
-    hart.xlen64 = true;
     hart.reset(0);
 
     let mut failures = 0;
@@ -88,9 +87,6 @@ fn testfloat() {
             }
             if matches!(kind, Kind::ToInt { .. }) {
                 args.push("-exact".into()); // RISC-V conversions signal inexact
-            }
-            if function.ends_with("mulAdd") {
-                args.extend(["-n".into(), "2000000".into()]); // level 1 has 6 million
             }
             args.push(function.into());
             let mut child = Command::new(&generator).args(&args).stdout(Stdio::piped()).spawn().expect("testfloat_gen");
@@ -110,7 +106,7 @@ fn testfloat() {
                         for (i, &value) in inputs.iter().enumerate().take(operands) {
                             hart.f[1 + i] = boxed(value, single);
                         }
-                        hart.execute_fp::<true>(inst).unwrap();
+                        hart.execute_fp(inst).unwrap();
                         let result_single = match function {
                             "f32_to_f64" => false,
                             "f64_to_f32" => true,
@@ -125,18 +121,18 @@ fn testfloat() {
                     }
                     Kind::FromInt { single } => {
                         hart.x[1] = inputs[0];
-                        hart.execute_fp::<true>(inst).unwrap();
+                        hart.execute_fp(inst).unwrap();
                         if single { hart.f[4] & 0xffff_ffff } else { hart.f[4] }
                     }
                     Kind::ToInt { single, bits } => {
                         hart.f[1] = boxed(inputs[0], single);
-                        hart.execute_fp::<true>(inst).unwrap();
+                        hart.execute_fp(inst).unwrap();
                         if bits == 32 { hart.x[4] & 0xffff_ffff } else { hart.x[4] }
                     }
                     Kind::Compare { single } => {
                         hart.f[1] = boxed(inputs[0], single);
                         hart.f[2] = boxed(inputs[1], single);
-                        hart.execute_fp::<true>(inst).unwrap();
+                        hart.execute_fp(inst).unwrap();
                         hart.x[4]
                     }
                 };

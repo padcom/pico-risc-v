@@ -1,6 +1,6 @@
 /**
- * Minimal RV32I instruction encoder — just enough to hand-assemble small test
- * programs until we hook up a real toolchain. Registers are plain numbers (x0..x31).
+ * Minimal RV64IMA instruction encoder: just enough to hand-assemble small
+ * test programs. Registers are plain numbers (x0..x31).
  */
 
 const r = (f7: number, rs2: number, rs1: number, f3: number, rd: number, op: number) =>
@@ -52,9 +52,12 @@ export const asm = {
   lw: (rd: number, rs1: number, off: number) => i(off, rs1, 2, rd, 0x03),
   lbu: (rd: number, rs1: number, off: number) => i(off, rs1, 4, rd, 0x03),
   lhu: (rd: number, rs1: number, off: number) => i(off, rs1, 5, rd, 0x03),
+  lwu: (rd: number, rs1: number, off: number) => i(off, rs1, 6, rd, 0x03),
+  ld: (rd: number, rs1: number, off: number) => i(off, rs1, 3, rd, 0x03),
   sb: (rs2: number, rs1: number, off: number) => s(off, rs2, rs1, 0, 0x23),
   sh: (rs2: number, rs1: number, off: number) => s(off, rs2, rs1, 1, 0x23),
   sw: (rs2: number, rs1: number, off: number) => s(off, rs2, rs1, 2, 0x23),
+  sd: (rs2: number, rs1: number, off: number) => s(off, rs2, rs1, 3, 0x23),
 
   addi: (rd: number, rs1: number, imm: number) => i(imm, rs1, 0, rd, 0x13),
   slti: (rd: number, rs1: number, imm: number) => i(imm, rs1, 2, rd, 0x13),
@@ -77,7 +80,18 @@ export const asm = {
   or: (rd: number, rs1: number, rs2: number) => r(0x00, rs2, rs1, 6, rd, 0x33),
   and: (rd: number, rs1: number, rs2: number) => r(0x00, rs2, rs1, 7, rd, 0x33),
 
-  // RV32M
+  // 32-bit operations (*W), results sign-extended
+  addiw: (rd: number, rs1: number, imm: number) => i(imm, rs1, 0, rd, 0x1b),
+  slliw: (rd: number, rs1: number, sh: number) => i(sh, rs1, 1, rd, 0x1b),
+  srliw: (rd: number, rs1: number, sh: number) => i(sh, rs1, 5, rd, 0x1b),
+  sraiw: (rd: number, rs1: number, sh: number) => i(0x400 | sh, rs1, 5, rd, 0x1b),
+  addw: (rd: number, rs1: number, rs2: number) => r(0x00, rs2, rs1, 0, rd, 0x3b),
+  subw: (rd: number, rs1: number, rs2: number) => r(0x20, rs2, rs1, 0, rd, 0x3b),
+  sllw: (rd: number, rs1: number, rs2: number) => r(0x00, rs2, rs1, 1, rd, 0x3b),
+  srlw: (rd: number, rs1: number, rs2: number) => r(0x00, rs2, rs1, 5, rd, 0x3b),
+  sraw: (rd: number, rs1: number, rs2: number) => r(0x20, rs2, rs1, 5, rd, 0x3b),
+
+  // M
   mul: (rd: number, rs1: number, rs2: number) => r(0x01, rs2, rs1, 0, rd, 0x33),
   mulh: (rd: number, rs1: number, rs2: number) => r(0x01, rs2, rs1, 1, rd, 0x33),
   mulhsu: (rd: number, rs1: number, rs2: number) => r(0x01, rs2, rs1, 2, rd, 0x33),
@@ -86,8 +100,14 @@ export const asm = {
   divu: (rd: number, rs1: number, rs2: number) => r(0x01, rs2, rs1, 5, rd, 0x33),
   rem: (rd: number, rs1: number, rs2: number) => r(0x01, rs2, rs1, 6, rd, 0x33),
   remu: (rd: number, rs1: number, rs2: number) => r(0x01, rs2, rs1, 7, rd, 0x33),
+  mulw: (rd: number, rs1: number, rs2: number) => r(0x01, rs2, rs1, 0, rd, 0x3b),
+  divw: (rd: number, rs1: number, rs2: number) => r(0x01, rs2, rs1, 4, rd, 0x3b),
+  divuw: (rd: number, rs1: number, rs2: number) => r(0x01, rs2, rs1, 5, rd, 0x3b),
+  remw: (rd: number, rs1: number, rs2: number) => r(0x01, rs2, rs1, 6, rd, 0x3b),
+  remuw: (rd: number, rs1: number, rs2: number) => r(0x01, rs2, rs1, 7, rd, 0x3b),
 
-  // RV32A (aq/rl bits clear). Operand order follows assembly: rd, rs2, (rs1).
+  // A (aq/rl bits clear), on words (.W) and doublewords (.D). Operand order
+  // follows assembly: rd, rs2, (rs1).
   lrw: (rd: number, rs1: number) => r(0b00010 << 2, 0, rs1, 2, rd, 0x2f),
   scw: (rd: number, rs2: number, rs1: number) => r(0b00011 << 2, rs2, rs1, 2, rd, 0x2f),
   amoswapw: (rd: number, rs2: number, rs1: number) => r(0b00001 << 2, rs2, rs1, 2, rd, 0x2f),
@@ -99,6 +119,10 @@ export const asm = {
   amomaxw: (rd: number, rs2: number, rs1: number) => r(0b10100 << 2, rs2, rs1, 2, rd, 0x2f),
   amominuw: (rd: number, rs2: number, rs1: number) => r(0b11000 << 2, rs2, rs1, 2, rd, 0x2f),
   amomaxuw: (rd: number, rs2: number, rs1: number) => r(0b11100 << 2, rs2, rs1, 2, rd, 0x2f),
+  lrd: (rd: number, rs1: number) => r(0b00010 << 2, 0, rs1, 3, rd, 0x2f),
+  scd: (rd: number, rs2: number, rs1: number) => r(0b00011 << 2, rs2, rs1, 3, rd, 0x2f),
+  amoaddd: (rd: number, rs2: number, rs1: number) => r(0b00000 << 2, rs2, rs1, 3, rd, 0x2f),
+  amomaxud: (rd: number, rs2: number, rs1: number) => r(0b11100 << 2, rs2, rs1, 3, rd, 0x2f),
 
   // Zicsr
   csrrw: (rd: number, csr: number, rs1: number) => i(csr, rs1, 1, rd, 0x73),

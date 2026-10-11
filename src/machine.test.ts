@@ -124,7 +124,7 @@ describe('Machine.run with the virtual clock', () => {
   it('returns even when the guest only ever idles in WFI between timer ticks', () => {
     const m = machine(
       [
-        a.lui(5, MemoryMap.RAM), a.addi(5, 5, 0x100), a.csrrw(0, Csr.mtvec, 5),
+        a.auipc(5, 0), a.addi(5, 5, 0x100), a.csrrw(0, Csr.mtvec, 5), // the handler: RAM + 0x100 (this is at RAM + 0)
         ...setDeadline(1000),
         a.addi(7, 0, MIP_MTIP), a.csrrw(0, Csr.mie, 7), a.csrrsi(0, Csr.mstatus, 8),
         a.wfi(), a.jal(0, -4), // idle loop
@@ -203,7 +203,7 @@ describe('Device tree', () => {
     expect(view.getUint32(4)).toBe(dtb.length) // totalsize
     expect(view.getUint32(20)).toBe(17) // version
     const text = new TextDecoder('latin1').decode(dtb)
-    for (const s of ['console=ttyS0 quiet', 'rv32ima', 'ns16850', 'sifive,clint0', 'syscon-poweroff']) {
+    for (const s of ['console=ttyS0 quiet', 'rv64imafdc', 'ns16550a', 'sifive,clint0', 'syscon-poweroff']) {
       expect(text).toContain(s)
     }
   })
@@ -241,14 +241,14 @@ describe('C programs compiled with GNU toolchain', () => {
     '',
   ].join('\n')
 
-  it('matmul.c multiplies two 3x3 matrices (signed, via libgcc __mulsi3)', () => {
+  it('matmul.c multiplies two 3x3 matrices (signed, via libgcc __muldi3)', () => {
     const { machine, result, screen } = boot('matmul')
     expect(screen()).toBe(MATMUL_OUTPUT)
     expect(result).toBe('poweroff')
     expect(machine.cpu.x[10]).toBe(0)
   })
 
-  it('matmul.c built for RV32IM gives the same result with hardware MUL/DIV, in fewer instructions', () => {
+  it('matmul.c built for RV64IM gives the same result with hardware MUL/DIV, in fewer instructions', () => {
     const soft = boot('matmul').machine.cpu.instret
     const { machine, result, screen } = boot('matmul-m')
     expect(screen()).toBe(MATMUL_OUTPUT)
@@ -258,35 +258,28 @@ describe('C programs compiled with GNU toolchain', () => {
 
   // The benchmark (examples/bench) prints a checksum: 'checksum 991869f2' is
   // also what the same C code prints compiled for the host.
-  const runBench = (program: string, xlen: 32 | 64 = 32) => {
+  const runBench = (program: string) => {
     let screen = ''
-    const machine = new Machine({ xlen, clock: 'virtual', output: b => (screen += String.fromCharCode(b)) })
+    const machine = new Machine({ clock: 'virtual', output: b => (screen += String.fromCharCode(b)) })
     machine.boot(readFileSync(new URL(`../examples/build/${program}.bin`, import.meta.url)))
     return { result: machine.run(500_000_000), screen }
   }
 
-  it('the benchmark built with compressed instructions computes the same as when built without', () => {
+  it('the benchmark computes what it does on the host, built with compressed instructions or without', () => {
     const plain = runBench('bench')
     const compressed = runBench('bench-c')
+    expect(plain.result).toBe('poweroff')
     expect(compressed.result).toBe('poweroff')
     expect(compressed.screen).toBe('checksum 991869f2\n')
     expect(compressed.screen).toBe(plain.screen)
   })
 
-  it('floating point (RV32GC and RV64GC) gives the same bits as the same C code on the host', () => {
+  it('floating point gives the same bits as the same C code on the host', () => {
     // examples/fbench prints the exact bits of its results; this is what the
     // same program prints compiled natively (Apple Silicon, no FMA contraction).
     const expected = ['mandelbrot 40ef46b9389c4324', 'nbody 3fe6787f5c2f0c63', 'singles 42e9fd5a', '8ebc280f4d0ed7a4', ''].join('\n')
-    for (const [program, xlen] of [['fbench32', 32], ['fbench64', 64]] as const) {
-      const { result, screen } = runBench(program, xlen)
-      expect(result).toBe('poweroff')
-      expect(screen).toBe(expected)
-    }
-  })
-
-  it('the benchmark built for RV64 computes the same on an RV64 machine', () => {
-    const rv64 = runBench('bench64', 64)
-    expect(rv64.result).toBe('poweroff')
-    expect(rv64.screen).toBe('checksum 991869f2\n')
+    const { result, screen } = runBench('fbench')
+    expect(result).toBe('poweroff')
+    expect(screen).toBe(expected)
   })
 })

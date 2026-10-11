@@ -6,29 +6,28 @@ import { Machine, MemoryMap } from './machine.js'
 /**
  * The official RISC-V ISA tests (github.com/riscv-software-src/riscv-tests,
  * vendor/riscv-tests), built by test/build-riscv-tests.ts into
- * build/riscv-tests/<xlen>/:
+ * build/riscv-tests/64/:
  *
- *   rv<xlen>ui/um/ua/uf/ud/uc  user-level instructions: base, multiply, atomics,
- *                        single and double floating point, compressed
- *   rv<xlen>si/mi        supervisor- and machine-mode behaviour
+ *   rv64ui/um/ua/uf/ud/uc  user-level instructions: base, multiply, atomics,
+ *                          single and double floating point, compressed
+ *   rv64si/mi              supervisor- and machine-mode behaviour
  *
  * Each comes as -p- (physical memory, M-mode) and -v- (the same test in
- * U-mode, under virtual memory: Sv32 or Sv39 page tables set up by the test
+ * U-mode, under virtual memory: Sv39 page tables set up by the test
  * environment). A program reports by writing to its `tohost` word: 1 means
  * passed, any other odd value (n << 1) | 1 that test case n failed.
  */
-const BUILD = new URL('../build/riscv-tests/', import.meta.url)
+const DIR = new URL('../build/riscv-tests/64/', import.meta.url)
 
 /** Tests of things this emulator deliberately doesn't do, with why. */
 const NO_PMP = 'needs PMP entries; there are none (the spec allows zero: the PMP CSRs read as 0)'
 const UNSUPPORTED: Record<string, string> = {
-  'rv32mi-p-pmpaddr': NO_PMP,
   'rv64mi-p-pmpaddr': NO_PMP,
 }
 
-function runTest(file: URL, xlen: 32 | 64): number {
+function runTest(file: URL): number {
   const elf = parseElf(readFileSync(file))
-  const m = new Machine({ ramSize: 16 * 1024 * 1024, clock: 'virtual', xlen })
+  const m = new Machine({ ramSize: 16 * 1024 * 1024, clock: 'virtual' })
   const end = Math.max(...elf.segments.map(s => s.addr + s.memSize))
   const image = new Uint8Array(end - MemoryMap.RAM)
   for (const s of elf.segments) image.set(s.data, s.addr - MemoryMap.RAM)
@@ -43,13 +42,10 @@ function runTest(file: URL, xlen: 32 | 64): number {
   throw new Error('no result')
 }
 
-for (const xlen of [32, 64] as const) {
-  const dir = new URL(`${xlen}/`, BUILD)
-  const tests = existsSync(dir) ? readdirSync(dir).filter(f => !f.endsWith('.dump')).sort() : []
-  describe.skipIf(!tests.length)(`riscv-tests RV${xlen}`, () => {
-    it.each(tests.filter(name => !UNSUPPORTED[name]))('%s', name => {
-      const result = runTest(new URL(name, dir), xlen)
-      expect(result === 1 ? 'pass' : `failed test case ${result >>> 1} (tohost=0x${result.toString(16)})`).toBe('pass')
-    })
+const tests = existsSync(DIR) ? readdirSync(DIR).filter(f => !f.endsWith('.dump')).sort() : []
+describe.skipIf(!tests.length)('riscv-tests RV64', () => {
+  it.each(tests.filter(name => !UNSUPPORTED[name]))('%s', name => {
+    const result = runTest(new URL(name, DIR))
+    expect(result === 1 ? 'pass' : `failed test case ${result >>> 1} (tohost=0x${result.toString(16)})`).toBe('pass')
   })
-}
+})

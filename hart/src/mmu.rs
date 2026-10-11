@@ -1,7 +1,6 @@
-//! Virtual memory: Sv32 (RV32: two-level page tables, 4 KiB pages and 4 MiB
-//! megapages) and Sv39 (RV64: three levels, 4 KiB, 2 MiB and 1 GiB pages,
-//! 39-bit virtual addresses). Physical memory is below 4 GiB (there's nothing
-//! above, so mapping it raises an access fault). Accessed/dirty bits are
+//! Virtual memory: Sv39 (three-level page tables, 4 KiB, 2 MiB and 1 GiB
+//! pages, 39-bit virtual addresses). Physical memory is below 4 GiB (there's
+//! nothing above, so mapping it raises an access fault). Accessed/dirty bits are
 //! updated by "hardware" (here).
 //!
 //! The TLB caches what the page tables say (physical page + PTE flags) for a
@@ -21,8 +20,8 @@ const PTE_X: u64 = 1 << 3;
 const PTE_U: u64 = 1 << 4;
 const PTE_A: u64 = 1 << 6;
 const PTE_D: u64 = 1 << 7;
-/// Sv39 PTE bits 63:54 (N, PBMT, reserved): none of those extensions here, so they must be 0.
-const PTE_SV39_RESERVED: u64 = 0x3ff << 54;
+/// PTE bits 63:54 (N, PBMT, reserved): none of those extensions here, so they must be 0.
+const PTE_RESERVED: u64 = 0x3ff << 54;
 
 /// Direct mapped, indexed by the low bits of the virtual page number.
 pub const TLB_SIZE: usize = 4096;
@@ -34,7 +33,6 @@ pub const TLB_EMPTY: u64 = u64::MAX;
 #[repr(u8)]
 pub enum Paging {
     Bare,
-    Sv32,
     Sv39,
 }
 
@@ -48,7 +46,7 @@ impl Hart {
     #[inline(always)]
     pub(crate) fn translate(&mut self, vaddr: u64, access: Access, priv_: u32) -> Result<u64> {
         // The tag is the whole address above the page offset, so non-canonical
-        // Sv39 addresses never hit (only canonical ones get into the TLB).
+        // addresses never hit (only canonical ones get into the TLB).
         let vpn = vaddr >> 12;
         let i = vpn as usize & (TLB_SIZE - 1);
         if self.tlb_vpn[i] == vpn {
@@ -67,27 +65,21 @@ impl Hart {
     #[inline(never)]
     fn walk(&mut self, vaddr: u64, access: Access, priv_: u32) -> Result<u64> {
         let fault = Trap::new(access.page_fault(), vaddr);
-        // Levels, PTE size, VPN bits per level, root page table.
-        let (levels, pte_size, vpn_bits, root) = match self.paging {
-            Paging::Sv32 => (2, 4, 10, self.satp & SATP32_PPN),
-            _ => {
-                // Bits 63:39 must all equal bit 38.
-                if ((vaddr << 25) as i64 >> 25) as u64 != vaddr {
-                    return Err(fault);
-                }
-                (3, 8, 9, self.satp & SATP64_PPN)
-            }
-        };
+        // Bits 63:39 must all equal bit 38.
+        if ((vaddr << 25) as i64 >> 25) as u64 != vaddr {
+            return Err(fault);
+        }
 
-        let mut table = root << 12;
-        let mut level = levels - 1;
+        // Three levels of 512 eight-byte entries, 9 bits of the VPN each.
+        let mut table = (self.satp & SATP_PPN) << 12;
+        let mut level = 2;
         let mut pte_addr;
         let mut pte;
         loop {
-            let index = (vaddr >> (12 + level * vpn_bits)) & ((1 << vpn_bits) - 1);
-            pte_addr = table + index * pte_size as u64;
-            pte = self.phys_read(pte_addr, pte_size).ok_or(Trap::new(access.access_fault(), vaddr))?;
-            if pte_size == 8 && pte & PTE_SV39_RESERVED != 0 {
+            let index = (vaddr >> (12 + level * 9)) & 0x1ff;
+            pte_addr = table + index * 8;
+            pte = self.phys_read(pte_addr, 8).ok_or(Trap::new(access.access_fault(), vaddr))?;
+            if pte & PTE_RESERVED != 0 {
                 return Err(fault);
             }
             if pte & PTE_V == 0 || (pte & PTE_R == 0 && pte & PTE_W != 0) {
@@ -109,7 +101,7 @@ impl Hart {
         let mut ppn = pte >> 10;
         if level > 0 {
             // A superpage: its physical page number must be aligned to its size.
-            let low_bits = (1 << (level * vpn_bits)) - 1;
+            let low_bits = (1 << (level * 9)) - 1;
             if ppn & low_bits != 0 {
                 return Err(fault);
             }

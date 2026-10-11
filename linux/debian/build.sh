@@ -2,9 +2,8 @@
 #
 # Builds a Debian disk image for the 64-bit machine: Debian 13 (trixie) for
 # riscv64, installed with mmdebstrap from Debian's own packages, in an ext4
-# file system image. It boots with the rv64 flavor's kernel and firmware
-# (images/linux-rv64/Image, fw_dynamic.bin); `npm run start:debian` builds
-# whatever is missing and boots it.
+# file system image. It boots with our kernel and firmware (images/kernel/,
+# linux/kernel/build.sh); `npm start` builds whatever is missing and boots it.
 #
 #   linux/debian/packages   what's installed on top of the minimal base system
 #   linux/debian/overlay/   files copied verbatim into the root filesystem
@@ -73,7 +72,7 @@ packages=$(sed -e 's/#.*//' "$DEBIAN_DIR/packages" | tr -s ' \t\n' '\n' | grep .
 step "Installing Debian $SUITE (riscv64) with mmdebstrap"
 # Customization, in the target (chroot) after the packages are installed:
 #   - the overlay's files
-#   - root logs in without a password, like the Buildroot images
+#   - root logs in without a password
 #   - networkd brings up eth0 (resolved is enabled by its package)
 #   - no apt runs on timers: on an emulated CPU they'd take over the machine
 #     for minutes at random times; run `apt update` when you need it
@@ -94,9 +93,13 @@ mmdebstrap \
 
 step "Creating the disk image ($SIZE, ext4)"
 mke2fs -q -t ext4 -L debian -d "$WORK/rootfs.tar" "$WORK/rootfs.ext4" "$SIZE"
+e2fsck -fn "$WORK/rootfs.ext4" >/dev/null || die "the new file system has errors (e2fsck -fn)"
 
 mkdir -p "$OUT_DIR"
 cp --sparse=always "$WORK/rootfs.ext4" "$OUT_DIR/rootfs.ext4"
-# What this image was built from; `npm run start:debian` rebuilds when it changes.
+# (Checked again where it landed: the project directory may be a shared folder,
+# e.g. in Podman's VM on macOS.)
+e2fsck -fn "$OUT_DIR/rootfs.ext4" >/dev/null || die "images/debian/rootfs.ext4 has errors after copying it there (e2fsck -fn)"
+# What this image was built from; `npm start` rebuilds when it changes.
 bash "$ROOT/linux/inputs-hash.sh" debian >"$OUT_DIR/.inputs-hash"
 step "Debian disk image ready: images/debian/rootfs.ext4 ($(du -h "$OUT_DIR/rootfs.ext4" | cut -f1) used of $SIZE)"

@@ -142,7 +142,7 @@ impl Hart {
         if low & 3 != 3 {
             return Ok(low);
         }
-        let pc2 = self.wrap(pc.wrapping_add(2));
+        let pc2 = pc.wrapping_add(2);
         let pa2 = if self.translate_fetch && pc & 0xfff == 0xffe {
             self.translate(pc2, Access::Fetch, self.priv_)?
         } else {
@@ -150,12 +150,6 @@ impl Hart {
         };
         let high = self.phys_read(pa2, 2).ok_or(Trap::new(INSTRUCTION_ACCESS_FAULT, pc2))? as u32;
         Ok(high << 16 | low)
-    }
-
-    /// Addresses wrap at XLEN bits (on RV32 they're 32-bit).
-    #[inline(always)]
-    pub(crate) fn wrap(&self, addr: u64) -> u64 {
-        addr & self.address_mask
     }
 
     // Data accesses at virtual addresses, `width` bytes (1, 2, 4 or 8), as
@@ -179,7 +173,7 @@ impl Hart {
     fn load_split(&mut self, vaddr: u64, width: u32) -> Result<u64> {
         let mut value = 0;
         for i in 0..width {
-            value |= self.load(self.wrap(vaddr.wrapping_add(i as u64)), 1)? << (8 * i);
+            value |= self.load(vaddr.wrapping_add(i as u64), 1)? << (8 * i);
         }
         Ok(value)
     }
@@ -199,10 +193,10 @@ impl Hart {
     #[inline(never)]
     fn store_split(&mut self, vaddr: u64, width: u32, value: u64) -> Result<()> {
         // Check the second page before writing anything, so a fault leaves memory untouched.
-        let second_page = self.wrap(vaddr.wrapping_add(width as u64 - 1)) & !0xfff;
+        let second_page = vaddr.wrapping_add(width as u64 - 1) & !0xfff;
         self.translate(second_page, Access::Store, self.data_priv)?;
         for i in 0..width {
-            self.store(self.wrap(vaddr.wrapping_add(i as u64)), 1, value >> (8 * i))?;
+            self.store(vaddr.wrapping_add(i as u64), 1, value >> (8 * i))?;
         }
         Ok(())
     }

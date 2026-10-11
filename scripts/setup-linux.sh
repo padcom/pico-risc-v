@@ -4,7 +4,7 @@
 # after a fresh clone:
 #
 #   scripts/setup-linux.sh
-#   npm run start:debian
+#   npm start
 #
 # boots Debian. It installs (whatever is missing):
 #
@@ -134,9 +134,9 @@ cat <<EOF
 
 ==> Done. Open a new terminal (for Node.js and Rust on PATH), then:
 
-  npm run start:debian
+  npm start
 
-The first run builds the 64-bit Linux kernel (with Buildroot, in a Podman
+The first run builds the Linux kernel (with Buildroot, in a Podman
 container: a cross toolchain, the kernel and firmware, so it takes a while)
 and the Debian disk, then boots it. Log in as root, no password; poweroff
 quits. See linux/README.md for more.

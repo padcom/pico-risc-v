@@ -9,7 +9,7 @@
 //! the JavaScript views into it (registers, RAM) stay valid.
 //!
 //! Register and CSR values cross over as 64-bit integers (BigInt in
-//! JavaScript), whatever the XLEN.
+//! JavaScript).
 
 mod csr;
 mod fpu;
@@ -38,13 +38,11 @@ fn hart() -> &'static mut Hart {
 /// Flags for `init`.
 const BREAK_ON_EBREAK: u32 = 1;
 const HAS_TIME: u32 = 2;
-const RV64: u32 = 4;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn init(reset_vector: u64, flags: u32) {
     let h = hart();
-    h.xlen64 = flags & RV64 != 0;
-    rvc::fill_table(h.xlen64);
+    rvc::fill_table();
     h.reset(reset_vector);
     h.break_on_ebreak = flags & BREAK_ON_EBREAK != 0;
     h.has_time = flags & HAS_TIME != 0;
@@ -61,8 +59,7 @@ pub extern "C" fn ram_alloc(base: u32, size: u32) -> *mut u8 {
     h.ram
 }
 
-/// Where x0..x31 live in linear memory (32 × 64 bits; on RV32 sign-extended
-/// 32-bit values).
+/// Where x0..x31 live in linear memory (32 × 64 bits).
 #[unsafe(no_mangle)]
 pub extern "C" fn registers() -> *mut u64 {
     hart().x.as_mut_ptr()
@@ -81,14 +78,12 @@ pub extern "C" fn reset(pc: u64) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn run(max_steps: u32) -> u32 {
-    let h = hart();
-    if h.xlen64 { h.run::<true>(max_steps) } else { h.run::<false>(max_steps) }
+    hart().run(max_steps)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn step() {
-    let h = hart();
-    if h.xlen64 { h.step::<true>() } else { h.step::<false>() }
+    hart().step();
 }
 
 #[unsafe(no_mangle)]
@@ -168,7 +163,6 @@ pub extern "C" fn get(field: u32) -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn set(field: u32, value: u64) {
     let h = hart();
-    let value = value & h.address_mask; // RV32: 32-bit registers
     match field {
         PC => h.pc = value,
         PRIV => h.priv_ = value as u32,

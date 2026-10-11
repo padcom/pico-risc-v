@@ -3,15 +3,15 @@
  *
  *   bare-metal  examples/bench: integer, memory and branch-heavy C code in
  *               M-mode without paging; checks the checksum it prints
- *   compressed  the same, built with compressed instructions (RV32IMC)
- *   rv64        the same for RV64 (RV64IMC), on an RV64 machine
- *   linux       the MMU Linux image (OpenSBI, Sv32 paging, ext4 on the virtio
- *               disk, read-only snapshot) booting to the login prompt
- *   linux64     the same with the RV64 image (Sv39)
+ *   compressed  the same, built with compressed instructions (RV64IMC)
+ *   debian      Debian (OpenSBI, our kernel, systemd; Sv39 paging, ext4 on the
+ *               virtio disk as a read-only snapshot, no network card) booting
+ *               to the login prompt
  *
- * Both run on the virtual clock (Linux with a fixed date and random seed), so every run
- * executes exactly the same instructions; the numbers are comparable between
- * emulator versions.
+ * All run on the virtual clock (Debian with a fixed date and random seed), so
+ * every run executes exactly the same instructions; the numbers are comparable
+ * between emulator versions (for debian: as long as the kernel and the Debian
+ * disk are the same builds).
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { SnapshotStorage } from '../dist/block-storage.js'
@@ -26,9 +26,9 @@ interface Result {
   seconds: number
 }
 
-function bareMetal(program = 'bench', xlen: 32 | 64 = 32): Result {
+function bareMetal(program = 'bench'): Result {
   let screen = ''
-  const machine = new Machine({ xlen, clock: 'virtual', output: b => (screen += String.fromCharCode(b)) })
+  const machine = new Machine({ clock: 'virtual', output: b => (screen += String.fromCharCode(b)) })
   machine.boot(readFileSync(new URL(`examples/build/${program}.bin`, root)))
   const start = performance.now()
   const result = machine.run(2_000_000_000)
@@ -39,21 +39,21 @@ function bareMetal(program = 'bench', xlen: 32 | 64 = 32): Result {
   return { instructions: machine.cpu.instret, seconds }
 }
 
-function linux(flavor = 'mmu', xlen: 32 | 64 = 32): Result | undefined {
-  const images = new URL(`images/linux-${flavor}/`, root)
-  const files = ['fw_dynamic.bin', 'Image', 'rootfs.ext4'].map(f => new URL(f, images))
+function debian(): Result | undefined {
+  const files = ['kernel/fw_dynamic.bin', 'kernel/Image', 'debian/rootfs.ext4'].map(f => new URL(`images/${f}`, root))
   if (!files.every(existsSync)) return undefined
   const [firmware, kernel, rootfs] = files as [URL, URL, URL]
 
   let screen = ''
   const disk = new FileStorage(rootfs.pathname, { readOnly: true })
   const machine = new Machine({
-    xlen,
     clock: 'virtual',
-    // A fixed date and random seed: every run executes the same instructions.
+    // Virtual time at about real speed (systemd's timeouts), and a fixed date
+    // and random seed: every run executes the same instructions.
+    instructionsPerMicrosecond: 100,
     startTime: Date.UTC(2026, 0, 1),
     rngSeed: new Uint8Array(64).fill(42),
-    ramSize: 256 * 1024 * 1024,
+    ramSize: 512 * 1024 * 1024,
     bootargs: 'earlycon=uart8250,mmio,0x10000000,1000000 console=ttyS0 root=/dev/vda rw',
     disk: new SnapshotStorage(disk),
     output: b => (screen += String.fromCharCode(b)),
@@ -62,8 +62,8 @@ function linux(flavor = 'mmu', xlen: 32 | 64 = 32): Result | undefined {
   const start = performance.now()
   while (!screen.includes('login: ')) {
     const result = machine.run(1_000_000)
-    if (result !== 'limit') throw new Error(`linux: machine stopped (${result}); screen ends with:\n${screen.slice(-1000)}`)
-    if (machine.cpu.instret > 2_000_000_000) throw new Error(`linux: no login prompt; screen ends with:\n${screen.slice(-1000)}`)
+    if (result !== 'limit') throw new Error(`debian: machine stopped (${result}); screen ends with:\n${screen.slice(-1000)}`)
+    if (machine.cpu.instret > 20_000_000_000) throw new Error(`debian: no login prompt; screen ends with:\n${screen.slice(-1000)}`)
   }
   const seconds = (performance.now() - start) / 1000
   disk.close()
@@ -73,9 +73,7 @@ function linux(flavor = 'mmu', xlen: 32 | 64 = 32): Result | undefined {
 const benchmarks: Record<string, () => Result | undefined> = {
   'bare-metal': () => bareMetal(),
   compressed: () => bareMetal('bench-c'),
-  rv64: () => bareMetal('bench64', 64),
-  linux: () => linux(),
-  linux64: () => linux('rv64', 64),
+  debian: () => debian(),
 }
 const selected = process.argv.slice(2)
 for (const name of selected.length ? selected : Object.keys(benchmarks)) {
@@ -83,7 +81,7 @@ for (const name of selected.length ? selected : Object.keys(benchmarks)) {
   if (!bench) throw new Error(`unknown benchmark ${name}; available: ${Object.keys(benchmarks).join(', ')}`)
   const r = bench()
   if (!r) {
-    console.log(`${name.padEnd(12)} skipped (no images; npm run linux:build)`)
+    console.log(`${name.padEnd(12)} skipped (no images; npm start builds them)`)
     continue
   }
   const mips = r.instructions / r.seconds / 1e6

@@ -1,7 +1,7 @@
-# Kernel config fragment for the mmu flavor, applied on top of the kernel's
-# rv32_defconfig (see linux/mmu/buildroot.fragment).
+# Kernel config fragment, applied on top of the kernel's riscv defconfig (see
+# linux/kernel/buildroot.fragment).
 
-# Match the emulated CPU: RV32IMAFDC / RV64IMAFDC, no vector instructions.
+# Match the emulated CPU: RV64IMAFDC, no vector instructions.
 CONFIG_RISCV_ISA_C=y
 CONFIG_FPU=y
 # CONFIG_RISCV_ISA_V is not set
@@ -9,18 +9,23 @@ CONFIG_FPU=y
 # CONFIG_EFI is not set
 
 # Everything is built in (no module loading). That turns every "m" in
-# rv32_defconfig into "y", so switch off what this machine doesn't have.
+# defconfig into "y", so switch off what this machine doesn't have.
+# No 32-bit programs, virtual machines or NUMA either.
+# CONFIG_COMPAT is not set
+# CONFIG_VIRTUALIZATION is not set
+# CONFIG_NUMA is not set
 # CONFIG_MODULES is not set
 # CONFIG_ARCH_ANDES is not set
-# CONFIG_ARCH_MICROCHIP_POLARFIRE is not set
+# CONFIG_ARCH_CANAAN is not set
 # CONFIG_ARCH_MICROCHIP is not set
+# CONFIG_ARCH_MICROCHIP_POLARFIRE is not set
+# CONFIG_ARCH_RENESAS is not set
 # CONFIG_ARCH_SIFIVE is not set
 # CONFIG_ARCH_SOPHGO is not set
 # CONFIG_ARCH_SPACEMIT is not set
 # CONFIG_ARCH_STARFIVE is not set
 # CONFIG_ARCH_SUNXI is not set
 # CONFIG_ARCH_THEAD is not set
-# CONFIG_ARCH_CANAAN is not set
 # CONFIG_PCI is not set
 # CONFIG_DRM is not set
 # CONFIG_FB is not set

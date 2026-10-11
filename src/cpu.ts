@@ -16,11 +16,9 @@ export type StopReason = 'limit' | 'wfi' | 'breakpoint' | 'stopped'
 const STOP_REASONS: readonly StopReason[] = ['limit', 'wfi', 'breakpoint', 'stopped']
 
 export interface CPUOptions {
-  /** Register width: RV32 (default) or RV64. */
-  xlen?: 32 | 64
   /** Address of the first instruction. */
   resetVector?: number
-  /** Source for the `time`/`timeh` CSRs (normally the CLINT's mtime). Without one they are illegal. */
+  /** Source for the `time` CSR (normally the CLINT's mtime). Without one it is illegal. */
   readTime?: () => number
   /**
    * Treat EBREAK as a debugger breakpoint: stop `run()` instead of trapping.
@@ -47,6 +45,7 @@ const BREAK_ON_EBREAK = FIELDS.length + 1
 /** What the core (hart/, Rust compiled to WebAssembly) exports. */
 interface Core {
   memory: WebAssembly.Memory
+  // (64-bit values arrive as signed bigints: WebAssembly's i64.)
   init(resetVector: bigint, flags: number): void
   ram_alloc(base: number, size: number): number
   registers(): number
@@ -71,8 +70,8 @@ function coreModule(): WebAssembly.Module {
 }
 
 /**
- * RV32GC or RV64GC hart (IMAFDC, Zicsr, Zifencei) with machine, supervisor
- * and user privilege modes and virtual memory (Sv32 / Sv39).
+ * RV64GC hart (IMAFDC, Zicsr, Zifencei) with machine, supervisor and user
+ * privilege modes and virtual memory (Sv39).
  *
  * The instruction set is implemented in Rust (hart/), compiled to WebAssembly;
  * each CPU is its own instance of that module. This class connects it to the
@@ -81,12 +80,12 @@ function coreModule(): WebAssembly.Module {
  * properties, or exactly with `read()` / `write()`.
  */
 export class CPU {
-  readonly xlen: 32 | 64
-  /** x0..x31, all 64 bits (on RV32 sign-extended 32-bit values); x0 is re-zeroed after every instruction. */
+  /** x0..x31, all 64 bits; x0 is re-zeroed after every instruction. */
   readonly x64: BigInt64Array
   /**
-   * x0..x31 as signed 32-bit numbers: on RV32 the registers themselves. On
-   * RV64 the low halves (writes sign-extend; use x64 or setRegister for more).
+   * x0..x31's low halves as signed 32-bit numbers, for 32-bit values: writes
+   * sign-extend them, as RV64 keeps 32-bit values (use x64 or setRegister for
+   * more).
    */
   readonly x: Int32Array
   /** f0..f31, raw bits (single-precision values NaN-boxed: upper 32 bits all ones). */
@@ -97,9 +96,8 @@ export class CPU {
 
   constructor(
     readonly bus: Bus,
-    { xlen = 32, resetVector = 0, readTime, breakOnEbreak = false, ram }: CPUOptions = {},
+    { resetVector = 0, readTime, breakOnEbreak = false, ram }: CPUOptions = {},
   ) {
-    this.xlen = xlen
     const access = <T>(op: () => T, fault: T): T => {
       try {
         return op()
@@ -127,7 +125,7 @@ export class CPU {
     }
     const instance = new WebAssembly.Instance(coreModule(), { env })
     this.core = instance.exports as unknown as Core
-    this.core.init(u64(resetVector), (breakOnEbreak ? 1 : 0) | (readTime ? 2 : 0) | (xlen === 64 ? 4 : 0))
+    this.core.init(u64(resetVector), (breakOnEbreak ? 1 : 0) | (readTime ? 2 : 0))
     // Allocating RAM grows the core's memory, so views are made afterwards;
     // nothing allocates later, so they stay valid.
     if (ram) {
@@ -140,17 +138,16 @@ export class CPU {
   }
 
   /**
-   * Set a register to a number: negative ones are sign-extended; on RV64
-   * others are zero-extended (an address such as 0x8000_0000 stays one), on
-   * RV32 they're 32-bit patterns.
+   * Set a register to a number: negative ones are sign-extended, others
+   * zero-extended (an address such as 0x8000_0000 stays one).
    */
   setRegister(index: number, value: number | bigint): void {
-    this.x64[index] = BigInt.asIntN(this.xlen, u64(value))
+    this.x64[index] = BigInt.asIntN(64, u64(value))
   }
 
   /** A CSR (or the pc) exactly, as an unsigned bigint. */
   read(field: Field): bigint {
-    return this.core.get(FIELDS.indexOf(field))
+    return BigInt.asUintN(64, this.core.get(FIELDS.indexOf(field)))
   }
 
   write(field: Field, value: number | bigint): void {
@@ -206,8 +203,8 @@ export class CPU {
 }
 
 /**
- * CSR state as properties: unsigned numbers (on RV64 rounded above 2^53, such
- * as kernel addresses; read() and write() are exact).
+ * CSR state as properties: unsigned numbers (rounded above 2^53, such as
+ * kernel addresses; read() and write() are exact).
  */
 export interface CPU {
   pc: number
@@ -236,7 +233,7 @@ export interface CPU {
 FIELDS.forEach((name, field) =>
   Object.defineProperty(CPU.prototype, name, {
     get(this: { core: Core }) {
-      return Number(this.core.get(field))
+      return Number(BigInt.asUintN(64, this.core.get(field)))
     },
     set(this: { core: Core }, value: number) {
       this.core.set(field, u64(value))
@@ -247,7 +244,7 @@ FIELDS.forEach((name, field) =>
 /**
  * The registers' low 32 bits, as an Int32Array-like view of a 64-bit register
  * file (`words` holds them as 32-bit pairs, low half first). Writes
- * sign-extend into the upper half, as the core keeps RV32 registers.
+ * sign-extend into the upper half.
  */
 function lowHalves(words: Int32Array): Int32Array {
   const snapshot = () => Int32Array.from({ length: 32 }, (_, i) => words[2 * i]!)

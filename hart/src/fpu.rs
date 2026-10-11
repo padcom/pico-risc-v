@@ -17,7 +17,7 @@ use core::cmp::Ordering;
 use softfp::{ExceptionFlags, F32, F32Desc, F64, F64Desc, Fp, FpDesc, RoundingMode};
 
 use crate::csr::*;
-use crate::hart::{Hart, Result, addr, illegal, imm_i, imm_s, sext32};
+use crate::hart::{Hart, Result, illegal, imm_i, imm_s, sext32};
 
 const LOAD_FP: u32 = 0x07;
 const STORE_FP: u32 = 0x27;
@@ -113,7 +113,7 @@ impl Hart {
     }
 
     /// Execute an F/D instruction (LOAD-FP, STORE-FP, FMADD..FNMADD, OP-FP).
-    pub(crate) fn execute_fp<const X64: bool>(&mut self, inst: u32) -> Result<()> {
+    pub(crate) fn execute_fp(&mut self, inst: u32) -> Result<()> {
         if !self.fp_enabled() {
             return Err(illegal(inst));
         }
@@ -126,7 +126,7 @@ impl Hart {
 
         match inst & 0x7f {
             LOAD_FP => {
-                let address = addr::<X64>(self.x[rs1].wrapping_add(imm_i(inst)));
+                let address = self.x[rs1].wrapping_add(imm_i(inst));
                 let value = match funct3 {
                     0b010 => nan_box(self.load(address, 4)? as u32), // FLW
                     0b011 => self.load(address, 8)?,                 // FLD
@@ -135,7 +135,7 @@ impl Hart {
                 self.f[rd] = value;
             }
             STORE_FP => {
-                let address = addr::<X64>(self.x[rs1].wrapping_add(imm_s(inst)));
+                let address = self.x[rs1].wrapping_add(imm_s(inst));
                 match funct3 {
                     0b010 => self.store(address, 4, self.f[rs2])?, // FSW
                     0b011 => self.store(address, 8, self.f[rs2])?, // FSD
@@ -156,8 +156,8 @@ impl Hart {
                 };
             }
             OP_FP => match fmt {
-                0 => self.op_fp::<X64, F32Desc>(inst, rd, funct3, rs1, rs2)?,
-                1 => self.op_fp::<X64, F64Desc>(inst, rd, funct3, rs1, rs2)?,
+                0 => self.op_fp::<F32Desc>(inst, rd, funct3, rs1, rs2)?,
+                1 => self.op_fp::<F64Desc>(inst, rd, funct3, rs1, rs2)?,
                 _ => return Err(illegal(inst)),
             },
             _ => return Err(illegal(inst)),
@@ -174,12 +174,22 @@ impl Hart {
         if negate_addend {
             c = c.negate();
         }
+        // softfp gives a zero product plus a zero the sign of an exact
+        // cancellation (+0, or -0 when rounding down) even when both are
+        // zeros of the same sign, which keep it: 0 × -1 + -0 = -0.
+        if c.is_zero() && ((a.is_zero() && b.is_finite()) || (b.is_zero() && a.is_finite())) {
+            // The zero operand, with the product's sign.
+            let product = if a.is_zero() { a.copy_sign_xored(b) } else { b.copy_sign_xored(a) };
+            if D::write(product) == D::write(c) {
+                return D::write(c);
+            }
+        }
         D::write(self.ieee(rm, || Fp::fused_multiply_add(a, b, c)))
     }
 
     /// OP-FP for one format: arithmetic, sign injection, min/max,
     /// comparisons, classification, conversions and moves.
-    fn op_fp<const X64: bool, D: Format>(&mut self, inst: u32, rd: usize, funct3: u32, rs1: usize, rs2: usize) -> Result<()>
+    fn op_fp<D: Format>(&mut self, inst: u32, rd: usize, funct3: u32, rs1: usize, rs2: usize) -> Result<()>
     where
         Self: Convert<D>,
     {
@@ -233,16 +243,14 @@ impl Hart {
                 // FMV.X.W / FMV.X.D: the raw bits (FMV.X.W sign-extends them)
                 self.x[rd] = match D::SIGNIFICAND_WIDTH {
                     23 => sext32(self.f[rs1] as u32 as u64),
-                    _ if X64 => self.f[rs1],
-                    _ => return Err(illegal(inst)),
+                    _ => self.f[rs1],
                 };
             }
             0b11110 if rs2 == 0 && funct3 == 0 => {
                 // FMV.W.X / FMV.D.X
                 self.f[rd] = match D::SIGNIFICAND_WIDTH {
                     23 => nan_box(self.x[rs1] as u32),
-                    _ if X64 => self.x[rs1],
-                    _ => return Err(illegal(inst)),
+                    _ => self.x[rs1],
                 };
             }
             0b01000 => {
@@ -263,14 +271,13 @@ impl Hart {
             0b11000 => {
                 // FCVT.W/WU/L/LU from this format; 32-bit results are sign-extended.
                 let rm = self.rounding_mode(inst)?;
-                let value = match rs2 {
+                self.x[rd] = match rs2 {
                     0 => sext32(self.ieee(rm, || Self::to_i32(a)) as u64),
                     1 => sext32(self.ieee(rm, || Self::to_u32(a)) as u64),
-                    2 if X64 => self.ieee(rm, || Self::to_i64(a)),
-                    3 if X64 => self.ieee(rm, || Self::to_u64(a)),
+                    2 => self.ieee(rm, || Self::to_i64(a)),
+                    3 => self.ieee(rm, || Self::to_u64(a)),
                     _ => return Err(illegal(inst)),
                 };
-                self.x[rd] = if X64 { value } else { sext32(value) };
             }
             0b11010 => {
                 // FCVT to this format from W/WU/L/LU
@@ -279,8 +286,8 @@ impl Hart {
                 let result = match rs2 {
                     0 => self.ieee(rm, || Self::from_i32(x as u32)),
                     1 => self.ieee(rm, || Self::from_u32(x as u32)),
-                    2 if X64 => self.ieee(rm, || Self::from_i64(x)),
-                    3 if X64 => self.ieee(rm, || Self::from_u64(x)),
+                    2 => self.ieee(rm, || Self::from_i64(x)),
+                    3 => self.ieee(rm, || Self::from_u64(x)),
                     _ => return Err(illegal(inst)),
                 };
                 self.f[rd] = D::write(result);

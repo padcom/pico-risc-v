@@ -7,7 +7,9 @@ import { TrapCause } from './trap.js'
 
 /** Where test programs install their trap handler (a single WFI, which stops `run()`). */
 const HANDLER = 0x100
-const INT_MIN = -0x8000_0000
+const INT32_MIN = -0x8000_0000n
+const INT64_MIN = -(1n << 63n)
+const INT64_MAX = (1n << 63n) - 1n
 
 /** Load a program at 0 (and a WFI at HANDLER), run it until it stops, return the CPU. */
 function run(program: number[], setup?: (cpu: CPU, ram: RAM) => void) {
@@ -55,33 +57,48 @@ describe('encoder sanity (against GNU as output)', () => {
     [a.csrrc(10, Csr.mie, 11), 0x3045b573],
     [a.csrrwi(10, Csr.mscratch, 5), 0x3402d573],
     [a.csrrci(10, Csr.mstatus, 8), 0x30047573],
+    [a.ld(10, 2, 8), 0x00813503],
+    [a.lwu(10, 11, -4), 0xffc5e503],
+    [a.sd(11, 2, 16), 0x00b13823],
+    [a.addiw(10, 11, -1), 0xfff5851b],
+    [a.slliw(10, 11, 31), 0x01f5951b],
+    [a.sraiw(10, 11, 3), 0x4035d51b],
+    [a.subw(10, 11, 12), 0x40c5853b],
+    [a.sraw(10, 11, 12), 0x40c5d53b],
+    [a.divuw(10, 11, 12), 0x02c5d53b],
+    [a.slli(10, 11, 63), 0x03f59513],
+    [a.srai(10, 11, 63), 0x43f5d513],
+    [a.lrd(10, 11), 0x1005b52f],
+    [a.scd(10, 12, 11), 0x18c5b52f],
+    [a.amomaxud(10, 12, 11), 0xe0c5b52f],
   ])('%s === %s', (got, want) => expect(got).toBe(want))
 })
 
-describe('RV32I', () => {
+describe('RV64I', () => {
   it('x0 is hardwired to zero', () => {
     const { cpu } = run([a.addi(0, 0, 42), a.ebreak()])
     expect(cpu.x[0]).toBe(0)
   })
 
-  it('ADDI / ADD / SUB with wraparound', () => {
+  it('ADDI / ADD / SUB with 64-bit wraparound', () => {
     const { cpu } = run([
       a.addi(1, 0, -1), // x1 = -1
       a.addi(2, 0, 1),
       a.add(3, 1, 2), // -1 + 1 = 0
-      a.lui(4, 0x80000000), // INT_MIN
-      a.sub(5, 4, 2), // INT_MIN - 1 wraps to INT_MAX
+      a.slli(4, 2, 63), // INT64_MIN
+      a.sub(5, 4, 2), // INT64_MIN - 1 wraps to INT64_MAX
       a.ebreak(),
     ])
-    expect(cpu.x[1]).toBe(-1)
-    expect(cpu.x[3]).toBe(0)
-    expect(cpu.x[5]).toBe(0x7fffffff)
+    expect(cpu.x64[1]).toBe(-1n)
+    expect(cpu.x64[3]).toBe(0n)
+    expect(cpu.x64[4]).toBe(INT64_MIN)
+    expect(cpu.x64[5]).toBe(INT64_MAX)
   })
 
-  it('LUI + ADDI builds a 32-bit constant', () => {
+  it('LUI + ADDI builds a 32-bit constant, sign-extended to 64 bits', () => {
     // 0xDEADBEEF: low 12 bits 0xEEF are negative as imm, so upper is 0xDEADC
     const { cpu } = run([a.lui(1, 0xdeadc000), a.addi(1, 1, 0xeef - 0x1000), a.ebreak()])
-    expect(cpu.x[1]! >>> 0).toBe(0xdeadbeef)
+    expect(cpu.x64[1]).toBe(BigInt.asIntN(64, 0xffff_ffff_dead_beefn))
   })
 
   it('AUIPC is relative to its own address', () => {
@@ -89,40 +106,63 @@ describe('RV32I', () => {
     expect(cpu.x[1]).toBe(0x1004)
   })
 
-  it('shifts and comparisons (signed vs unsigned)', () => {
+  it('shifts (6-bit amounts) and comparisons (signed vs unsigned)', () => {
     const { cpu } = run([
       a.addi(1, 0, -16),
       a.srai(2, 1, 2), // -4
-      a.srli(3, 1, 28), // 0xF
+      a.srli(3, 1, 60), // 0xF
       a.slli(4, 1, 1), // -32
       a.slti(5, 1, 0), // -16 < 0 → 1
-      a.sltiu(6, 1, 0), // 0xFFFFFFF0 < 0 → 0
-      a.sltu(7, 0, 1), // 0 < 0xFFFFFFF0 → 1
+      a.sltiu(6, 1, 0), // 0xFFFF_FFFF_FFFF_FFF0 < 0 → 0
+      a.sltu(7, 0, 1), // 0 < 0xFFFF_FFFF_FFFF_FFF0 → 1
       a.slt(8, 0, 1), // 0 < -16 → 0
+      a.addi(9, 0, 33),
+      a.sll(10, 9, 9), // shift amounts come from the low 6 bits: 33 << 33
       a.ebreak(),
     ])
-    expect([...cpu.x.slice(2, 9)]).toEqual([-4, 0xf, -32, 1, 0, 1, 0])
+    expect([...cpu.x64.slice(2, 9)]).toEqual([-4n, 0xfn, -32n, 1n, 0n, 1n, 0n])
+    expect(cpu.x64[10]).toBe(33n << 33n)
   })
 
   it('loads sign/zero-extend, stores are little-endian', () => {
     const { cpu, ram } = run([
       a.lui(1, 0x1000), // base = 0x1000
-      a.addi(2, 0, -2), // 0xFFFFFFFE
-      a.sw(2, 1, 0),
+      a.addi(2, 0, -2), // 0xFFFF_FFFF_FFFF_FFFE
+      a.sd(2, 1, 0),
       a.lb(3, 1, 0),
       a.lbu(4, 1, 0),
       a.lh(5, 1, 0),
       a.lhu(6, 1, 0),
-      a.addi(7, 0, 0x7f),
-      a.sb(7, 1, 8),
+      a.lw(7, 1, 0),
+      a.lwu(8, 1, 0),
+      a.ld(9, 1, 0),
+      a.addi(10, 0, 0x7f),
+      a.sb(10, 1, 8),
       a.ebreak(),
     ])
-    expect(cpu.x[3]).toBe(-2)
-    expect(cpu.x[4]).toBe(0xfe)
-    expect(cpu.x[5]).toBe(-2)
-    expect(cpu.x[6]).toBe(0xfffe)
+    expect([...cpu.x64.slice(3, 10)]).toEqual([-2n, 0xfen, -2n, 0xfffen, -2n, 0xffff_fffen, -2n])
+    expect(ram.read32(0x1004)).toBe(0xffffffff)
     expect(ram.read8(0x1000)).toBe(0xfe)
     expect(ram.read8(0x1008)).toBe(0x7f)
+  })
+
+  it('32-bit operations (*W) wrap at 32 bits and sign-extend the result', () => {
+    const { cpu } = run([
+      a.lui(1, 0x80000000), // INT32_MIN, sign-extended: 0xFFFF_FFFF_8000_0000
+      a.addiw(2, 1, -1), // wraps to INT32_MAX
+      a.addi(3, 1, -1), // 64-bit: no wrap
+      a.addi(4, 0, 1),
+      a.slliw(5, 4, 31), // INT32_MIN
+      a.srliw(6, 1, 4), // 0x0800_0000 (zeros shifted in at bit 31)
+      a.sraiw(7, 1, 4), // 0xF800_0000, sign-extended
+      a.addw(8, 1, 1), // 0x8000_0000 + 0x8000_0000 = 0 in 32 bits
+      a.subw(9, 0, 1), // 0 - INT32_MIN = INT32_MIN
+      a.ebreak(),
+    ])
+    expect(cpu.x64[1]).toBe(INT32_MIN)
+    expect(cpu.x64[2]).toBe(0x7fff_ffffn)
+    expect(cpu.x64[3]).toBe(INT32_MIN - 1n)
+    expect([...cpu.x64.slice(5, 10)]).toEqual([INT32_MIN, 0x0800_0000n, -0x0800_0000n, 0n, INT32_MIN])
   })
 
   it('loops with branches: sum 1..10', () => {
@@ -157,38 +197,46 @@ describe('RV32I', () => {
   })
 })
 
-describe('RV32M', () => {
-  const U = (n: number) => n | 0 // write unsigned constants as their register bit pattern
+describe('M', () => {
+  // Operands and results as 64-bit register values (all ones = -1n is also
+  // the unsigned maximum).
   it.each([
-    ['mul', a.mul, 7, -3, -21],
-    ['mul overflow', a.mul, 0x7fffffff, 2, -2],
-    ['mulh -1*-1', a.mulh, -1, -1, 0],
-    ['mulh INT_MIN²', a.mulh, INT_MIN, INT_MIN, 0x40000000],
-    ['mulh -2*3', a.mulh, -2, 3, -1],
-    ['mulhu max²', a.mulhu, U(0xffffffff), U(0xffffffff), U(0xfffffffe)],
-    ['mulhu 2^31*2', a.mulhu, INT_MIN, 2, 1],
-    ['mulhsu -1*max', a.mulhsu, -1, U(0xffffffff), -1],
-    ['mulhsu 2*2^31', a.mulhsu, 2, INT_MIN, 1],
-    ['div', a.div, -7, 2, -3],
-    ['rem', a.rem, -7, 2, -1],
-    ['divu', a.divu, -7, 2, 0x7ffffffc],
-    ['remu', a.remu, -7, 2, 1],
-    ['div by zero', a.div, 5, 0, -1],
-    ['divu by zero', a.divu, 5, 0, -1],
-    ['rem by zero', a.rem, 5, 0, 5],
-    ['remu by zero', a.remu, 5, 0, 5],
-    ['div overflow', a.div, INT_MIN, -1, INT_MIN],
-    ['rem overflow', a.rem, INT_MIN, -1, 0],
+    ['mul', a.mul, 7n, -3n, -21n],
+    ['mul overflow', a.mul, INT64_MAX, 2n, -2n],
+    ['mulh -1*-1', a.mulh, -1n, -1n, 0n],
+    ['mulh INT64_MIN²', a.mulh, INT64_MIN, INT64_MIN, 1n << 62n],
+    ['mulh -2*3', a.mulh, -2n, 3n, -1n],
+    ['mulhu max²', a.mulhu, -1n, -1n, -2n],
+    ['mulhu 2^63*2', a.mulhu, INT64_MIN, 2n, 1n],
+    ['mulhsu -1*max', a.mulhsu, -1n, -1n, -1n],
+    ['mulhsu 2*2^63', a.mulhsu, 2n, INT64_MIN, 1n],
+    ['div', a.div, -7n, 2n, -3n],
+    ['rem', a.rem, -7n, 2n, -1n],
+    ['divu', a.divu, -7n, 2n, INT64_MAX - 3n],
+    ['remu', a.remu, -7n, 2n, 1n],
+    ['div by zero', a.div, 5n, 0n, -1n],
+    ['divu by zero', a.divu, 5n, 0n, -1n],
+    ['rem by zero', a.rem, 5n, 0n, 5n],
+    ['remu by zero', a.remu, 5n, 0n, 5n],
+    ['div overflow', a.div, INT64_MIN, -1n, INT64_MIN],
+    ['rem overflow', a.rem, INT64_MIN, -1n, 0n],
+    // 32-bit versions: on the low halves, results sign-extended
+    ['mulw overflow', a.mulw, 0x7fff_ffffn, 2n, -2n],
+    ['divw overflow', a.divw, INT32_MIN, -1n, INT32_MIN],
+    ['divw by zero', a.divw, 5n, 0n, -1n],
+    ['divuw', a.divuw, -7n, 2n, 0x7fff_fffcn],
+    ['remw', a.remw, -7n, 2n, -1n],
+    ['remuw by zero', a.remuw, 0x8000_0000n, 0n, INT32_MIN],
   ] as const)('%s', (_, op, x1, x2, expected) => {
     const { cpu } = run([op(3, 1, 2), a.ebreak()], cpu => {
-      cpu.x[1] = x1
-      cpu.x[2] = x2
+      cpu.x64[1] = x1
+      cpu.x64[2] = x2
     })
-    expect(cpu.x[3]).toBe(expected)
+    expect(cpu.x64[3]).toBe(expected)
   })
 })
 
-describe('RV32A', () => {
+describe('A', () => {
   const ADDR = 0x1000
   it.each([
     ['amoswap', a.amoswapw, 10, 5, 5],
@@ -200,14 +248,36 @@ describe('RV32A', () => {
     ['amomax', a.amomaxw, -5, 3, 3],
     ['amominu', a.amominuw, -5, 3, 3],
     ['amomaxu', a.amomaxuw, -5, 3, -5],
-  ] as const)('%s returns the old value and stores the result', (_, op, old, src, stored) => {
+  ] as const)('%s.w returns the old value (sign-extended) and stores the result', (_, op, old, src, stored) => {
     const { cpu, ram } = run([op(3, 2, 1), a.ebreak()], (cpu, ram) => {
       cpu.x[1] = ADDR
       cpu.x[2] = src
       ram.write32(ADDR, old)
     })
-    expect(cpu.x[3]).toBe(old)
+    expect(cpu.x64[3]).toBe(BigInt(old))
     expect(ram.read32(ADDR) | 0).toBe(stored)
+  })
+
+  it('.D: AMOs on 64 bits; LR/SC pairs', () => {
+    const { cpu, ram } = run(
+      [
+        a.amoaddd(3, 2, 1), // x3 = old, mem = old + 1
+        a.amomaxud(4, 0, 1), // max(mem, 0) unsigned: unchanged
+        a.lrd(5, 1),
+        a.scd(6, 2, 1), // succeeds: mem = 1
+        a.ebreak(),
+      ],
+      (cpu, ram) => {
+        cpu.x[1] = ADDR
+        cpu.x[2] = 1
+        new DataView(ram.bytes.buffer).setBigUint64(ADDR, 0xffff_ffffn, true)
+      },
+    )
+    expect(cpu.x64[3]).toBe(0xffff_ffffn)
+    expect(cpu.x64[4]).toBe(0x1_0000_0000n) // the carry went into the upper half
+    expect(cpu.x64[5]).toBe(0x1_0000_0000n)
+    expect(cpu.x64[6]).toBe(0n)
+    expect(new DataView(ram.bytes.buffer).getBigUint64(ADDR, true)).toBe(1n)
   })
 
   it('LR/SC succeeds on a valid reservation, then fails once it is used up', () => {
@@ -258,11 +328,11 @@ describe('Zicsr', () => {
     expect(cpu.mscratch).toBe(0x50)
   })
 
-  it('misa reports RV32 with I, M, A, F, D, C, S and U', () => {
+  it('misa reports RV64 with I, M, A, F, D, C, S and U', () => {
     const { cpu } = run([a.csrrs(1, Csr.misa, 0), a.ebreak()])
-    const misa = cpu.x[1]! >>> 0
-    expect(misa >>> 30).toBe(1)
-    for (const ext of 'IMAFDCSU') expect(misa & (1 << (ext.charCodeAt(0) - 65))).not.toBe(0)
+    const misa = BigInt.asUintN(64, cpu.x64[1]!)
+    expect(misa >> 62n).toBe(2n)
+    for (const ext of 'IMAFDCSU') expect(misa & (1n << BigInt(ext.charCodeAt(0) - 65))).not.toBe(0n)
   })
 
   it('mepc keeps bit 1 (instructions are 2-byte aligned)', () => {
@@ -271,16 +341,18 @@ describe('Zicsr', () => {
   })
 
   it('cycle / instret count retired instructions', () => {
-    const { cpu } = run([a.addi(0, 0, 0), a.addi(0, 0, 0), a.csrrs(1, Csr.instret, 0), a.csrrs(2, Csr.cycleh, 0), a.ebreak()])
+    const { cpu } = run([a.addi(0, 0, 0), a.addi(0, 0, 0), a.csrrs(1, Csr.instret, 0), a.csrrs(2, Csr.cycle, 0), a.ebreak()])
     expect(cpu.x[1]).toBe(2)
-    expect(cpu.x[2]).toBe(0)
+    expect(cpu.x[2]).toBe(3)
   })
 
-  it('unknown CSR is an illegal instruction', () => {
-    const inst = a.csrrs(1, 0x7c0, 0)
-    const { cpu } = runTrapping([inst])
-    expect(cpu.mcause).toBe(TrapCause.IllegalInstruction)
-    expect(cpu.mtval).toBe(inst)
+  it('unknown CSR is an illegal instruction, as are RV32-only ones (cycleh, mstatush)', () => {
+    for (const csr of [0x7c0, 0xc80, 0x310]) {
+      const inst = a.csrrs(1, csr, 0)
+      const { cpu } = runTrapping([inst])
+      expect(cpu.mcause).toBe(TrapCause.IllegalInstruction)
+      expect(cpu.mtval).toBe(inst)
+    }
   })
 
   it('writing a read-only CSR is illegal, but reading it is fine', () => {
@@ -318,9 +390,10 @@ describe('traps', () => {
   })
 
   it('load / store access faults report the address', () => {
-    const load = runTrapping([a.lui(1, 0x80000000), a.lw(2, 1, 8)]).cpu
-    expect([load.mcause, load.mepc, load.mtval]).toEqual([TrapCause.LoadAccessFault, 4, 0x80000008])
-    const store = runTrapping([a.lui(1, 0x80000000), a.sw(2, 1, 0)]).cpu
+    const base = [a.addi(1, 0, 1), a.slli(1, 1, 31)] // 0x8000_0000: nothing there
+    const load = runTrapping([...base, a.lw(2, 1, 8)]).cpu
+    expect([load.mcause, load.mepc, load.mtval]).toEqual([TrapCause.LoadAccessFault, 8, 0x80000008])
+    const store = runTrapping([...base, a.sd(2, 1, 0)]).cpu
     expect([store.mcause, store.mtval]).toEqual([TrapCause.StoreAccessFault, 0x80000000])
   })
 
@@ -338,7 +411,7 @@ describe('traps', () => {
 
   it('a trapping instruction does not retire or write its destination', () => {
     const { cpu } = runTrapping([a.lui(1, 0x80000000), a.lw(1, 1, 0)])
-    expect(cpu.x[1]! >>> 0).toBe(0x80000000)
+    expect(cpu.x64[1]).toBe(INT32_MIN)
     expect(cpu.instret).toBe(2) // the LUI and the handler's WFI, not the LW
   })
 
@@ -394,7 +467,7 @@ describe('interrupts', () => {
     cpu.step()
     cpu.setInterruptPending(MIP_MTIP, true)
     cpu.step()
-    expect(cpu.mcause).toBe(0x80000007)
+    expect(cpu.read('mcause')).toBe(1n << 63n | 7n) // interrupt bit (63), cause 7
     expect(cpu.mepc).toBe(4) // resumes at the instruction that hadn't run yet
     expect(cpu.pc).toBe(HANDLER)
     expect(cpu.x[2]).toBe(0)

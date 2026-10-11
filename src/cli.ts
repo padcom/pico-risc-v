@@ -3,14 +3,13 @@
  * Interactive runner: boots a flat binary image (Linux `Image` or a bare-metal
  * program) and connects the emulated terminal to this process's stdin/stdout.
  *
- *   node dist/cli.js [--xlen 32|64] [--memory <MiB>] [--kernel <file>] [--disk <file> [--snapshot]]
+ *   node dist/cli.js [--memory <MiB>] [--kernel <file>] [--disk <file> [--snapshot]]
  *                    [--net] [--bootargs <string>] [--virtual-clock] <image>
  *
- * --xlen selects an RV32 (default) or RV64 CPU.
+ * The machine has one RV64GC CPU.
  *
  * With --kernel, <image> is firmware (OpenSBI's fw_dynamic.bin): the kernel is
- * loaded 4 MiB into RAM (RV32 kernels must be 4 MiB aligned) and the firmware
- * told to enter it there in S-mode.
+ * loaded 4 MiB into RAM and the firmware told to enter it there in S-mode.
  *
  * --disk attaches a raw disk image file as a virtio block device (/dev/vda);
  * the guest's writes go to the file. With --snapshot they are kept in memory
@@ -32,12 +31,12 @@ import { UserNetwork } from './net/user-network.js'
 /** Instructions per scheduling slice; small enough to keep input responsive. */
 const SLICE = 200_000
 const CTRL_A = 0x01
-/** Where the kernel goes: right after the firmware, 4 MiB aligned as RV32 Linux requires. */
+/** Where the kernel goes: after the firmware, aligned as Linux requires (2 MiB). */
 const KERNEL_OFFSET = 0x400000
 
 function usage(): never {
   console.error(
-    'usage: risc-emulator [--xlen 32|64] [--memory <MiB>] [--kernel <file>] [--disk <file> [--snapshot]] [--net] [--bootargs <string>] [--virtual-clock] <image>',
+    'usage: risc-emulator [--memory <MiB>] [--kernel <file>] [--disk <file> [--snapshot]] [--net] [--bootargs <string>] [--virtual-clock] <image>',
   )
   process.exit(2)
 }
@@ -47,7 +46,6 @@ const { values, positionals } = (() => {
     return parseArgs({
       allowPositionals: true,
       options: {
-        xlen: { type: 'string', default: '32' },
         memory: { type: 'string', default: '64' },
         kernel: { type: 'string' },
         disk: { type: 'string' },
@@ -66,7 +64,6 @@ if (values.help || positionals.length !== 1) usage()
 
 const ramSize = Number(values.memory) * 1024 * 1024
 if (!Number.isInteger(ramSize) || ramSize <= 0) usage()
-const xlen = values.xlen === '64' ? 64 : values.xlen === '32' ? 32 : usage()
 
 let pending: number[] = []
 const flush = () => {
@@ -80,7 +77,6 @@ const disk: BlockStorage | undefined = diskFile && values.snapshot ? new Snapsho
 const network = values.net ? new UserNetwork() : undefined
 
 const machine = new Machine({
-  xlen,
   ramSize,
   disk,
   network,

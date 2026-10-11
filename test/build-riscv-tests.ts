@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 /**
  * Build the riscv-tests suites src/riscv-tests.test.ts runs (vendor/riscv-tests,
- * a git submodule) into build/riscv-tests/<xlen>/, with the same GNU toolchain
+ * a git submodule) into build/riscv-tests/64/, with the same GNU toolchain
  * as the examples. make only rebuilds what changed. Without the submodule or
  * the toolchain, the tests are skipped.
  */
@@ -17,22 +17,20 @@ export default function setup() {
     console.warn('riscv-tests not checked out (git submodule update --init --recursive vendor/riscv-tests); skipping them')
     return
   }
-  for (const xlen of [32, 64]) {
-    const out = `${root}build/riscv-tests/${xlen}`
-    mkdirSync(out, { recursive: true })
-    try {
-      execFileSync('make', [
-        '-s', '-j8', '-C', out, '-f', `${isa}/Makefile`,
-        `src_dir=${isa}`,
-        `XLEN=${xlen}`,
-        'RISCV_PREFIX=riscv64-elf-',
-        // The bare-metal toolchain has no C library: env/v gets stand-ins for
-        // the few headers it includes.
-        `RISCV_GCC_OPTS=-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -ffreestanding -I${root}test/riscv-tests/include -Wl,--no-warn-rwx-segments`,
-        ...SUITES.map(suite => `rv${xlen}${suite}`),
-      ], { stdio: 'inherit' })
-    } catch (e) {
-      console.warn(`Could not build riscv-tests for RV${xlen} (is riscv64-elf-gcc installed?); using what's there`, e)
-    }
+  const out = `${root}build/riscv-tests/64`
+  mkdirSync(out, { recursive: true })
+  try {
+    execFileSync('make', [
+      '-s', '-j8', '-C', out, '-f', `${isa}/Makefile`,
+      `src_dir=${isa}`,
+      'XLEN=64',
+      'RISCV_PREFIX=riscv64-elf-',
+      // The bare-metal toolchain has no C library: env/v gets stand-ins for
+      // the few headers it includes.
+      `RISCV_GCC_OPTS=-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -ffreestanding -I${root}test/riscv-tests/include -Wl,--no-warn-rwx-segments`,
+      ...SUITES.map(suite => `rv64${suite}`),
+    ], { stdio: 'inherit' })
+  } catch (e) {
+    console.warn("Could not build riscv-tests (is riscv64-elf-gcc installed?); using what's there", e)
   }
 }

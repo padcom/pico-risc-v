@@ -3,8 +3,7 @@ import { WordDevice } from './bus.js'
 /**
  * System controller: a single register that powers the machine off or reboots
  * it. Linux drives it through its generic "syscon-poweroff" / "syscon-reboot"
- * drivers, so the values are whatever the device tree says (we use the same as
- * mini-rv32ima).
+ * drivers, so the values are whatever the device tree says.
  */
 export class Syscon extends WordDevice {
   static readonly SIZE = 0x1000

@@ -4,7 +4,7 @@
 # after a fresh clone:
 #
 #   scripts/setup-macos.sh
-#   npm run start:debian
+#   npm start
 #
 # boots Debian. It installs (whatever is missing), with Homebrew
 # (https://brew.sh, installed first if needed; that asks for your password):
@@ -86,10 +86,10 @@ cat <<EOF
 
 ==> Done. Now:
 
-  npm run start:debian
+  npm start
 
-The first run creates Podman's Linux VM, builds the 64-bit Linux kernel
-(with Buildroot, in a Podman container: a cross toolchain, the kernel and
+The first run creates Podman's Linux VM, builds the Linux kernel (with
+Buildroot, in a Podman container: a cross toolchain, the kernel and
 firmware, so it takes a while) and the Debian disk, then boots it. Log in as
 root, no password; poweroff quits. See linux/README.md for more.
 EOF

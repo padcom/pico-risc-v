@@ -22,9 +22,6 @@ pub const SATP: u32 = 0x180;
 pub const CYCLE: u32 = 0xc00;
 pub const TIME: u32 = 0xc01;
 pub const INSTRET: u32 = 0xc02;
-pub const CYCLEH: u32 = 0xc80;
-pub const TIMEH: u32 = 0xc81;
-pub const INSTRETH: u32 = 0xc82;
 
 // Machine information
 pub const MVENDORID: u32 = 0xf11;
@@ -41,7 +38,6 @@ pub const MIDELEG: u32 = 0x303;
 pub const MIE: u32 = 0x304;
 pub const MTVEC: u32 = 0x305;
 pub const MCOUNTEREN: u32 = 0x306;
-pub const MSTATUSH: u32 = 0x310;
 pub const MCOUNTINHIBIT: u32 = 0x320;
 
 // Machine trap handling
@@ -62,8 +58,6 @@ pub const TDATA3: u32 = 0x7a3;
 // Machine counters
 pub const MCYCLE: u32 = 0xb00;
 pub const MINSTRET: u32 = 0xb02;
-pub const MCYCLEH: u32 = 0xb80;
-pub const MINSTRETH: u32 = 0xb82;
 
 /// mstatus fields (sstatus is a restricted view of the same register).
 pub const MSTATUS_SIE: u64 = 1 << 1;
@@ -91,16 +85,14 @@ pub const MIP_MTIP: u64 = 1 << 7;
 pub const MIP_SEIP: u64 = 1 << 9;
 pub const MIP_MEIP: u64 = 1 << 11;
 
-/// mstatus.UXL and SXL (RV64 only): U- and S-mode are 64-bit (2), read-only.
+/// mstatus.UXL and SXL: U- and S-mode are 64-bit (2), read-only.
 pub const MSTATUS_UXL_SXL_64: u64 = 2 << 32 | 2 << 34;
 
-/// satp on RV32: MODE bit and physical page number of the root page table.
-pub const SATP32_MODE_SV32: u64 = 1 << 31;
-pub const SATP32_PPN: u64 = 0x3fffff;
-/// satp on RV64: MODE in bits 63:60 (8 = Sv39), PPN in 43:0.
-pub const SATP64_MODE_SHIFT: u32 = 60;
-pub const SATP64_MODE_SV39: u64 = 8;
-pub const SATP64_PPN: u64 = (1 << 44) - 1;
+/// satp: MODE in bits 63:60 (8 = Sv39), and the physical page number of the
+/// root page table in 43:0.
+pub const SATP_MODE_SHIFT: u32 = 60;
+pub const SATP_MODE_SV39: u64 = 8;
+pub const SATP_PPN: u64 = (1 << 44) - 1;
 
 /// Privilege levels.
 pub const PRIV_U: u32 = 0;
