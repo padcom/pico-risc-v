@@ -27,13 +27,17 @@ INSTALL_DIR=$TARGET_DIR/usr/local/bin
 MANIFEST=$WORK/installed.txt
 STACK_SIZE=65536 # nommu: bFLT executables get a fixed-size stack; elf2flt's default (4 KiB) is tiny
 
-# riscv32-buildroot-linux-uclibc-gcc (nommu) or -gnu-gcc (mmu, glibc)
-CC=$(find "$HOST_DIR/bin" -maxdepth 1 -name 'riscv32-buildroot-linux-*-gcc' | head -n 1)
-[ -n "$CC" ] || { echo "post-build.sh: no riscv32-buildroot-linux-*-gcc in $HOST_DIR/bin" >&2; exit 1; }
+# riscv32-buildroot-linux-uclibc-gcc (nommu), riscv32-...-gnu-gcc (mmu, glibc)
+# or riscv64-...-gnu-gcc (rv64)
+CC=$(find "$HOST_DIR/bin" -maxdepth 1 -name 'riscv*-buildroot-linux-*-gcc' | head -n 1)
+[ -n "$CC" ] || { echo "post-build.sh: no riscv*-buildroot-linux-*-gcc in $HOST_DIR/bin" >&2; exit 1; }
 if grep -q '^BR2_BINFMT_FLAT=y' "$BR2_CONFIG"; then
   CFLAGS=(-march=rv32ima -mabi=ilp32 -Os -fPIE -pie -static -ffunction-sections -fdata-sections -Wall)
   # shellcheck disable=SC2054 # the commas belong to -Wl,
   LDFLAGS=(-Wl,-elf2flt="-r -s $STACK_SIZE" -Wl,--gc-sections)
+elif [[ $CC == */riscv64-* ]]; then
+  CFLAGS=(-march=rv64imac -mabi=lp64 -O2 -Wall)
+  LDFLAGS=()
 else
   CFLAGS=(-march=rv32imac -mabi=ilp32 -O2 -Wall)
   LDFLAGS=()

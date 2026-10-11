@@ -42,6 +42,8 @@ export const TIMEBASE_HZ = 1_000_000
 export const DEFAULT_BOOTARGS = 'earlycon=uart8250,mmio,0x10000000,1000000 console=ttyS0'
 
 export interface MachineOptions {
+  /** Register width: RV32 (default) or RV64. */
+  xlen?: 32 | 64
   /** RAM size in bytes (default 64 MiB). */
   ramSize?: number
   /** Disk attached as a virtio block device (/dev/vda in Linux). */
@@ -92,8 +94,8 @@ export interface BootOptions {
   next?: { offset: number; mode?: 'S' | 'M' }
 }
 
-/** sizeof(struct fw_dynamic_info) on RV32, rounded up to keep the DTB 8-byte aligned. */
-const FW_DYNAMIC_INFO_SIZE = 32
+/** sizeof(struct fw_dynamic_info): six `unsigned long`s (rounded up to keep the DTB 8-byte aligned). */
+const FW_DYNAMIC_INFO_SIZE = 48
 
 /**
  * Why `run()` returned:
@@ -138,6 +140,7 @@ export class Machine {
   private next: BootOptions['next']
 
   constructor({
+    xlen = 32,
     ramSize = 64 * 1024 * 1024,
     output,
     clock = 'realtime',
@@ -159,6 +162,7 @@ export class Machine {
     this.terminal = new Terminal(output)
     // RAM lives inside the CPU core (fast); devices reach it through the bus.
     this.cpu = new CPU(this.bus, {
+      xlen,
       resetVector: MemoryMap.RAM,
       readTime: () => this.clint.mtime,
       ram: { base: MemoryMap.RAM, size: ramSize },
@@ -240,10 +244,11 @@ export class Machine {
     this.plic.reset()
     this.disk?.reset()
     this.nic?.reset()
-    this.cpu.x[10] = 0 // a0: hart id
-    this.cpu.x[11] = MemoryMap.RAM + dtbOffset // a1: device tree
+    this.cpu.setRegister(10, 0) // a0: hart id
+    this.cpu.setRegister(11, MemoryMap.RAM + dtbOffset) // a1: device tree
     if (this.next) {
-      // struct fw_dynamic_info (OpenSBI include/sbi/fw_dynamic.h), passed in a2
+      // struct fw_dynamic_info (OpenSBI include/sbi/fw_dynamic.h), passed in
+      // a2: `unsigned long` fields, XLEN bits each (little-endian, < 2^32 here).
       const info = [
         0x4942534f, // magic "OSBI"
         2, // version
@@ -252,8 +257,9 @@ export class Machine {
         0, // options
         0, // boot_hart
       ]
-      info.forEach((word, i) => this.ram.write32(infoOffset + i * 4, word))
-      this.cpu.x[12] = MemoryMap.RAM + infoOffset
+      const size = this.cpu.xlen / 8
+      info.forEach((value, i) => this.ram.write32(infoOffset + i * size, value))
+      this.cpu.setRegister(12, MemoryMap.RAM + infoOffset)
     }
   }
 
@@ -339,6 +345,7 @@ export class Machine {
   }
 
   private describe(memSize: number): FdtNode {
+    const xlen = this.cpu.xlen
     const reg = (addr: number, size: number) => [0, addr, 0, size] // 2 address + 2 size cells
     const CPU_PHANDLE = 1
     const INTC_PHANDLE = 2
@@ -349,7 +356,7 @@ export class Machine {
         '#address-cells': 2,
         '#size-cells': 2,
         compatible: 'riscv-minimal-nommu',
-        model: 'risc-emulator (RV32IMAC)',
+        model: `risc-emulator (RV${xlen}IMAC)`,
       },
       children: {
         chosen: {
@@ -375,10 +382,10 @@ export class Machine {
                 compatible: 'riscv',
                 // Old-style ISA string, plus the newer binding that kernels
                 // built without CONFIG_RISCV_ISA_FALLBACK (6.x) insist on.
-                'riscv,isa': 'rv32imac',
-                'riscv,isa-base': 'rv32i',
+                'riscv,isa': `rv${xlen}imac`,
+                'riscv,isa-base': `rv${xlen}i`,
                 'riscv,isa-extensions': ['i', 'm', 'a', 'c', 'zicsr', 'zifencei', 'zicntr'],
-                'mmu-type': 'riscv,sv32',
+                'mmu-type': xlen === 64 ? 'riscv,sv39' : 'riscv,sv32',
               },
               children: {
                 'interrupt-controller': {

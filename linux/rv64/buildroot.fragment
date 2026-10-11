@@ -1,0 +1,10 @@
+# Buildroot settings for the rv64 flavor: applied after linux/mmu/buildroot.fragment
+# (everything there, packages included, applies here too; later settings win),
+# on top of Buildroot's configs/qemu_riscv64_virt_defconfig.
+
+# CPU: RV64IMAC (no FPU yet); the MMU (Sv39) is on by default.
+BR2_RISCV_64=y
+BR2_RISCV_ABI_LP64=y
+
+# Firmware: OpenSBI built for our CPU.
+BR2_TARGET_OPENSBI_ADDITIONAL_VARIABLES="PLATFORM_RISCV_ISA=rv64imac_zicsr_zifencei"

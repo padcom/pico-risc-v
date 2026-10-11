@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
-# Builds a Linux image for the emulator from source with Buildroot. Two
+# Builds a Linux image for the emulator from source with Buildroot. Three
 # flavors (FLAVOR=...):
 #
 #   mmu    (default) regular RV32 Linux with virtual memory (Sv32), running in
-#          S-mode under OpenSBI. Upstream Buildroot, uClibc-ng with threads and
-#          wide chars, plus extra packages such as Midnight Commander (mc).
+#          S-mode under OpenSBI. Upstream Buildroot, glibc, plus extra
+#          packages such as Midnight Commander (mc).
 #          → images/linux-mmu/fw_dynamic.bin (firmware), Image (kernel) and
 #            rootfs.ext4 (root filesystem disk image, replaced on every build)
+#   rv64   the same for RV64 (Sv39): mmu's configuration plus linux/rv64/.
+#          → images/linux-rv64/ (the same files)
 #   nommu  mini-rv32ima's tiny no-MMU kernel running in M-mode.
 #          → images/linux/Image
 #
@@ -16,8 +18,9 @@
 #   linux/overlay/     files copied verbatim into the root filesystem
 #   linux/programs/    one directory per program, compiled for the target
 #                      and installed into /usr/local/bin (see post-build.sh)
-#   linux/mmu/         mmu flavor: Buildroot and kernel config fragments
-#                      (add packages to buildroot.fragment)
+#   linux/mmu/         mmu and rv64 flavors: Buildroot and kernel config
+#                      fragments (add packages to buildroot.fragment)
+#   linux/rv64/        rv64 flavor: what differs from mmu (64-bit CPU)
 #   linux/nommu/configs/  nommu flavor: optional replacements for
 #                      mini-rv32ima's configs (buildroot_config,
 #                      custom_kernel_config, busybox_config, uclibc_config)
@@ -28,13 +31,13 @@
 # The first build downloads and compiles a cross toolchain, the kernel and
 # all packages (a few GB, a while); later runs are incremental.
 #
-# usage: [FLAVOR=mmu|nommu] linux/build.sh [buildroot-make-target...]
+# usage: [FLAVOR=mmu|rv64|nommu] linux/build.sh [buildroot-make-target...]
 #   linux/build.sh                    build (or update) the image
 #   linux/build.sh linux-menuconfig   any Buildroot target, e.g. to tweak configs
 #   linux/build.sh clean              wipe build output (keeps downloads)
 #
 # Environment:
-#   FLAVOR      mmu (default) or nommu
+#   FLAVOR      mmu (default), rv64 or nommu
 #   NATIVE=1    build on this (Linux) host instead of in the Podman container
 #   BUILD_DIR   where Buildroot lives and builds (default: <project>/.buildroot/<flavor>;
 #               in the container: the risc-emulator-buildroot[-mmu] volume)
@@ -51,10 +54,17 @@ die() { echo "error: $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }
 
 case "$FLAVOR" in
-  mmu)
+  mmu | rv64)
     BUILDROOT_URL=https://gitlab.com/buildroot.org/buildroot.git
     BUILDROOT_REV=2026.02.3 # LTS release
-    OUT_DIR=$ROOT/images/linux-mmu
+    OUT_DIR=$ROOT/images/linux-$FLAVOR
+    if [ "$FLAVOR" = mmu ]; then
+      BOARD=qemu_riscv32_virt_defconfig
+      FRAGMENTS=(mmu)
+    else
+      BOARD=qemu_riscv64_virt_defconfig
+      FRAGMENTS=(mmu rv64) # mmu's settings, then rv64's on top
+    fi
     ;;
   nommu)
     # mini-rv32ima's Buildroot fork, pinned for reproducible builds.
@@ -64,7 +74,7 @@ case "$FLAVOR" in
     MINI=$ROOT/vendor/mini-rv32ima
     MINI_URL=https://github.com/cnlohr/mini-rv32ima.git
     ;;
-  *) die "unknown FLAVOR '$FLAVOR' (use mmu or nommu)" ;;
+  *) die "unknown FLAVOR '$FLAVOR' (use mmu, rv64 or nommu)" ;;
 esac
 
 if [ -z "${RISC_EMULATOR_BUILD_CONTAINER:-}" ] && [ "${NATIVE:-}" != 1 ]; then
@@ -118,14 +128,14 @@ EOF
 COMMON_KEYS='BR2_(ROOTFS_OVERLAY|ROOTFS_POST_BUILD_SCRIPT|ROOTFS_POST_IMAGE_SCRIPT|SYSTEM_DEFAULT_PATH|DL_DIR|TARGET_ENABLE_ROOT_LOGIN|TARGET_GENERIC_ROOT_PASSWD)'
 
 step "Configuring"
-if [ "$FLAVOR" = mmu ]; then
-  # Buildroot's own QEMU RV32 board config, minus what's QEMU-specific, plus
-  # linux/mmu/buildroot.fragment (CPU features, packages, ...) and our hooks.
+if [ "$FLAVOR" != nommu ]; then
+  # Buildroot's own QEMU board config, minus what's QEMU-specific, plus our
+  # fragments (CPU features, packages, ...; later ones win) and our hooks.
   {
     grep -vE "^(# )?(${COMMON_KEYS}|BR2_TARGET_ROOTFS_EXT2|BR2_PACKAGE_HOST_QEMU[A-Z_]*|BR2_SYSTEM_DHCP)[= ]" \
-      "$BR/configs/qemu_riscv32_virt_defconfig"
-    cat "$LINUX_DIR/mmu/buildroot.fragment"
-    echo "BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=\"$LINUX_DIR/mmu/linux.fragment\""
+      "$BR/configs/$BOARD"
+    for f in "${FRAGMENTS[@]}"; do cat "$LINUX_DIR/$f/buildroot.fragment"; done
+    echo "BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=\"$(for f in "${FRAGMENTS[@]}"; do printf '%s ' "$LINUX_DIR/$f/linux.fragment"; done)\""
     common_config
   } >"$BUILD_DIR/defconfig.new"
   if install_if_changed "$BUILD_DIR/defconfig.new" "$BUILD_DIR/defconfig" || [ ! -f "$BR/.config" ]; then
@@ -180,10 +190,10 @@ make -C "$BR"
 
 mkdir -p "$OUT_DIR"
 cp "$BR/output/images/Image" "$OUT_DIR/Image"
-if [ "$FLAVOR" = mmu ]; then
+if [ "$FLAVOR" != nommu ]; then
   cp "$BR/output/images/fw_dynamic.bin" "$OUT_DIR/fw_dynamic.bin"
   cp --sparse=always "$BR/output/images/rootfs.ext4" "$OUT_DIR/rootfs.ext4"
   # What this image was built from; `npm start` rebuilds when it changes.
-  bash "$LINUX_DIR/inputs-hash.sh" >"$OUT_DIR/.inputs-hash"
+  bash "$LINUX_DIR/inputs-hash.sh" "$FLAVOR" >"$OUT_DIR/.inputs-hash"
 fi
 step "Linux image ready in ${OUT_DIR#"$ROOT"/}: $(find "$OUT_DIR" -maxdepth 1 -type f -printf '%f ')"

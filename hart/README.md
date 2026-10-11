@@ -5,15 +5,20 @@ compiled to WebAssembly. Everything else (devices, the virtio disk and network,
 the NAT, the machine and CLI) is TypeScript in `src/`; `src/cpu.ts` loads
 `build/hart.wasm` and makes it look like any other TypeScript class.
 
-**What's here:** RV32IMAC with Zicsr and Zifencei, machine, supervisor and
-user modes with trap delegation, and Sv32 paging with a TLB. Compressed
-(16-bit) instructions are expanded into the 32-bit instructions they stand
-for, then executed like those.
+**What's here:** RV32IMAC and RV64IMAC with Zicsr and Zifencei, machine,
+supervisor and user modes with trap delegation, and Sv32 (RV32) or Sv39
+(RV64) paging with a TLB. The register width is chosen when the CPU is
+created: the code is generic over it and compiled once for each, so neither
+pays for the other. On RV32 the 64-bit registers hold sign-extended 32-bit
+values, the way RV64 itself handles 32-bit values, so most instructions are
+written only once. Compressed (16-bit) instructions are expanded into the
+32-bit instructions they stand for (a table per width), then executed like
+those.
 
 - `src/hart.rs`: hart state, the run loop, traps and interrupts, and the
   instruction set
 - `src/memory.rs`: physical memory, and loads and stores
-- `src/mmu.rs`: Sv32 address translation and the TLB
+- `src/mmu.rs`: Sv32 and Sv39 address translation, and the TLB
 - `src/rvc.rs`: compressed instructions; its tests check every one
   against encodings from GNU as
 - `src/csr.rs`: CSR numbers, register fields, and trap causes
@@ -41,6 +46,15 @@ rustup target add wasm32-unknown-unknown
 Homebrew's `rustup` isn't put on `PATH`; the build finds it anyway. To use
 `cargo` yourself, add `/opt/homebrew/opt/rustup/bin` to `PATH`.
 
+## Conformance
+
+`npm test` also runs the official [riscv-tests](https://github.com/riscv-software-src/riscv-tests)
+(`vendor/riscv-tests`, a git submodule) for both widths: user-level
+instructions (base, M, A, C) and machine/supervisor behaviour, each also run
+in U-mode under virtual memory. They're built with the same GNU toolchain as
+the examples, into `build/riscv-tests/`. All pass except `pmpaddr`, which
+needs PMP entries; there are none, which the spec allows.
+
 ## Speed
 
 `npm run bench` measures it. Both benchmarks use the virtual clock, so every
@@ -49,14 +63,16 @@ run executes exactly the same instructions:
 - **bare-metal:** `examples/bench`, C code doing matrix multiplication,
   CRC-32, sorting and string work. It checks the checksum the program prints.
 - **compressed:** the same program built with compressed instructions.
+- **rv64:** the same program built for RV64, on an RV64 CPU.
 - **linux:** the MMU image boots to the login prompt, with a fixed date and
-  random seed.
+  random seed; **linux64** the same with the RV64 image.
 
-| | bare-metal | compressed | linux boot |
-|---|---|---|---|
-| TypeScript CPU, RV32IMA | 66 MIPS | – | 26.6 MIPS, 8.4 s |
-| this core, RV32IMA | 265 MIPS | – | 113 MIPS, 2.0 s |
-| this core, RV32IMAC | 245 MIPS | 222 MIPS | 107 MIPS, 2.3 s |
+| | bare-metal | compressed | rv64 | linux boot | linux64 boot |
+|---|---|---|---|---|---|
+| TypeScript CPU, RV32IMA | 66 MIPS | – | – | 26.6 MIPS, 8.4 s | – |
+| this core, RV32IMA | 265 MIPS | – | – | 113 MIPS, 2.0 s | – |
+| this core, RV32IMAC | 245 MIPS | 222 MIPS | – | 107 MIPS, 2.3 s | – |
+| this core, RV32/RV64IMAC | 247 MIPS | 222 MIPS | 226 MIPS | 112 MIPS, 2.1 s | 109 MIPS, 2.1 s |
 
 Measured on an Apple Silicon Mac with Node 26. The compressed-instruction
 support costs some speed: fetching handles 2- and 4-byte instructions, and

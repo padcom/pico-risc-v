@@ -1,4 +1,5 @@
-//! The C extension: 16-bit compressed instructions (RV32C, integer subset).
+//! The C extension: 16-bit compressed instructions (RV32C and RV64C, integer
+//! subset).
 //!
 //! Every compressed instruction is a short form of a 32-bit one, so it's
 //! executed by expanding it into that and running the regular decoder; only
@@ -8,32 +9,36 @@ use core::cell::UnsafeCell;
 
 /// Every 16-bit instruction's 32-bit equivalent, by encoding (0: illegal; no
 /// expansion is 0, they all end in binary 11), so executing one is a lookup.
-/// Zero-initialized, so it takes no space in the .wasm file.
+/// One per XLEN, since RV64 reuses some encodings for other instructions.
+/// Zero-initialized, so they take no space in the .wasm file.
 struct Table(UnsafeCell<[u32; 1 << 16]>);
 // SAFETY: WebAssembly instances are single-threaded.
 unsafe impl Sync for Table {}
-static TABLE: Table = Table(UnsafeCell::new([0; 1 << 16]));
+static TABLE32: Table = Table(UnsafeCell::new([0; 1 << 16]));
+static TABLE64: Table = Table(UnsafeCell::new([0; 1 << 16]));
 
-/// Fill the table (once per instance, before running anything).
-pub fn fill_table() {
+/// Fill the table for RV64 or RV32 (once per instance, before running anything).
+pub fn fill_table(rv64: bool) {
+    let table = if rv64 { &TABLE64 } else { &TABLE32 };
     // SAFETY: single-threaded, and nothing else holds a reference to it.
-    let table = unsafe { &mut *TABLE.0.get() };
+    let table = unsafe { &mut *table.0.get() };
     for c in 0..1 << 16 {
-        table[c as usize] = expand(c).unwrap_or(0);
+        table[c as usize] = expand(c, rv64).unwrap_or(0);
     }
 }
 
 /// The 32-bit equivalent of compressed instruction `c`, or 0 if illegal.
 #[inline(always)]
-pub fn expanded(c: u32) -> u32 {
+pub fn expanded<const X64: bool>(c: u32) -> u32 {
+    let table = if X64 { &TABLE64 } else { &TABLE32 };
     // SAFETY: only written by fill_table, never while this runs.
-    unsafe { (*TABLE.0.get())[c as usize & 0xffff] }
+    unsafe { (*table.0.get())[c as usize & 0xffff] }
 }
 
 /// Expand a 16-bit instruction (low two bits not 11) into its 32-bit
-/// equivalent. None for illegal and reserved encodings, including the
-/// floating-point loads and stores (no F/D yet) and the RV64-only ones.
-pub fn expand(c: u32) -> Option<u32> {
+/// equivalent, for RV64 or RV32. None for illegal and reserved encodings,
+/// including the floating-point loads and stores (no F/D yet).
+pub fn expand(c: u32, rv64: bool) -> Option<u32> {
     let funct3 = c >> 13;
     // Register fields: full 5-bit ones, and the 3-bit ones that name x8..x15.
     let rd = (c >> 7) & 0x1f;
@@ -53,10 +58,19 @@ pub fn expand(c: u32) -> Option<u32> {
         }
         (0, 0b010) => i_type(LOAD, rd_, 0b010, rs1_, lw_offset(c)), // C.LW
         (0, 0b110) => s_type(0b010, rs1_, rd_, lw_offset(c)),       // C.SW
+        (0, 0b011) if rv64 => i_type(LOAD, rd_, 0b011, rs1_, ld_offset(c)), // C.LD (RV32: C.FLW)
+        (0, 0b111) if rv64 => s_type(0b011, rs1_, rd_, ld_offset(c)),       // C.SD (RV32: C.FSW)
 
         // Quadrant 1
         (1, 0b000) => i_type(OP_IMM, rd, 0, rd, ci_imm(c)), // C.ADDI (C.NOP for rd = 0)
-        (1, 0b001) => j_type(1, cj_offset(c)),               // C.JAL (RV32 only)
+        (1, 0b001) if rv64 => {
+            // C.ADDIW (RV64; rd = 0 is reserved)
+            if rd == 0 {
+                return None;
+            }
+            i_type(OP_IMM_32, rd, 0, rd, ci_imm(c))
+        }
+        (1, 0b001) => j_type(1, cj_offset(c)), // C.JAL (RV32)
         (1, 0b010) => i_type(OP_IMM, rd, 0, 0, ci_imm(c)),  // C.LI
         (1, 0b011) if rd == 2 => {
             // C.ADDI16SP: addi x2, x2, nzimm
@@ -78,10 +92,10 @@ pub fn expand(c: u32) -> Option<u32> {
             (imm as u32) << 12 | rd << 7 | LUI
         }
         (1, 0b100) => match bits(c, 11, 10) {
-            // C.SRLI / C.SRAI: shamt[5] must be 0 on RV32
-            0b00 | 0b01 if bits(c, 12, 12) == 0 => {
-                let funct7 = if bits(c, 11, 10) == 0b01 { 0x20 } else { 0 };
-                i_type(OP_IMM, rs1_, 0b101, rs1_, (funct7 << 5 | rs2) as i32)
+            // C.SRLI / C.SRAI: shamt[5] (bit 12) must be 0 on RV32
+            0b00 | 0b01 if bits(c, 12, 12) == 0 || rv64 => {
+                let funct = if bits(c, 11, 10) == 0b01 { 0x400 } else { 0 }; // SRAI: imm[10]
+                i_type(OP_IMM, rs1_, 0b101, rs1_, (funct | shamt(c)) as i32)
             }
             0b10 => i_type(OP_IMM, rs1_, 0b111, rs1_, ci_imm(c)), // C.ANDI
             0b11 if bits(c, 12, 12) == 0 => {
@@ -91,33 +105,47 @@ pub fn expand(c: u32) -> Option<u32> {
                     0b10 => (0, 0b110),    // C.OR
                     _ => (0, 0b111),       // C.AND
                 };
-                r_type(funct7, rd_, rs1_, funct3, rs1_)
+                r_type(OP, funct7, rd_, rs1_, funct3, rs1_)
             }
-            _ => return None, // RV64's C.SUBW / C.ADDW, reserved encodings
+            0b11 if rv64 && bits(c, 6, 6) == 0 => {
+                let funct7 = if bits(c, 5, 5) == 0 { 0x20 } else { 0 }; // C.SUBW / C.ADDW
+                r_type(OP_32, funct7, rd_, rs1_, 0, rs1_)
+            }
+            _ => return None, // RV64 instructions on RV32, reserved encodings
         },
         (1, 0b101) => j_type(0, cj_offset(c)),          // C.J
         (1, 0b110) => b_type(0b000, rs1_, 0, cb_offset(c)), // C.BEQZ
         (1, 0b111) => b_type(0b001, rs1_, 0, cb_offset(c)), // C.BNEZ
 
         // Quadrant 2
-        (2, 0b000) if bits(c, 12, 12) == 0 => i_type(OP_IMM, rd, 0b001, rd, rs2 as i32), // C.SLLI
+        (2, 0b000) if bits(c, 12, 12) == 0 || rv64 => i_type(OP_IMM, rd, 0b001, rd, shamt(c) as i32), // C.SLLI
         (2, 0b010) if rd != 0 => {
             // C.LWSP
             let imm = bits(c, 3, 2) << 6 | bits(c, 12, 12) << 5 | bits(c, 6, 4) << 2;
             i_type(LOAD, rd, 0b010, 2, imm as i32)
         }
+        (2, 0b011) if rv64 && rd != 0 => {
+            // C.LDSP (RV32: C.FLWSP)
+            let imm = bits(c, 4, 2) << 6 | bits(c, 12, 12) << 5 | bits(c, 6, 5) << 3;
+            i_type(LOAD, rd, 0b011, 2, imm as i32)
+        }
         (2, 0b100) => match (bits(c, 12, 12), rd, rs2) {
             (0, 0, 0) => return None,                  // reserved
             (0, _, 0) => i_type(JALR, 0, 0, rd, 0),    // C.JR
-            (0, _, _) => r_type(0, rs2, 0, 0, rd),     // C.MV
+            (0, _, _) => r_type(OP, 0, rs2, 0, 0, rd), // C.MV
             (_, 0, 0) => EBREAK,                       // C.EBREAK
             (_, _, 0) => i_type(JALR, 1, 0, rd, 0),    // C.JALR
-            (_, _, _) => r_type(0, rs2, rd, 0, rd),    // C.ADD
+            (_, _, _) => r_type(OP, 0, rs2, rd, 0, rd), // C.ADD
         },
         (2, 0b110) => {
             // C.SWSP
             let imm = bits(c, 8, 7) << 6 | bits(c, 12, 9) << 2;
             s_type(0b010, 2, rs2, imm as i32)
+        }
+        (2, 0b111) if rv64 => {
+            // C.SDSP (RV32: C.FSWSP)
+            let imm = bits(c, 9, 7) << 6 | bits(c, 12, 10) << 3;
+            s_type(0b011, 2, rs2, imm as i32)
         }
 
         _ => return None,
@@ -126,8 +154,10 @@ pub fn expand(c: u32) -> Option<u32> {
 
 const LOAD: u32 = 0x03;
 const OP_IMM: u32 = 0x13;
+const OP_IMM_32: u32 = 0x1b;
 const STORE: u32 = 0x23;
 const OP: u32 = 0x33;
+const OP_32: u32 = 0x3b;
 const LUI: u32 = 0x37;
 const BRANCH: u32 = 0x63;
 const JALR: u32 = 0x67;
@@ -149,6 +179,16 @@ const fn sext(value: u32, width: u32) -> i32 {
 /// CI: imm[5] in bit 12, imm[4:0] in bits 6:2 (signed).
 const fn ci_imm(c: u32) -> i32 {
     sext(bits(c, 12, 12) << 5 | bits(c, 6, 2), 6)
+}
+
+/// Shift amount: shamt[5] in bit 12 (RV64 only), shamt[4:0] in bits 6:2.
+const fn shamt(c: u32) -> u32 {
+    bits(c, 12, 12) << 5 | bits(c, 6, 2)
+}
+
+/// C.LD / C.SD: uimm[5:3] in bits 12:10, uimm[7:6] in bits 6:5.
+const fn ld_offset(c: u32) -> i32 {
+    (bits(c, 6, 5) << 6 | bits(c, 12, 10) << 3) as i32
 }
 
 /// C.LW / C.SW: uimm[5:3] in bits 12:10, uimm[2] in bit 6, uimm[6] in bit 5.
@@ -190,8 +230,8 @@ const fn s_type(funct3: u32, rs1: u32, rs2: u32, imm: i32) -> u32 {
     (imm >> 5 & 0x7f) << 25 | rs2 << 20 | rs1 << 15 | funct3 << 12 | (imm & 0x1f) << 7 | STORE
 }
 
-const fn r_type(funct7: u32, rs2: u32, rs1: u32, funct3: u32, rd: u32) -> u32 {
-    funct7 << 25 | rs2 << 20 | rs1 << 15 | funct3 << 12 | rd << 7 | OP
+const fn r_type(opcode: u32, funct7: u32, rs2: u32, rs1: u32, funct3: u32, rd: u32) -> u32 {
+    funct7 << 25 | rs2 << 20 | rs1 << 15 | funct3 << 12 | rd << 7 | opcode
 }
 
 const fn b_type(funct3: u32, rs1: u32, rs2: u32, imm: i32) -> u32 {
@@ -458,11 +498,93 @@ mod tests {
         (0x87c1, 0x4107d793, "c.srai a5, 16"),
     ];
 
+    /// RV64-only instructions, and shifts by 32..63, from GNU as for RV64.
+    const GNU_AS_RV64: &[(u32, u32, &str)] = &[
+        (0x6714, 0x00873683, "c.ld a3, 8(a4)"),
+        (0xe714, 0x00d73423, "c.sd a3, 8(a4)"),
+        (0x6b14, 0x01073683, "c.ld a3, 16(a4)"),
+        (0xeb14, 0x00d73823, "c.sd a3, 16(a4)"),
+        (0x7314, 0x02073683, "c.ld a3, 32(a4)"),
+        (0xf314, 0x02d73023, "c.sd a3, 32(a4)"),
+        (0x6334, 0x04073683, "c.ld a3, 64(a4)"),
+        (0xe334, 0x04d73023, "c.sd a3, 64(a4)"),
+        (0x6354, 0x08073683, "c.ld a3, 128(a4)"),
+        (0xe354, 0x08d73023, "c.sd a3, 128(a4)"),
+        (0x7fe0, 0x0f87b403, "c.ld s0, 248(a5)"),
+        (0xffe0, 0x0e87bc23, "c.sd s0, 248(a5)"),
+        (0x6822, 0x00813803, "c.ldsp a6, 8(sp)"),
+        (0xe442, 0x01013423, "c.sdsp a6, 8(sp)"),
+        (0x6842, 0x01013803, "c.ldsp a6, 16(sp)"),
+        (0xe842, 0x01013823, "c.sdsp a6, 16(sp)"),
+        (0x7802, 0x02013803, "c.ldsp a6, 32(sp)"),
+        (0xf042, 0x03013023, "c.sdsp a6, 32(sp)"),
+        (0x6806, 0x04013803, "c.ldsp a6, 64(sp)"),
+        (0xe0c2, 0x05013023, "c.sdsp a6, 64(sp)"),
+        (0x680a, 0x08013803, "c.ldsp a6, 128(sp)"),
+        (0xe142, 0x09013023, "c.sdsp a6, 128(sp)"),
+        (0x6812, 0x10013803, "c.ldsp a6, 256(sp)"),
+        (0xe242, 0x11013023, "c.sdsp a6, 256(sp)"),
+        (0x70fe, 0x1f813083, "c.ldsp ra, 504(sp)"),
+        (0xff86, 0x1e113c23, "c.sdsp ra, 504(sp)"),
+        (0x6082, 0x00013083, "c.ldsp ra, 0(sp)"),
+        (0x2305, 0x0013031b, "c.addiw t1, 1"),
+        (0x337d, 0xfff3031b, "c.addiw t1, -1"),
+        (0x2309, 0x0023031b, "c.addiw t1, 2"),
+        (0x3379, 0xffe3031b, "c.addiw t1, -2"),
+        (0x2311, 0x0043031b, "c.addiw t1, 4"),
+        (0x3371, 0xffc3031b, "c.addiw t1, -4"),
+        (0x2321, 0x0083031b, "c.addiw t1, 8"),
+        (0x3361, 0xff83031b, "c.addiw t1, -8"),
+        (0x2341, 0x0103031b, "c.addiw t1, 16"),
+        (0x3341, 0xff03031b, "c.addiw t1, -16"),
+        (0x2501, 0x0005051b, "c.addiw a0, 0"),
+        (0x9c05, 0x4094043b, "c.subw s0, s1"),
+        (0x9f3d, 0x00f7073b, "c.addw a4, a5"),
+        (0x0886, 0x00189893, "c.slli a7, 1"),
+        (0x8305, 0x00175713, "c.srli a4, 1"),
+        (0x8785, 0x4017d793, "c.srai a5, 1"),
+        (0x088a, 0x00289893, "c.slli a7, 2"),
+        (0x8309, 0x00275713, "c.srli a4, 2"),
+        (0x8789, 0x4027d793, "c.srai a5, 2"),
+        (0x0892, 0x00489893, "c.slli a7, 4"),
+        (0x8311, 0x00475713, "c.srli a4, 4"),
+        (0x8791, 0x4047d793, "c.srai a5, 4"),
+        (0x08a2, 0x00889893, "c.slli a7, 8"),
+        (0x8321, 0x00875713, "c.srli a4, 8"),
+        (0x87a1, 0x4087d793, "c.srai a5, 8"),
+        (0x08c2, 0x01089893, "c.slli a7, 16"),
+        (0x8341, 0x01075713, "c.srli a4, 16"),
+        (0x87c1, 0x4107d793, "c.srai a5, 16"),
+        (0x1882, 0x02089893, "c.slli a7, 32"),
+        (0x9301, 0x02075713, "c.srli a4, 32"),
+        (0x9781, 0x4207d793, "c.srai a5, 32"),
+        (0x1ffe, 0x03ff9f93, "c.slli t6, 63"),
+        (0x94fd, 0x43f4d493, "c.srai s1, 63"),
+        (0x90fd, 0x03f4d493, "c.srli s1, 63"),
+    ];
+
     #[test]
     fn expands_like_gnu_as() {
         for &(c, expected, asm) in GNU_AS.iter().chain(GNU_AS_BITS) {
-            assert_eq!(expand(c), Some(expected), "{asm}: 0x{c:04x}");
+            assert_eq!(expand(c, false), Some(expected), "RV32 {asm}: 0x{c:04x}");
+            // The same encoding means the same on RV64, except for C.JAL.
+            if !asm.starts_with("c.jal ") {
+                assert_eq!(expand(c, true), Some(expected), "RV64 {asm}: 0x{c:04x}");
+            }
         }
+        for &(c, expected, asm) in GNU_AS_RV64 {
+            assert_eq!(expand(c, true), Some(expected), "RV64 {asm}: 0x{c:04x}");
+        }
+    }
+
+    #[test]
+    fn rv64_reuses_encodings() {
+        // C.JAL on RV32 is C.ADDIW on RV64 (0x2505: c.addiw a0, 1).
+        assert_eq!(expand(0x2505, false).map(|i| i & 0x7f), Some(0x6f), "RV32: a JAL");
+        assert_eq!(expand(0x2505, true), Some(0x0015051b), "RV64: addiw a0, a0, 1");
+        // C.FLW / C.FSW are C.LD / C.SD (0x6380: c.ld s0, 0(a5)).
+        assert_eq!(expand(0x6380, false), None, "RV32: C.FLW, no F");
+        assert_eq!(expand(0x6380, true), Some(0x0007b403), "RV64: ld s0, 0(a5)");
     }
 
     #[test]
@@ -489,18 +611,33 @@ mod tests {
             (0xa002, "C.FSDSP (no D)"),
             (0xe002, "C.FSWSP (no F)"),
         ] {
-            assert_eq!(expand(c), None, "{what}: 0x{c:04x}");
+            assert_eq!(expand(c, false), None, "RV32 {what}: 0x{c:04x}");
+        }
+        for (c, what) in [
+            (0x0000, "all zeros"),
+            (0x2001, "C.ADDIW with rd = 0"),
+            (0x6002, "C.LDSP with rd = 0"),
+            (0x2000, "C.FLD (no D)"),
+            (0xa000, "C.FSD (no D)"),
+            (0x2002, "C.FLDSP (no D)"),
+            (0xa002, "C.FSDSP (no D)"),
+            (0x9c41, "reserved quadrant 1 funct6 100111, 10"),
+            (0x9c61, "reserved quadrant 1 funct6 100111, 11"),
+        ] {
+            assert_eq!(expand(c, true), None, "RV64 {what}: 0x{c:04x}");
         }
     }
 
     #[test]
     fn hints_are_legal() {
-        // Encodings the spec reserves as HINTs execute as no-ops.
-        assert_eq!(expand(0x0501), Some(0x00050513), "C.ADDI with imm = 0");
-        assert_eq!(expand(0x4001), Some(0x00000013), "C.LI with rd = 0");
-        assert_eq!(expand(0x6005), Some(0x00001037), "C.LUI with rd = 0");
-        assert_eq!(expand(0x0002), Some(0x00001013), "C.SLLI with rd = 0, shamt = 0");
-        assert_eq!(expand(0x802e), Some(0x00b00033), "C.MV with rd = 0");
-        assert_eq!(expand(0x902e), Some(0x00b00033), "C.ADD with rd = 0");
+        // Encodings the spec reserves as HINTs execute as no-ops, on both XLENs.
+        for rv64 in [false, true] {
+            assert_eq!(expand(0x0501, rv64), Some(0x00050513), "C.ADDI with imm = 0");
+            assert_eq!(expand(0x4001, rv64), Some(0x00000013), "C.LI with rd = 0");
+            assert_eq!(expand(0x6005, rv64), Some(0x00001037), "C.LUI with rd = 0");
+            assert_eq!(expand(0x0002, rv64), Some(0x00001013), "C.SLLI with rd = 0, shamt = 0");
+            assert_eq!(expand(0x802e, rv64), Some(0x00b00033), "C.MV with rd = 0");
+            assert_eq!(expand(0x902e, rv64), Some(0x00b00033), "C.ADD with rd = 0");
+        }
     }
 }

@@ -7,6 +7,9 @@
 //!
 //! Nothing allocates after `ram_alloc`, so the linear memory never grows and
 //! the JavaScript views into it (registers, RAM) stay valid.
+//!
+//! Register and CSR values cross over as 64-bit integers (BigInt in
+//! JavaScript), whatever the XLEN.
 
 mod csr;
 mod hart;
@@ -32,11 +35,13 @@ fn hart() -> &'static mut Hart {
 /// Flags for `init`.
 const BREAK_ON_EBREAK: u32 = 1;
 const HAS_TIME: u32 = 2;
+const RV64: u32 = 4;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn init(reset_vector: u32, flags: u32) {
+pub extern "C" fn init(reset_vector: u64, flags: u32) {
     let h = hart();
-    rvc::fill_table();
+    h.xlen64 = flags & RV64 != 0;
+    rvc::fill_table(h.xlen64);
     h.reset(reset_vector);
     h.break_on_ebreak = flags & BREAK_ON_EBREAK != 0;
     h.has_time = flags & HAS_TIME != 0;
@@ -48,30 +53,33 @@ pub extern "C" fn init(reset_vector: u32, flags: u32) {
 pub extern "C" fn ram_alloc(base: u32, size: u32) -> *mut u8 {
     let h = hart();
     h.ram = vec![0u8; size as usize].leak().as_mut_ptr();
-    h.ram_base = base;
-    h.ram_size = size;
+    h.ram_base = base as u64;
+    h.ram_size = size as u64;
     h.ram
 }
 
-/// Where x0..x31 live in linear memory (32 × i32).
+/// Where x0..x31 live in linear memory (32 × 64 bits; on RV32 sign-extended
+/// 32-bit values).
 #[unsafe(no_mangle)]
-pub extern "C" fn registers() -> *mut i32 {
+pub extern "C" fn registers() -> *mut u64 {
     hart().x.as_mut_ptr()
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn reset(pc: u32) {
+pub extern "C" fn reset(pc: u64) {
     hart().reset(pc);
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn run(max_steps: u32) -> u32 {
-    hart().run(max_steps)
+    let h = hart();
+    if h.xlen64 { h.run::<true>(max_steps) } else { h.run::<false>(max_steps) }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn step() {
-    hart().step();
+    let h = hart();
+    if h.xlen64 { h.step::<true>() } else { h.step::<false>() }
 }
 
 #[unsafe(no_mangle)]
@@ -82,12 +90,13 @@ pub extern "C" fn stop() {
 #[unsafe(no_mangle)]
 pub extern "C" fn set_interrupt_pending(bit: u32, pending: u32) {
     let h = hart();
-    h.mip = if pending != 0 { h.mip | bit } else { h.mip & !bit };
+    h.mip = if pending != 0 { h.mip | bit as u64 } else { h.mip & !(bit as u64) };
 }
 
+/// Instructions retired since reset (not what software set the counters to).
 #[unsafe(no_mangle)]
 pub extern "C" fn instret() -> f64 {
-    hart().instret as f64
+    hart().retired as f64
 }
 
 // State visible to JavaScript as CPU properties, by index (the order of
@@ -116,11 +125,11 @@ const WAITING: u32 = 20;
 const BREAK_ON_EBREAK_FIELD: u32 = 21;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get(field: u32) -> u32 {
+pub extern "C" fn get(field: u32) -> u64 {
     let h = hart();
     match field {
         PC => h.pc,
-        PRIV => h.priv_,
+        PRIV => h.priv_ as u64,
         MSTATUS => h.mstatus,
         MIE => h.mie,
         MIP => h.mip,
@@ -139,8 +148,8 @@ pub extern "C" fn get(field: u32) -> u32 {
         STVAL => h.stval,
         SATP => h.satp,
         SCOUNTEREN => h.scounteren,
-        WAITING => h.waiting as u32,
-        BREAK_ON_EBREAK_FIELD => h.break_on_ebreak as u32,
+        WAITING => h.waiting as u64,
+        BREAK_ON_EBREAK_FIELD => h.break_on_ebreak as u64,
         _ => 0,
     }
 }
@@ -148,11 +157,12 @@ pub extern "C" fn get(field: u32) -> u32 {
 /// Set a field directly (no WARL masking, like poking the register file from
 /// a debugger), keeping derived state (translation mode, TLB) consistent.
 #[unsafe(no_mangle)]
-pub extern "C" fn set(field: u32, value: u32) {
+pub extern "C" fn set(field: u32, value: u64) {
     let h = hart();
+    let value = value & h.address_mask; // RV32: 32-bit registers
     match field {
         PC => h.pc = value,
-        PRIV => h.priv_ = value,
+        PRIV => h.priv_ = value as u32,
         MSTATUS => h.mstatus = value,
         MIE => h.mie = value,
         MIP => h.mip = value,

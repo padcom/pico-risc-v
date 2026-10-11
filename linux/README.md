@@ -5,15 +5,17 @@
 builds the mmu image if it's missing or anything under `linux/` changed, and
 boots it. The rest of this page explains what goes into the images.
 
-There are two flavors, both RV32:
+There are three flavors:
 
 | Flavor  | What it is | Build | Boot |
 | ------- | ---------- | ----- | ---- |
-| **mmu** | Regular Linux 6.18 with virtual memory (Sv32), running in S-mode on top of the OpenSBI firmware. Upstream [Buildroot](https://buildroot.org) 2026.02 LTS, glibc and BusyBox, plus extra packages, currently Midnight Commander (`mc`) and `curl` (with HTTPS). The root filesystem is on a virtual disk. | `npm run linux:build` → `images/linux-mmu/fw_dynamic.bin`, `Image`, `rootfs.ext4` | `npm start` |
+| **mmu** | Regular RV32 Linux 6.18 with virtual memory (Sv32), running in S-mode on top of the OpenSBI firmware. Upstream [Buildroot](https://buildroot.org) 2026.02 LTS, glibc and BusyBox, plus extra packages, currently Midnight Commander (`mc`) and `curl` (with HTTPS). The root filesystem is on a virtual disk. | `npm run linux:build` → `images/linux-mmu/fw_dynamic.bin`, `Image`, `rootfs.ext4` | `npm start` |
+| **rv64** | The same for RV64 (Sv39 virtual memory): the mmu flavor's configuration plus `linux/rv64/`. | `npm run linux:rv64:build` → `images/linux-rv64/` (the same files) | `npm run start:rv64` |
 | **nommu** | [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima)'s tiny no-MMU kernel running in M-mode, with BusyBox and uClibc. The root filesystem is built into the kernel (an initramfs). A prebuilt image can also be downloaded. | `npm run linux:nommu:build` → `images/linux/Image` | `npm run start:nommu` |
 
-Both are built by `linux/build.sh`; `FLAVOR=mmu` (default) or `FLAVOR=nommu`
-selects one.
+All are built by `linux/build.sh`; `FLAVOR=mmu` (default), `FLAVOR=rv64` or
+`FLAVOR=nommu` selects one. Like mmu, `npm run start:rv64` builds its image
+first if it's missing or out of date.
 
 The build runs in a **Podman** container (`linux/Containerfile`, a pinned
 Debian 12), so it doesn't depend on your distribution or compiler:
@@ -27,8 +29,9 @@ Debian 12), so it doesn't depend on your distribution or compiler:
 
 Your project directory is mounted into the container: programs, overlay and
 configs go in, and the images come out. Buildroot itself works in a Podman
-volume per flavor, `risc-emulator-buildroot-mmu` and `risc-emulator-buildroot`
-(nommu), which keep downloads and build state between runs. `podman volume rm
+volume per flavor, `risc-emulator-buildroot-mmu`, `-rv64` and
+`risc-emulator-buildroot` (nommu), which keep downloads and build state
+between runs. `podman volume rm
 <name>` starts that flavor over from scratch.
 
 To skip the container on a Linux host, run `NATIVE=1 linux/build.sh`. You'll
@@ -108,6 +111,7 @@ preset. It boots exactly what you pass:
 | Option | |
 | ------ | - |
 | `<image>` | loaded at the start of RAM and entered in M-mode (a kernel, firmware or bare-metal program) |
+| `--xlen 64` | an RV64 CPU (default: `32`, RV32) |
 | `--kernel <file>` | with firmware as `<image>`: the kernel, loaded 4 MiB into RAM and entered in S-mode by OpenSBI |
 | `--disk <file>` | a raw disk image as `/dev/vda`; add `--snapshot` to discard writes |
 | `--net` | the network card on the user-mode NAT |
@@ -136,9 +140,10 @@ $(O)/myprog: main.c util.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 ```
 
-On the mmu flavor programs are ordinary dynamically linked executables.
-Anything Buildroot packages can also be added: put its `BR2_PACKAGE_...=y`
-option in `linux/mmu/buildroot.fragment` (that's how `mc` is added). `linux/build.sh menuconfig`
+On the mmu and rv64 flavors programs are ordinary dynamically linked
+executables. Anything Buildroot packages can also be added: put its
+`BR2_PACKAGE_...=y` option in `linux/mmu/buildroot.fragment` (that's how `mc`
+is added); rv64 gets it too. `linux/build.sh menuconfig`
 shows what's available.
 
 ### Things to know about nommu Linux
@@ -159,11 +164,16 @@ toolchain makes the next build start over from scratch (`linux/build.sh`
 notices), since everything has to be recompiled for them. Kernel options go in
 `linux/mmu/linux.fragment`, on top of the kernel's `rv32_defconfig`.
 
+**rv64:** Buildroot's `configs/qemu_riscv64_virt_defconfig`, then everything
+from `linux/mmu/` (packages included), then `linux/rv64/` with what differs:
+the 64-bit CPU (RV64IMAC, LP64 ABI) and OpenSBI's build, and kernel options
+the 64-bit `defconfig` has on top of `rv32_defconfig`. Later settings win.
+
 **nommu:** the configs come from `vendor/mini-rv32ima/configs/`. To change one, copy it
 into `linux/nommu/configs/` under the same name and edit it there. A file in
 `linux/nommu/configs/` takes precedence.
 
-For both, you can also use Buildroot's menus, e.g. `linux/build.sh
+For all of them, you can also use Buildroot's menus, e.g. `linux/build.sh
 linux-menuconfig` or `linux/build.sh busybox-menuconfig` (with `FLAVOR=` as
 needed). Copy the result back into the fragment or config file so the change
 isn't lost.

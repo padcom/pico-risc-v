@@ -243,18 +243,26 @@ describe('C programs compiled with GNU toolchain', () => {
     expect(machine.cpu.instret).toBeLessThan(soft / 2)
   })
 
+  // The benchmark (examples/bench) prints a checksum: 'checksum 991869f2' is
+  // also what the same C code prints compiled for the host.
+  const runBench = (program: string, xlen: 32 | 64 = 32) => {
+    let screen = ''
+    const machine = new Machine({ xlen, clock: 'virtual', output: b => (screen += String.fromCharCode(b)) })
+    machine.boot(readFileSync(new URL(`../examples/build/${program}.bin`, import.meta.url)))
+    return { result: machine.run(500_000_000), screen }
+  }
+
   it('the benchmark built with compressed instructions computes the same as when built without', () => {
-    // 'checksum 991869f2' is also what the same C code prints compiled for the host.
-    const run = (program: string) => {
-      let screen = ''
-      const machine = new Machine({ clock: 'virtual', output: b => (screen += String.fromCharCode(b)) })
-      machine.boot(readFileSync(new URL(`../examples/build/${program}.bin`, import.meta.url)))
-      return { result: machine.run(500_000_000), screen, instret: machine.cpu.instret }
-    }
-    const plain = run('bench')
-    const compressed = run('bench-c')
+    const plain = runBench('bench')
+    const compressed = runBench('bench-c')
     expect(compressed.result).toBe('poweroff')
     expect(compressed.screen).toBe('checksum 991869f2\n')
     expect(compressed.screen).toBe(plain.screen)
+  })
+
+  it('the benchmark built for RV64 computes the same on an RV64 machine', () => {
+    const rv64 = runBench('bench64', 64)
+    expect(rv64.result).toBe('poweroff')
+    expect(rv64.screen).toBe('checksum 991869f2\n')
   })
 })

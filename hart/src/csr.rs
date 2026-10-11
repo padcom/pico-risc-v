@@ -50,6 +50,10 @@ pub const MIP: u32 = 0x344;
 pub const PMPCFG0: u32 = 0x3a0;
 pub const PMPADDR63: u32 = 0x3ef;
 
+// Debug triggers (none: tselect and tdata* read as zero)
+pub const TSELECT: u32 = 0x7a0;
+pub const TDATA3: u32 = 0x7a3;
+
 // Machine counters
 pub const MCYCLE: u32 = 0xb00;
 pub const MINSTRET: u32 = 0xb02;
@@ -57,31 +61,38 @@ pub const MCYCLEH: u32 = 0xb80;
 pub const MINSTRETH: u32 = 0xb82;
 
 /// mstatus fields (sstatus is a restricted view of the same register).
-pub const MSTATUS_SIE: u32 = 1 << 1;
-pub const MSTATUS_MIE: u32 = 1 << 3;
-pub const MSTATUS_SPIE: u32 = 1 << 5;
-pub const MSTATUS_MPIE: u32 = 1 << 7;
-pub const MSTATUS_SPP: u32 = 1 << 8;
+pub const MSTATUS_SIE: u64 = 1 << 1;
+pub const MSTATUS_MIE: u64 = 1 << 3;
+pub const MSTATUS_SPIE: u64 = 1 << 5;
+pub const MSTATUS_MPIE: u64 = 1 << 7;
+pub const MSTATUS_SPP: u64 = 1 << 8;
 pub const MSTATUS_MPP_SHIFT: u32 = 11;
-pub const MSTATUS_MPP: u32 = 3 << MSTATUS_MPP_SHIFT;
-pub const MSTATUS_MPRV: u32 = 1 << 17;
-pub const MSTATUS_SUM: u32 = 1 << 18;
-pub const MSTATUS_MXR: u32 = 1 << 19;
-pub const MSTATUS_TVM: u32 = 1 << 20;
-pub const MSTATUS_TW: u32 = 1 << 21;
-pub const MSTATUS_TSR: u32 = 1 << 22;
+pub const MSTATUS_MPP: u64 = 3 << MSTATUS_MPP_SHIFT;
+pub const MSTATUS_MPRV: u64 = 1 << 17;
+pub const MSTATUS_SUM: u64 = 1 << 18;
+pub const MSTATUS_MXR: u64 = 1 << 19;
+pub const MSTATUS_TVM: u64 = 1 << 20;
+pub const MSTATUS_TW: u64 = 1 << 21;
+pub const MSTATUS_TSR: u64 = 1 << 22;
 
 /// mip / mie bits (sip / sie show the supervisor ones).
-pub const MIP_SSIP: u32 = 1 << 1;
-pub const MIP_MSIP: u32 = 1 << 3;
-pub const MIP_STIP: u32 = 1 << 5;
-pub const MIP_MTIP: u32 = 1 << 7;
-pub const MIP_SEIP: u32 = 1 << 9;
-pub const MIP_MEIP: u32 = 1 << 11;
+pub const MIP_SSIP: u64 = 1 << 1;
+pub const MIP_MSIP: u64 = 1 << 3;
+pub const MIP_STIP: u64 = 1 << 5;
+pub const MIP_MTIP: u64 = 1 << 7;
+pub const MIP_SEIP: u64 = 1 << 9;
+pub const MIP_MEIP: u64 = 1 << 11;
 
-/// satp (Sv32): MODE bit and physical page number of the root page table.
-pub const SATP_MODE_SV32: u32 = 1 << 31;
-pub const SATP_PPN: u32 = 0x3fffff;
+/// mstatus.UXL and SXL (RV64 only): U- and S-mode are 64-bit (2), read-only.
+pub const MSTATUS_UXL_SXL_64: u64 = 2 << 32 | 2 << 34;
+
+/// satp on RV32: MODE bit and physical page number of the root page table.
+pub const SATP32_MODE_SV32: u64 = 1 << 31;
+pub const SATP32_PPN: u64 = 0x3fffff;
+/// satp on RV64: MODE in bits 63:60 (8 = Sv39), PPN in 43:0.
+pub const SATP64_MODE_SHIFT: u32 = 60;
+pub const SATP64_MODE_SV39: u64 = 8;
+pub const SATP64_PPN: u64 = (1 << 44) - 1;
 
 /// Privilege levels.
 pub const PRIV_U: u32 = 0;

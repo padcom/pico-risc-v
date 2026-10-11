@@ -4,8 +4,10 @@
  *   bare-metal  examples/bench: integer, memory and branch-heavy C code in
  *               M-mode without paging; checks the checksum it prints
  *   compressed  the same, built with compressed instructions (RV32IMC)
+ *   rv64        the same for RV64 (RV64IMC), on an RV64 machine
  *   linux       the MMU Linux image (OpenSBI, Sv32 paging, ext4 on the virtio
  *               disk, read-only snapshot) booting to the login prompt
+ *   linux64     the same with the RV64 image (Sv39)
  *
  * Both run on the virtual clock (Linux with a fixed date and random seed), so every run
  * executes exactly the same instructions; the numbers are comparable between
@@ -24,9 +26,9 @@ interface Result {
   seconds: number
 }
 
-function bareMetal(program = 'bench'): Result {
+function bareMetal(program = 'bench', xlen: 32 | 64 = 32): Result {
   let screen = ''
-  const machine = new Machine({ clock: 'virtual', output: b => (screen += String.fromCharCode(b)) })
+  const machine = new Machine({ xlen, clock: 'virtual', output: b => (screen += String.fromCharCode(b)) })
   machine.boot(readFileSync(new URL(`examples/build/${program}.bin`, root)))
   const start = performance.now()
   const result = machine.run(2_000_000_000)
@@ -37,8 +39,8 @@ function bareMetal(program = 'bench'): Result {
   return { instructions: machine.cpu.instret, seconds }
 }
 
-function linux(): Result | undefined {
-  const images = new URL('images/linux-mmu/', root)
+function linux(flavor = 'mmu', xlen: 32 | 64 = 32): Result | undefined {
+  const images = new URL(`images/linux-${flavor}/`, root)
   const files = ['fw_dynamic.bin', 'Image', 'rootfs.ext4'].map(f => new URL(f, images))
   if (!files.every(existsSync)) return undefined
   const [firmware, kernel, rootfs] = files as [URL, URL, URL]
@@ -46,6 +48,7 @@ function linux(): Result | undefined {
   let screen = ''
   const disk = new FileStorage(rootfs.pathname, { readOnly: true })
   const machine = new Machine({
+    xlen,
     clock: 'virtual',
     // A fixed date and random seed: every run executes the same instructions.
     startTime: Date.UTC(2026, 0, 1),
@@ -70,7 +73,9 @@ function linux(): Result | undefined {
 const benchmarks: Record<string, () => Result | undefined> = {
   'bare-metal': () => bareMetal(),
   compressed: () => bareMetal('bench-c'),
-  linux,
+  rv64: () => bareMetal('bench64', 64),
+  linux: () => linux(),
+  linux64: () => linux('rv64', 64),
 }
 const selected = process.argv.slice(2)
 for (const name of selected.length ? selected : Object.keys(benchmarks)) {
