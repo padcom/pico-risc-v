@@ -8,7 +8,8 @@
  *
  * Needs Rust with the wasm32-unknown-unknown target:
  *   brew install rustup && rustup default stable && rustup target add wasm32-unknown-unknown
- * (or the installer from https://rustup.rs). cargo is found on PATH, in
+ * (or the installer from https://rustup.rs; scripts/setup-macos.sh and
+ * scripts/setup-linux.sh do this). cargo is found on PATH, in
  * ~/.cargo/bin, or in Homebrew's rustup (which isn't linked onto PATH).
  */
 import { execFileSync } from 'node:child_process'
@@ -27,7 +28,8 @@ function cargo(...args: string[]): void {
   if (!cargo) {
     throw new Error(
       'cargo not found. Install Rust with the WebAssembly target:\n' +
-        '  brew install rustup && rustup default stable && rustup target add wasm32-unknown-unknown',
+        '  brew install rustup && rustup default stable && rustup target add wasm32-unknown-unknown\n' +
+        '(scripts/setup-macos.sh or scripts/setup-linux.sh installs everything the project needs)',
     )
   }
   // Options go before a `--` (what follows is for the test binary).

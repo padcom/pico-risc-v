@@ -52,10 +52,16 @@ if [ -n "${RISC_EMULATOR_BUILD_CONTAINER:-}" ]; then
   # registered there, QEMU runs riscv64 programs for this container only.
   # "F" opens the interpreter now, so it also works inside the target's chroot.
   step "Running riscv64 programs with qemu-user"
-  mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc ||
-    die "can't mount binfmt_misc (needs Linux 6.7 or newer in Podman's VM / on the host)"
-  printf '%s' ':qemu-riscv64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xf3\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-riscv64:F' \
-    >/proc/sys/fs/binfmt_misc/register
+  if mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null; then
+    printf '%s' ':qemu-riscv64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xf3\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-riscv64:F' \
+      >/proc/sys/fs/binfmt_misc/register
+  # Older kernels: it works if the host runs riscv64 programs with QEMU, as
+  # registered by its qemu-user-static package (scripts/setup-linux.sh
+  # installs it there).
+  elif ! arch-test riscv64 >/dev/null 2>&1; then
+    die "can't run riscv64 programs: Linux before 6.7 can't give the container its own binfmt_misc.
+  Set QEMU up on the host instead (Debian/Ubuntu: sudo apt install qemu-user-static)"
+  fi
 fi
 
 WORK=$(mktemp -d)

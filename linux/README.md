@@ -1,5 +1,31 @@
 # Building the Linux images from source
 
+## Getting started
+
+On a fresh clone, one script installs everything the emulator and the image
+builds need, then `npm run start:debian` builds and boots Debian:
+
+```sh
+scripts/setup-macos.sh    # macOS: Homebrew, Podman, Node.js, Rust
+scripts/setup-linux.sh    # Linux: the same with apt, dnf, pacman or zypper (uses sudo)
+npm run start:debian
+```
+
+The scripts install only what's missing, so running one again is harmless.
+They finish by building the emulator once, as a check. On Linux, open a new
+terminal before `npm run start:debian`: Node.js (fnm) and Rust (rustup) are
+installed into your home directory and put on PATH by your shell's startup
+file.
+
+The first `npm run start:debian` takes a while: it builds the 64-bit Linux
+kernel and firmware with Buildroot, which compiles a cross toolchain first,
+and then the Debian disk. Later runs boot right away.
+
+`npm test` additionally needs a RISC-V bare-metal GCC for the test programs,
+installed as `riscv64-elf-gcc` (macOS: `brew install riscv64-elf-gcc`; Linux
+distributions name theirs differently, e.g. `riscv64-unknown-elf-gcc`), and
+the test suites' submodules (`git submodule update --init`).
+
 **`npm start`** is all you normally need: it compiles the emulator if needed
 (including its CPU core, see [hart/README.md](../hart/README.md)),
 builds the mmu image if it's missing or anything under `linux/` changed, and
