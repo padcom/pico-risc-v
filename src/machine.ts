@@ -46,6 +46,20 @@ export interface MachineOptions {
   bootargs?: string
 }
 
+export interface BootOptions {
+  /** Further images to place in RAM, at offsets from its start (e.g. a kernel). */
+  load?: { offset: number; data: ArrayLike<number> }[]
+  /**
+   * For OpenSBI's fw_dynamic firmware: where the next stage (the kernel) is and
+   * which mode to enter it in. Passed in a2 as a struct fw_dynamic_info, so the
+   * firmware needs no built-in load addresses and leaves the DTB where it is.
+   */
+  next?: { offset: number; mode?: 'S' | 'M' }
+}
+
+/** sizeof(struct fw_dynamic_info) on RV32, rounded up to keep the DTB 8-byte aligned. */
+const FW_DYNAMIC_INFO_SIZE = 32
+
 /**
  * Why `run()` returned:
  *  - poweroff / reboot: the program asked the syscon to do so
@@ -74,7 +88,8 @@ export class Machine {
   private skippedMicros = 0
   private readonly epoch = performance.now()
   private exit: 'poweroff' | 'reboot' | undefined
-  private image: Uint8Array | undefined
+  private images: { offset: number; data: Uint8Array }[] = []
+  private next: BootOptions['next']
 
   constructor({
     ramSize = 64 * 1024 * 1024,
@@ -107,26 +122,36 @@ export class Machine {
   }
 
   /**
-   * Power on with a flat binary image (a Linux `Image`, or `objcopy -O binary`
-   * output) at the start of RAM. Like a boot ROM, this places a device tree at
-   * the top of RAM and enters the image with a0 = hart id, a1 = DTB address.
+   * Power on with a flat binary image at the start of RAM: a Linux `Image`, a
+   * bare-metal program (`objcopy -O binary` output), or firmware such as
+   * OpenSBI's fw_dynamic.bin. Like a boot ROM, this places a device tree at the
+   * top of RAM and enters the image in M-mode with a0 = hart id, a1 = DTB.
    */
-  boot(image: ArrayLike<number>): void {
-    this.image = Uint8Array.from(image)
+  boot(image: ArrayLike<number>, { load = [], next }: BootOptions = {}): void {
+    this.images = [{ offset: 0, data: image }, ...load].map(({ offset, data }) => ({
+      offset,
+      data: Uint8Array.from(data),
+    }))
+    this.next = next
     this.reboot()
   }
 
-  /** Reset everything and start the last booted image again. */
+  /** Reset everything and start the last booted image(s) again. */
   reboot(): void {
-    if (!this.image) throw new Error('Nothing to reboot: call boot() first')
+    if (!this.images.length) throw new Error('Nothing to reboot: call boot() first')
     const dtb = this.deviceTree()
     const dtbOffset = this.dtbOffset(dtb.length)
-    if (this.image.length > dtbOffset) {
-      throw new Error(`Image (${this.image.length} bytes) does not fit in RAM below the device tree`)
+    // OpenSBI's fw_dynamic_info, if any, goes right below the device tree.
+    const infoOffset = dtbOffset - FW_DYNAMIC_INFO_SIZE
+    const freeEnd = this.next ? infoOffset : dtbOffset
+    for (const { offset, data } of this.images) {
+      if (offset + data.length > freeEnd) {
+        throw new Error(`Image at offset 0x${offset.toString(16)} (${data.length} bytes) does not fit in RAM below the device tree`)
+      }
     }
 
     this.ram.bytes.fill(0)
-    this.ram.load(0, this.image)
+    for (const { offset, data } of this.images) this.ram.load(offset, data)
     this.ram.load(dtbOffset, dtb)
 
     this.exit = undefined
@@ -135,21 +160,43 @@ export class Machine {
     this.clint.reset()
     this.cpu.x[10] = 0 // a0: hart id
     this.cpu.x[11] = MemoryMap.RAM + dtbOffset // a1: device tree
+    if (this.next) {
+      // struct fw_dynamic_info (OpenSBI include/sbi/fw_dynamic.h), passed in a2
+      const info = [
+        0x4942534f, // magic "OSBI"
+        2, // version
+        MemoryMap.RAM + this.next.offset, // next_addr
+        { S: 1, M: 3 }[this.next.mode ?? 'S'], // next_mode
+        0, // options
+        0, // boot_hart
+      ]
+      info.forEach((word, i) => this.ram.write32(infoOffset + i * 4, word))
+      this.cpu.x[12] = MemoryMap.RAM + infoOffset
+    }
   }
 
-  /** Execute up to `maxInstructions` instructions; see RunResult for why it stopped. */
-  run(maxInstructions = Infinity): RunResult {
-    const end = this.cpu.instret + maxInstructions
-    while (this.cpu.instret < end) {
+  /**
+   * Execute up to `maxSteps` steps; see RunResult for why it stopped. A step
+   * is an instruction or a trap entry (which retires nothing), and every round
+   * uses up at least one, so neither a guest stuck in a trap loop nor one
+   * idling in WFI (with the virtual clock skipping ahead) keeps us here forever.
+   */
+  run(maxSteps = Infinity): RunResult {
+    let remaining = maxSteps
+    while (remaining > 0) {
       this.clint.update()
-      switch (this.cpu.run(Math.min(SLICE, end - this.cpu.instret))) {
+      const slice = Math.min(SLICE, remaining)
+      const before = this.cpu.instret
+      const result = this.cpu.run(slice)
+      remaining -= result === 'limit' ? slice : Math.max(1, this.cpu.instret - before)
+      switch (result) {
         case 'stopped':
           if (this.exit) return this.exit
           break
         case 'breakpoint':
           return 'breakpoint'
         case 'wfi':
-          if (!this.virtual || !this.fastForwardToTimer()) return 'idle'
+          if (!this.wake()) return 'idle'
           break
       }
     }
@@ -175,13 +222,21 @@ export class Machine {
     return Math.floor((performance.now() - this.epoch) * 1000)
   }
 
-  /** Virtual clock: skip idle time up to the next timer deadline. */
-  private fastForwardToTimer(): boolean {
+  /**
+   * The CPU sleeps in WFI: see whether it can be woken without waiting in the
+   * real world. The timer line is only re-evaluated between slices, so a
+   * deadline may have passed since; with the virtual clock, idle time up to the
+   * next deadline is skipped. Returns false if the CPU stays asleep.
+   */
+  private wake(): boolean {
+    this.clint.update()
+    if (this.cpu.mip & this.cpu.mie) return true
+    if (!this.virtual) return false
     const wait = this.microsUntilTimer()
     if (wait === Infinity) return false
     this.skippedMicros += wait
     this.clint.update()
-    return true
+    return (this.cpu.mip & this.cpu.mie) !== 0
   }
 
   /** The DTB goes into the last page-aligned chunk of RAM that fits it. */
@@ -202,7 +257,10 @@ export class Machine {
         model: 'risc-emulator (TypeScript RV32IMA)',
       },
       children: {
-        chosen: { props: { bootargs: this.bootargs } },
+        chosen: {
+          // stdout-path tells firmware (OpenSBI) where its console is
+          props: { bootargs: this.bootargs, 'stdout-path': `/soc/uart@${hex(MemoryMap.TERMINAL)}` },
+        },
         [`memory@${hex(MemoryMap.RAM)}`]: {
           props: { device_type: 'memory', reg: reg(MemoryMap.RAM, memSize) },
         },
@@ -221,7 +279,7 @@ export class Machine {
                 'riscv,isa': 'rv32ima',
                 'riscv,isa-base': 'rv32i',
                 'riscv,isa-extensions': ['i', 'm', 'a', 'zicsr', 'zifencei', 'zicntr'],
-                'mmu-type': 'riscv,none',
+                'mmu-type': 'riscv,sv32',
               },
               children: {
                 'interrupt-controller': {
@@ -244,7 +302,9 @@ export class Machine {
               props: {
                 'clock-frequency': 0x1000000,
                 reg: reg(MemoryMap.TERMINAL, Terminal.SIZE),
-                compatible: 'ns16850',
+                // Linux picks the first (as mini-rv32ima's kernel expects);
+                // OpenSBI's console driver knows the second.
+                compatible: ['ns16850', 'ns16550a'],
               },
             },
             poweroff: {

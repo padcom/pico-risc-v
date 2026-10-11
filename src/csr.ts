@@ -1,5 +1,17 @@
-/** Control and status register addresses (privileged spec, machine level + user counters). */
+/** Control and status register addresses (privileged spec: machine, supervisor, user counters). */
 export const enum Csr {
+  // Supervisor trap setup / handling, address translation
+  sstatus = 0x100,
+  sie = 0x104,
+  stvec = 0x105,
+  scounteren = 0x106,
+  sscratch = 0x140,
+  sepc = 0x141,
+  scause = 0x142,
+  stval = 0x143,
+  sip = 0x144,
+  satp = 0x180,
+
   // Unprivileged counters / timers (read-only shadows)
   cycle = 0xc00,
   time = 0xc01,
@@ -18,6 +30,8 @@ export const enum Csr {
   // Machine trap setup
   mstatus = 0x300,
   misa = 0x301,
+  medeleg = 0x302,
+  mideleg = 0x303,
   mie = 0x304,
   mtvec = 0x305,
   mcounteren = 0x306,
@@ -44,19 +58,36 @@ export const enum Csr {
   minstreth = 0xb82,
 }
 
-/** mstatus fields. */
+/** mstatus fields (sstatus is a restricted view of the same register). */
+export const MSTATUS_SIE = 1 << 1
 export const MSTATUS_MIE = 1 << 3
+export const MSTATUS_SPIE = 1 << 5
 export const MSTATUS_MPIE = 1 << 7
+export const MSTATUS_SPP = 1 << 8
 export const MSTATUS_MPP_SHIFT = 11
 export const MSTATUS_MPP = 3 << MSTATUS_MPP_SHIFT
+export const MSTATUS_MPRV = 1 << 17
+export const MSTATUS_SUM = 1 << 18
+export const MSTATUS_MXR = 1 << 19
+export const MSTATUS_TVM = 1 << 20
+export const MSTATUS_TW = 1 << 21
+export const MSTATUS_TSR = 1 << 22
 
-/** mip / mie bits. */
+/** mip / mie bits (sip / sie show the supervisor ones). */
+export const MIP_SSIP = 1 << 1
 export const MIP_MSIP = 1 << 3
+export const MIP_STIP = 1 << 5
 export const MIP_MTIP = 1 << 7
+export const MIP_SEIP = 1 << 9
 export const MIP_MEIP = 1 << 11
+
+/** satp (Sv32): MODE bit and physical page number of the root page table. */
+export const SATP_MODE_SV32 = 1 << 31
+export const SATP_PPN = 0x3fffff
 
 /** Privilege levels. */
 export const enum Priv {
   User = 0,
+  Supervisor = 1,
   Machine = 3,
 }

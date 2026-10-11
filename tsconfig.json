@@ -11,7 +11,8 @@
     "skipLibCheck": true,
     "types": [
       "node"
-    ]
+    ],
+    "preserveConstEnums": true
   },
   "include": [
     "src",

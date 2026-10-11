@@ -2,6 +2,7 @@
 # Started once by init on the console (see /etc/inittab). Runs a login session
 # and, when it ends (exit, Ctrl-D, or too many failed logins), powers the
 # machine off, which also ends the emulator.
-/sbin/getty -L console 0 vt100
+# xterm-256color: what macOS / Linux terminal emulators speak (colours, F-keys for mc)
+/sbin/getty -L console 0 xterm-256color
 echo "Session ended, powering off."
 exec /sbin/poweroff

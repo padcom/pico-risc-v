@@ -1,10 +1,15 @@
-# Building the Linux image from source
+# Building the Linux images from source
 
-`npm run linux:build` (or `linux/build.sh`) builds `images/linux/Image`, which
-`npm run linux` then boots. The image is a nommu RV32 Linux kernel with a
-BusyBox + uClibc root filesystem built into it (an initramfs), made with
-[mini-rv32ima](https://github.com/cnlohr/mini-rv32ima)'s Buildroot
-configuration.
+There are two flavors, both RV32 with the root filesystem built into the
+kernel (an initramfs):
+
+| Flavor  | What it is | Build | Boot |
+| ------- | ---------- | ----- | ---- |
+| **mmu** | Regular Linux 6.18 with virtual memory (Sv32), running in S-mode on top of the OpenSBI firmware. Upstream [Buildroot](https://buildroot.org) 2026.02 LTS, glibc and BusyBox, plus extra packages, currently Midnight Commander (`mc`). | `npm run linux:build` → `images/linux-mmu/fw_jump.bin` + `Image` | `npm run linux` |
+| **nommu** | [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima)'s tiny no-MMU kernel running in M-mode, with BusyBox and uClibc. A prebuilt image can also be downloaded. | `npm run linux:nommu:build` → `images/linux/Image` | `npm run linux:nommu` |
+
+Both are built by `linux/build.sh`; `FLAVOR=mmu` (default) or `FLAVOR=nommu`
+selects one.
 
 The build runs in a **Podman** container (`linux/Containerfile`, a pinned
 Debian 12), so it doesn't depend on your distribution or compiler:
@@ -17,18 +22,18 @@ Debian 12), so it doesn't depend on your distribution or compiler:
   shares with the VM.
 
 Your project directory is mounted into the container: programs, overlay and
-configs go in, and `images/linux/Image` comes out. Buildroot itself works in
-the Podman volume `risc-emulator-buildroot`, which keeps downloads and
-build state between runs. `podman volume rm risc-emulator-buildroot` starts
-over from scratch.
+configs go in, and the images come out. Buildroot itself works in a Podman
+volume per flavor, `risc-emulator-buildroot-mmu` and `risc-emulator-buildroot`
+(nommu), which keep downloads and build state between runs. `podman volume rm
+<name>` starts that flavor over from scratch.
 
 To skip the container on a Linux host, run `NATIVE=1 linux/build.sh`. You'll
-need Buildroot's host packages, and a GCC older than 15: GCC 15 defaults to
-C23, which this Buildroot snapshot's (2023.11) host packages don't compile
-under.
+need Buildroot's host packages. For the nommu flavor you also need a GCC older
+than 15: GCC 15 defaults to C23, which the old Buildroot snapshot nommu uses
+(2023.11) doesn't compile under.
 
-The first build compiles a cross toolchain, the kernel and BusyBox. It needs
-a few GB of disk and takes a while. Later builds are incremental.
+The first build compiles a cross toolchain, the kernel and all packages. It
+needs a few GB of disk and takes a while. Later builds are incremental.
 
 ## Console session
 
@@ -38,7 +43,7 @@ powers off, and `npm run linux` exits with it. This is set up in
 `linux/overlay/etc/inittab` and `linux/overlay/sbin/console-session`. To get
 the classic behaviour, where a new `login:` prompt appears after each logout,
 change the console line in `inittab` back to
-`console::respawn:/sbin/getty -L console 0 vt100`.
+`console::respawn:/sbin/getty -L console 0 xterm-256color`.
 
 ## Adding things to the image
 
@@ -48,7 +53,7 @@ change the console line in `inittab` back to
 | `linux/programs/<name>/Makefile` | whatever executables it builds into `$(O)`         |
 | `linux/overlay/<path>`        | `/<path>`, copied verbatim (scripts, config files, …) |
 
-Then run `npm run linux:build` again. Only your changes are rebuilt, and the
+Both go into both flavors. Then run the flavor's build again. Only your changes are rebuilt, and the
 kernel is relinked with the new root filesystem.
 
 A Makefile-based program gets `CC`, `CFLAGS`, `LDFLAGS` and `O` from the
@@ -59,6 +64,11 @@ $(O)/myprog: main.c util.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 ```
 
+On the mmu flavor programs are ordinary dynamically linked executables.
+Anything Buildroot packages can also be added: put its `BR2_PACKAGE_...=y`
+option in `linux/mmu/buildroot.fragment` (that's how `mc` is added). `linux/build.sh menuconfig`
+shows what's available.
+
 ### Things to know about nommu Linux
 
 - **No `fork()`.** Use `vfork()` + `exec*()` or `posix_spawn()` instead.
@@ -67,15 +77,24 @@ $(O)/myprog: main.c util.c
 - **Fixed stack size** of 64 KiB (`STACK_SIZE` in `post-build.sh`).
 - **No memory protection** between processes.
 
-## Customizing the kernel, BusyBox, uClibc or Buildroot
+## Customizing the kernel, BusyBox, C library or Buildroot
 
-The configs come from `vendor/mini-rv32ima/configs/`. To change one, copy it
-into `linux/configs/` under the same name and edit it there. A file in
-`linux/configs/` takes precedence. You can also use Buildroot's menus, e.g.
-`linux/build.sh linux-menuconfig` or `linux/build.sh busybox-menuconfig`.
-Copy the result back into `linux/configs/` so the change isn't lost.
+**mmu:** the configuration is Buildroot's `configs/qemu_riscv32_virt_defconfig`
+plus `linux/mmu/buildroot.fragment`. The fragment sets the CPU features the
+emulator has (RV32IMA, no FPU, no compressed instructions), the root
+filesystem, OpenSBI and the packages. Kernel options go in
+`linux/mmu/linux.fragment`, on top of the kernel's `rv32_defconfig`.
+
+**nommu:** the configs come from `vendor/mini-rv32ima/configs/`. To change one, copy it
+into `linux/nommu/configs/` under the same name and edit it there. A file in
+`linux/nommu/configs/` takes precedence.
+
+For both, you can also use Buildroot's menus, e.g. `linux/build.sh
+linux-menuconfig` or `linux/build.sh busybox-menuconfig` (with `FLAVOR=` as
+needed). Copy the result back into the fragment or config file so the change
+isn't lost.
 
 `linux/build.sh <target>` runs any Buildroot make target. For example,
 `linux/build.sh clean` wipes the build output but keeps the downloads.
-Native builds (`NATIVE=1`) work in `.buildroot/`; set `BUILD_DIR` to build
-elsewhere.
+Native builds (`NATIVE=1`) work in `.buildroot/<flavor>/`; set `BUILD_DIR` to
+build elsewhere.

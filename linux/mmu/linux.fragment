@@ -1,0 +1,76 @@
+# Kernel config fragment for the mmu flavor, applied on top of the kernel's
+# rv32_defconfig (see linux/mmu/buildroot.fragment).
+
+# Match the emulated CPU: RV32IMA, no FPU, no compressed or vector instructions.
+# CONFIG_RISCV_ISA_C is not set
+# CONFIG_FPU is not set
+# CONFIG_RISCV_ISA_V is not set
+# UEFI support forces compressed instructions on (it selects RISCV_ISA_C), and
+# we boot through OpenSBI anyway.
+# CONFIG_EFI is not set
+
+# Everything is built in (no module loading). That turns every "m" in
+# rv32_defconfig into "y", so switch off what this machine doesn't have.
+# CONFIG_MODULES is not set
+# CONFIG_ARCH_ANDES is not set
+# CONFIG_ARCH_MICROCHIP_POLARFIRE is not set
+# CONFIG_ARCH_MICROCHIP is not set
+# CONFIG_ARCH_SIFIVE is not set
+# CONFIG_ARCH_SOPHGO is not set
+# CONFIG_ARCH_SPACEMIT is not set
+# CONFIG_ARCH_STARFIVE is not set
+# CONFIG_ARCH_SUNXI is not set
+# CONFIG_ARCH_THEAD is not set
+# CONFIG_ARCH_CANAAN is not set
+# CONFIG_PCI is not set
+# CONFIG_DRM is not set
+# CONFIG_FB is not set
+# CONFIG_VT is not set
+# CONFIG_SOUND is not set
+# CONFIG_USB_SUPPORT is not set
+# CONFIG_MMC is not set
+# CONFIG_MTD is not set
+# CONFIG_SCSI is not set
+# CONFIG_ATA is not set
+# CONFIG_MD is not set
+# CONFIG_MEDIA_SUPPORT is not set
+# CONFIG_WIRELESS is not set
+# CONFIG_WLAN is not set
+# CONFIG_ETHERNET is not set
+# CONFIG_CAN is not set
+# CONFIG_BT is not set
+# CONFIG_NFC is not set
+# CONFIG_NETWORK_FILESYSTEMS is not set
+# CONFIG_BTRFS_FS is not set
+# CONFIG_XFS_FS is not set
+# CONFIG_VIRTIO_MENU is not set
+# CONFIG_SPI is not set
+# CONFIG_I2C is not set
+# CONFIG_GPIOLIB is not set
+# CONFIG_INPUT_KEYBOARD is not set
+# CONFIG_INPUT_MOUSE is not set
+
+# Boot-time hogs on an emulated CPU (found by sampling the PC during boot):
+# - the jitter-entropy RNG self-test (SHA-3 heavy); it comes in through IPsec
+#   (ESP → IV generators → default RNG → DRBG → jitterentropy), unused here
+# - gunzipping the built-in initramfs: keep it uncompressed instead
+# - ftrace's event setup
+# - legacy BSD ptys
+# CONFIG_INET_ESP is not set
+# CONFIG_INET6_ESP is not set
+# CONFIG_XFRM_USER is not set
+# CONFIG_CRYPTO_SEQIV is not set
+# CONFIG_CRYPTO_ECHAINIV is not set
+# CONFIG_CRYPTO_DRBG_MENU is not set
+# CONFIG_CRYPTO_JITTERENTROPY is not set
+# (The compression choice only exists once INITRAMFS_SOURCE is set, which
+# Buildroot does after merging fragments; set it here too, to Buildroot's value.)
+CONFIG_INITRAMFS_SOURCE="${BR_BINARIES_DIR}/rootfs.cpio"
+CONFIG_INITRAMFS_COMPRESSION_NONE=y
+# CONFIG_FTRACE is not set
+# CONFIG_LEGACY_PTYS is not set
+
+# Console on the 16550-style UART (polled: the emulator has no PLIC).
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_SERIAL_OF_PLATFORM=y

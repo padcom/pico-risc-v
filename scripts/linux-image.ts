@@ -1,11 +1,11 @@
 /**
- * Provides a Linux kernel image (with built-in initramfs) for the emulator at
- * images/linux/Image:
+ * Provides the nommu Linux kernel image (with built-in initramfs) for the
+ * emulator at images/linux/Image:
  *
  *   1. already there            → nothing to do
  *   2. otherwise download the prebuilt mini-rv32ima image
  *   3. if that fails (or with --build): build it from source with
- *      linux/build.sh (runs Buildroot in a Podman container; see linux/README.md)
+ *      FLAVOR=nommu linux/build.sh (Buildroot in a Podman container; see linux/README.md)
  *
  * Usage: node scripts/linux-image.ts [--build]
  */
@@ -38,7 +38,7 @@ async function main() {
   }
 
   // Builds and installs images/linux/Image itself (or explains why it can't).
-  execFileSync('bash', ['linux/build.sh'], { stdio: 'inherit' })
+  execFileSync('bash', ['linux/build.sh'], { stdio: 'inherit', env: { ...process.env, FLAVOR: 'nommu' } })
 }
 
 async function download(url: string): Promise<Uint8Array> {

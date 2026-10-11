@@ -112,7 +112,9 @@ export const asm = {
   ecall: () => 0x00000073,
   ebreak: () => 0x00100073,
   mret: () => 0x30200073,
+  sret: () => 0x10200073,
   wfi: () => 0x10500073,
+  sfenceVma: (rs1 = 0, rs2 = 0) => r(0x09, rs2, rs1, 0, 0, 0x73),
 }
 
 /** Serialize instruction words to little-endian bytes, ready for RAM.load(). */

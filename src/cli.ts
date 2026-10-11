@@ -3,7 +3,11 @@
  * Interactive runner: boots a flat binary image (Linux `Image` or a bare-metal
  * program) and connects the emulated terminal to this process's stdin/stdout.
  *
- *   node dist/cli.js [--memory <MiB>] [--bootargs <string>] [--virtual-clock] <image>
+ *   node dist/cli.js [--memory <MiB>] [--kernel <file>] [--bootargs <string>] [--virtual-clock] <image>
+ *
+ * With --kernel, <image> is firmware (OpenSBI's fw_dynamic.bin): the kernel is
+ * loaded 4 MiB into RAM (RV32 kernels must be 4 MiB aligned) and the firmware
+ * told to enter it there in S-mode.
  *
  * Press Ctrl-A then X to quit (Ctrl-A Ctrl-A sends a literal Ctrl-A).
  */
@@ -14,9 +18,11 @@ import { Machine } from './machine.js'
 /** Instructions per scheduling slice; small enough to keep input responsive. */
 const SLICE = 200_000
 const CTRL_A = 0x01
+/** Where the kernel goes: right after the firmware, 4 MiB aligned as RV32 Linux requires. */
+const KERNEL_OFFSET = 0x400000
 
 function usage(): never {
-  console.error('usage: risc-emulator [--memory <MiB>] [--bootargs <string>] [--virtual-clock] <image>')
+  console.error('usage: risc-emulator [--memory <MiB>] [--kernel <file>] [--bootargs <string>] [--virtual-clock] <image>')
   process.exit(2)
 }
 
@@ -26,6 +32,7 @@ const { values, positionals } = (() => {
       allowPositionals: true,
       options: {
         memory: { type: 'string', default: '64' },
+        kernel: { type: 'string' },
         bootargs: { type: 'string' },
         'virtual-clock': { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h' },
@@ -52,7 +59,12 @@ const machine = new Machine({
   clock: values['virtual-clock'] ? 'virtual' : 'realtime',
   output: byte => pending.push(byte),
 })
-machine.boot(readFileSync(positionals[0]!))
+machine.boot(
+  readFileSync(positionals[0]!),
+  values.kernel
+    ? { load: [{ offset: KERNEL_OFFSET, data: readFileSync(values.kernel) }], next: { offset: KERNEL_OFFSET } }
+    : {},
+)
 
 function quit(code: number, message?: string): never {
   flush()

@@ -9,13 +9,20 @@ export enum TrapCause {
   StoreAddressMisaligned = 6,
   StoreAccessFault = 7,
   EnvironmentCallFromUMode = 8,
+  EnvironmentCallFromSMode = 9,
   EnvironmentCallFromMMode = 11,
+  InstructionPageFault = 12,
+  LoadPageFault = 13,
+  StorePageFault = 15,
 }
 
 /** Interrupt cause codes (mcause values with the interrupt bit set). */
 export enum InterruptCause {
+  SupervisorSoftware = 1,
   MachineSoftware = 3,
+  SupervisorTimer = 5,
   MachineTimer = 7,
+  SupervisorExternal = 9,
   MachineExternal = 11,
 }
 

@@ -10,9 +10,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "start": "npm run build --silent && node dist/cli.js",
-    "linux:image": "node scripts/linux-image.ts",
-    "linux:build": "bash linux/build.sh",
-    "linux": "npm run build --silent && node scripts/linux-image.ts && node dist/cli.js images/linux/Image"
+    "linux": "npm run build --silent && node scripts/run-linux.ts mmu",
+    "linux:build": "FLAVOR=mmu bash linux/build.sh",
+    "linux:nommu": "npm run build --silent && node scripts/linux-image.ts && node scripts/run-linux.ts nommu",
+    "linux:nommu:build": "FLAVOR=nommu bash linux/build.sh",
+    "linux:nommu:image": "node scripts/linux-image.ts"
   },
   "keywords": [
     "risc-v",

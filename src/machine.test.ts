@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { asm as a, toBytes } from './asm.js'
 import { Clint } from './clint.js'
-import { MIP_MSIP, MIP_MTIP } from './csr.js'
+import { Csr, MIP_MSIP, MIP_MTIP } from './csr.js'
 import { Machine, MemoryMap } from './machine.js'
 import { Syscon } from './syscon.js'
 import { Terminal } from './terminal.js'
@@ -89,6 +90,51 @@ describe('CLINT', () => {
     expect(mip() & MIP_MSIP).not.toBe(0)
     c.write32(Clint.MSIP, 0)
     expect(mip() & MIP_MSIP).toBe(0)
+  })
+})
+
+describe('Machine.run with the virtual clock', () => {
+  const MTIMECMP = MemoryMap.CLINT + Clint.MTIMECMP
+  // t0..t3 = x5..x7, x28
+  const setDeadline = (lo: number) => [a.lui(5, MTIMECMP), a.sw(0, 5, 4), a.addi(6, 0, lo), a.sw(6, 5, 0)]
+  const powerOff = [a.lui(5, MemoryMap.SYSCON), a.lui(6, 0x5000), a.addi(6, 6, 0x555), a.sw(6, 5, 0), a.jal(0, 0)]
+
+  function machine(main: number[], handler: number[] = []) {
+    const m = new Machine({ ramSize: 1024 * 1024, clock: 'virtual' })
+    const image = new Uint8Array(0x200)
+    image.set(toBytes(main))
+    image.set(toBytes(handler), 0x100)
+    m.boot(image)
+    return m
+  }
+
+  it('returns even when the guest only ever idles in WFI between timer ticks', () => {
+    const m = machine(
+      [
+        a.lui(5, MemoryMap.RAM), a.addi(5, 5, 0x100), a.csrrw(0, Csr.mtvec, 5),
+        ...setDeadline(1000),
+        a.addi(7, 0, MIP_MTIP), a.csrrw(0, Csr.mie, 7), a.csrrsi(0, Csr.mstatus, 8),
+        a.wfi(), a.jal(0, -4), // idle loop
+      ],
+      [a.lui(5, MTIMECMP), a.lw(6, 5, 0), a.addi(6, 6, 1000), a.sw(6, 5, 0), a.mret()], // re-arm, return
+    )
+    expect(m.run(100_000)).toBe('limit')
+    // Each tick costs a handful of steps, so the budget covers some 14 000
+    // ticks (14 s). Without the budget counting partial slices, run() would
+    // keep skipping ahead (until mtimecmp's low word wrapped after 4295 s).
+    expect(m.clint.mtime).toBeGreaterThan(10_000_000)
+    expect(m.clint.mtime).toBeLessThan(60_000_000)
+  })
+
+  it('a deadline that passes mid-slice wakes a CPU that then executes WFI', () => {
+    const m = machine([
+      ...setDeadline(50), // 50 µs = 500 instructions at the default 10 per µs
+      a.addi(7, 0, MIP_MTIP), a.csrrw(0, Csr.mie, 7), // enabled in mie, but MIE off: WFI just resumes
+      a.addi(28, 0, 2000), a.addi(28, 28, -1), a.bne(28, 0, -4), // ~4000 instructions
+      a.wfi(),
+      ...powerOff,
+    ])
+    expect(m.run(1_000_000)).toBe('poweroff')
   })
 })
 

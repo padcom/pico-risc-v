@@ -5,9 +5,10 @@
 #
 #   - the project directory is bind-mounted at /work: linux/programs,
 #     linux/overlay and linux/configs go in, images/linux/Image comes out
-#   - Buildroot works in the named volume "risc-emulator-buildroot" (a Linux,
-#     case-sensitive file system; it keeps downloads and build state between
-#     runs). `podman volume rm risc-emulator-buildroot` throws it all away.
+#   - Buildroot works in a named volume, "risc-emulator-buildroot-mmu" or
+#     "risc-emulator-buildroot" (nommu): a Linux, case-sensitive file system
+#     that keeps downloads and build state between runs. `podman volume rm
+#     <name>` throws it all away.
 #   - on macOS Podman runs containers in its own Linux VM ("podman machine");
 #     it is created and started here if needed
 #
@@ -15,7 +16,8 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 IMAGE=localhost/risc-emulator-buildroot
-VOLUME=risc-emulator-buildroot
+FLAVOR=${FLAVOR:-mmu}
+VOLUME=risc-emulator-buildroot$([ "$FLAVOR" = nommu ] || echo "-$FLAVOR") # one per flavor
 
 die() { echo "error: $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }
@@ -56,4 +58,5 @@ exec podman run --rm ${tty[@]+"${tty[@]}"} \
   --volume "$ROOT:/work:z" \
   --workdir /work \
   --env BUILD_DIR=/build \
+  --env FLAVOR="$FLAVOR" \
   "$IMAGE" bash linux/build.sh "$@"
