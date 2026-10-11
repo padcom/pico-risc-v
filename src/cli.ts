@@ -8,8 +8,10 @@
  *
  * The machine has one RV64GC CPU.
  *
- * With --kernel, <image> is firmware (OpenSBI's fw_dynamic.bin): the kernel is
- * loaded 4 MiB into RAM and the firmware told to enter it there in S-mode.
+ * With --kernel, <image> is firmware (OpenSBI's fw_dynamic.bin), and <file>
+ * the next boot stage: a bootloader (U-Boot) or a Linux kernel. It is loaded
+ * 2 MiB into RAM, as on QEMU's virt machine, and the firmware told to enter
+ * it there in S-mode.
  *
  * --disk attaches a raw disk image file as a virtio block device (/dev/vda);
  * the guest's writes go to the file. With --snapshot they are kept in memory
@@ -31,8 +33,8 @@ import { UserNetwork } from './net/user-network.js'
 /** Instructions per scheduling slice; small enough to keep input responsive. */
 const SLICE = 200_000
 const CTRL_A = 0x01
-/** Where the kernel goes: after the firmware, aligned as Linux requires (2 MiB). */
-const KERNEL_OFFSET = 0x400000
+/** Where the next boot stage goes: after the firmware, where U-Boot expects it (2 MiB, also Linux's alignment). */
+const KERNEL_OFFSET = 0x200000
 
 function usage(): never {
   console.error(

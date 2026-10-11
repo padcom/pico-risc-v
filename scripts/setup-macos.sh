@@ -9,7 +9,7 @@
 # boots Debian. It installs (whatever is missing), with Homebrew
 # (https://brew.sh, installed first if needed; that asks for your password):
 #
-#   - Podman: the Linux images are built in Podman containers, in a small
+#   - Podman: Debian's image is prepared in a Podman container, in a small
 #     Linux VM Podman runs (linux/podman.sh creates it on first use)
 #   - Node.js, unless a Node.js of at least $NODE_MIN is already there
 #   - rustup, then Rust with the WebAssembly target, for the CPU core
@@ -88,8 +88,8 @@ cat <<EOF
 
   npm start
 
-The first run creates Podman's Linux VM, builds the Linux kernel (with
-Buildroot, in a Podman container: a cross toolchain, the kernel and
-firmware, so it takes a while) and the Debian disk, then boots it. Log in as
-root, no password; poweroff quits. See linux/README.md for more.
+The first run creates Podman's Linux VM and sets Debian up (it downloads
+Debian's cloud image and firmware, a few minutes), then boots it; that takes
+about 2 minutes. Log in as root, no password; poweroff quits. See
+linux/README.md for more.
 EOF

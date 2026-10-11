@@ -8,7 +8,7 @@
 #
 # boots Debian. It installs (whatever is missing):
 #
-#   - git, curl, Podman (the Linux images are built in Podman containers),
+#   - git, curl, Podman (Debian's image is prepared in a Podman container),
 #     ping (the emulator's network relays pings through it) and a C compiler
 #     (the linker for the CPU core's native Rust tests, npm test), with the
 #     distribution's package manager: apt (Debian, Ubuntu), dnf (Fedora),
@@ -39,34 +39,19 @@ have() { command -v "$1" >/dev/null 2>&1; }
 SUDO=()
 [ "$(id -u)" -eq 0 ] || SUDO=(sudo)
 
-# Linux 6.7+ lets the Debian build container run riscv64 programs (QEMU) on
-# its own; older kernels need it set up on the host (see linux/debian/build.sh).
-kernel=$(uname -r)
-kernel_major=${kernel%%.*}
-kernel_minor=${kernel#*.}
-kernel_minor=${kernel_minor%%[!0-9]*}
-old_kernel=
-if [ "$kernel_major" -lt 6 ] || { [ "$kernel_major" -eq 6 ] && [ "$kernel_minor" -lt 7 ]; }; then
-  old_kernel=1
-fi
-
 step "System packages"
 if have apt-get; then
   packages=(git curl ca-certificates unzip podman iputils-ping gcc)
-  [ -n "$old_kernel" ] && packages+=(qemu-user-static) # registers riscv64 with binfmt_misc
   "${SUDO[@]}" apt-get update
   "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
 elif have dnf; then
   packages=(git curl unzip podman iputils gcc)
-  [ -n "$old_kernel" ] && packages+=(qemu-user-static-riscv)
   "${SUDO[@]}" dnf install -y "${packages[@]}"
 elif have pacman; then
   packages=(git curl unzip podman iputils gcc)
-  [ -n "$old_kernel" ] && packages+=(qemu-user-static qemu-user-static-binfmt)
   "${SUDO[@]}" pacman -S --needed --noconfirm "${packages[@]}"
 elif have zypper; then
   packages=(git curl unzip podman iputils gcc)
-  [ -n "$old_kernel" ] && packages+=(qemu-linux-user)
   "${SUDO[@]}" zypper --non-interactive install "${packages[@]}"
 else
   die "no supported package manager (apt, dnf, pacman, zypper); install git, curl, unzip, podman, ping and gcc yourself, then run this again"
@@ -136,8 +121,7 @@ cat <<EOF
 
   npm start
 
-The first run builds the Linux kernel (with Buildroot, in a Podman
-container: a cross toolchain, the kernel and firmware, so it takes a while)
-and the Debian disk, then boots it. Log in as root, no password; poweroff
-quits. See linux/README.md for more.
+The first run sets Debian up (it downloads Debian's cloud image and
+firmware, a few minutes), then boots it; that takes about 2 minutes. Log in
+as root, no password; poweroff quits. See linux/README.md for more.
 EOF

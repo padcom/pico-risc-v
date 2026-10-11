@@ -1,2 +1,0 @@
-# <file system> <mount point> <type> <options> <dump> <pass>
-/dev/vda	/	ext4	errors=remount-ro	0	1

@@ -13,7 +13,6 @@
     "test:watch": "vitest",
     "bench": "npm run build --silent && make -s -C examples && node scripts/bench.ts",
     "start": "node scripts/start.ts",
-    "kernel:build": "bash linux/kernel/build.sh",
     "debian:build": "bash linux/debian/build.sh",
     "emulator": "npm run build --silent && node dist/cli.js"
   },

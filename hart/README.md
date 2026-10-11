@@ -83,12 +83,13 @@ run executes exactly the same instructions:
   CRC-32, sorting and string work (RV64IM). It checks the checksum the
   program prints.
 - **compressed:** the same program built with compressed instructions.
-- **debian:** Debian boots to the login prompt (systemd, with a fixed date
-  and random seed): about 4 billion instructions.
+- **debian:** Debian's cloud image boots to the login prompt (OpenSBI,
+  U-Boot, GRUB, Debian's kernel, systemd; with a fixed date and random
+  seed): about 18 billion instructions.
 
 | | bare-metal | compressed | debian boot |
 |---|---|---|---|
-| this core, RV64GC | 240 MIPS | 225 MIPS | 124 MIPS, 32 s |
+| this core, RV64GC | 240 MIPS | 225 MIPS | 145 MIPS, 124 s |
 
 Measured on an Apple Silicon Mac with Node 26. Earlier, when the core also
 did RV32 (see the git history), the TypeScript CPU it replaced ran the

@@ -1,6 +1,0 @@
-# The emulator's network card, on its user-mode NAT (10.0.2.15 by DHCP).
-[Match]
-Name=eth0
-
-[Network]
-DHCP=ipv4

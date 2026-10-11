@@ -4,14 +4,14 @@
  *   bare-metal  examples/bench: integer, memory and branch-heavy C code in
  *               M-mode without paging; checks the checksum it prints
  *   compressed  the same, built with compressed instructions (RV64IMC)
- *   debian      Debian (OpenSBI, our kernel, systemd; Sv39 paging, ext4 on the
- *               virtio disk as a read-only snapshot, no network card) booting
- *               to the login prompt
+ *   debian      Debian's cloud image (OpenSBI, U-Boot, GRUB, Debian's kernel and
+ *               initrd, systemd; Sv39 paging, the virtio disk as a read-only
+ *               snapshot, no network card) booting to the login prompt
  *
  * All run on the virtual clock (Debian with a fixed date and random seed), so
  * every run executes exactly the same instructions; the numbers are comparable
- * between emulator versions (for debian: as long as the kernel and the Debian
- * disk are the same builds).
+ * between emulator versions (for debian: as long as the Debian image is the
+ * same build).
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { SnapshotStorage } from '../dist/block-storage.js'
@@ -40,12 +40,12 @@ function bareMetal(program = 'bench'): Result {
 }
 
 function debian(): Result | undefined {
-  const files = ['kernel/fw_dynamic.bin', 'kernel/Image', 'debian/rootfs.ext4'].map(f => new URL(`images/${f}`, root))
+  const files = ['fw_dynamic.bin', 'u-boot.bin', 'disk.raw'].map(f => new URL(`images/debian/${f}`, root))
   if (!files.every(existsSync)) return undefined
-  const [firmware, kernel, rootfs] = files as [URL, URL, URL]
+  const [firmware, uboot, disk] = files as [URL, URL, URL]
 
   let screen = ''
-  const disk = new FileStorage(rootfs.pathname, { readOnly: true })
+  const file = new FileStorage(disk.pathname, { readOnly: true })
   const machine = new Machine({
     clock: 'virtual',
     // Virtual time at about real speed (systemd's timeouts), and a fixed date
@@ -53,20 +53,19 @@ function debian(): Result | undefined {
     instructionsPerMicrosecond: 100,
     startTime: Date.UTC(2026, 0, 1),
     rngSeed: new Uint8Array(64).fill(42),
-    ramSize: 512 * 1024 * 1024,
-    bootargs: 'earlycon=uart8250,mmio,0x10000000,1000000 console=ttyS0 root=/dev/vda rw',
-    disk: new SnapshotStorage(disk),
+    ramSize: 1024 * 1024 * 1024,
+    disk: new SnapshotStorage(file),
     output: b => (screen += String.fromCharCode(b)),
   })
-  machine.boot(readFileSync(firmware), { load: [{ offset: 0x400000, data: readFileSync(kernel) }], next: { offset: 0x400000 } })
+  machine.boot(readFileSync(firmware), { load: [{ offset: 0x200000, data: readFileSync(uboot) }], next: { offset: 0x200000 } })
   const start = performance.now()
   while (!screen.includes('login: ')) {
     const result = machine.run(1_000_000)
     if (result !== 'limit') throw new Error(`debian: machine stopped (${result}); screen ends with:\n${screen.slice(-1000)}`)
-    if (machine.cpu.instret > 20_000_000_000) throw new Error(`debian: no login prompt; screen ends with:\n${screen.slice(-1000)}`)
+    if (machine.cpu.instret > 60_000_000_000) throw new Error(`debian: no login prompt; screen ends with:\n${screen.slice(-1000)}`)
   }
   const seconds = (performance.now() - start) / 1000
-  disk.close()
+  file.close()
   return { instructions: machine.cpu.instret, seconds }
 }
 

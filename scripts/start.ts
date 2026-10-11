@@ -1,40 +1,24 @@
 /**
- * `npm start`: boot Debian in the emulator, interactively, rebuilding whatever
+ * `npm start`: boot Debian in the emulator, interactively, building whatever
  * is out of date first.
  *
  *   node scripts/start.ts [emulator options, e.g. --snapshot]
  *
  * 1. The emulator: its CPU core (hart/, Rust → build/hart.wasm; cargo
  *    rebuilds only on changes), and dist/ when any src/ file is newer.
- * 2. The images, each (re)built when it's missing or what it's built from
- *    changed (see linux/inputs-hash.sh):
- *    - the kernel and OpenSBI firmware (linux/kernel/build.sh → images/kernel/)
- *    - the Debian disk (linux/debian/build.sh → images/debian/rootfs.ext4);
- *      a rebuild replaces it, so the old one is kept as rootfs.ext4.bak
- * 3. Boot: OpenSBI at the start of RAM, the kernel 4 MiB later, Debian on the
- *    virtio disk, eth0 on the user-mode network.
+ * 2. Debian (linux/debian/build.sh → images/debian/), when it's missing or
+ *    linux/debian/ changed (see linux/inputs-hash.sh). That replaces the
+ *    disk, so the old one is kept as disk.raw.bak.
+ * 3. Boot: OpenSBI at the start of RAM, U-Boot 2 MiB later; U-Boot starts
+ *    GRUB from the disk, GRUB Debian's kernel. eth0 on the user-mode network.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, renameSync, statSync } from 'node:fs'
 import { buildWasm } from './build-wasm.ts'
 
-/** An image built by linux/<name>/build.sh into `dir`, made of `files`. */
-interface Image {
-  name: 'kernel' | 'debian'
-  dir: string
-  files: string[]
-}
-const KERNEL: Image = { name: 'kernel', dir: 'images/kernel', files: ['fw_dynamic.bin', 'Image'] }
-const DEBIAN: Image = { name: 'debian', dir: 'images/debian', files: ['rootfs.ext4'] }
-
-const ARGS = [
-  '--memory', '512',
-  '--kernel', `${KERNEL.dir}/Image`,
-  '--disk', `${DEBIAN.dir}/rootfs.ext4`,
-  '--net',
-  '--bootargs', 'earlycon=uart8250,mmio,0x10000000,1000000 console=ttyS0 root=/dev/vda rw',
-  `${KERNEL.dir}/fw_dynamic.bin`,
-]
+const DIR = 'images/debian'
+const FILES = ['fw_dynamic.bin', 'u-boot.bin', 'disk.raw']
+const ARGS = ['--memory', '1024', '--kernel', `${DIR}/u-boot.bin`, '--disk', `${DIR}/disk.raw`, '--net', `${DIR}/fw_dynamic.bin`]
 
 const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'inherit' })
 
@@ -45,18 +29,16 @@ if (emulatorStale()) {
   run(process.execPath, ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.build.json'])
 }
 
-// 2. The images.
-for (const image of [KERNEL, DEBIAN]) {
-  const reason = imageStale(image)
-  if (!reason) continue
-  const { name, dir } = image
-  console.log(`[start] ${reason}: building ${dir} (linux/${name}/build.sh)`)
-  if (existsSync(`${dir}/rootfs.ext4`)) {
+// 2. Debian.
+const reason = imageStale()
+if (reason) {
+  console.log(`[start] ${reason}: building it (linux/debian/build.sh)`)
+  if (existsSync(`${DIR}/disk.raw`)) {
     // Moved, not copied: instant, and the (sparse) file stays sparse.
-    renameSync(`${dir}/rootfs.ext4`, `${dir}/rootfs.ext4.bak`)
-    console.log(`[start] the rebuild replaces ${dir}/rootfs.ext4; the old one is kept as rootfs.ext4.bak`)
+    renameSync(`${DIR}/disk.raw`, `${DIR}/disk.raw.bak`)
+    console.log(`[start] the rebuild replaces ${DIR}/disk.raw; the old one is kept as disk.raw.bak`)
   }
-  run('bash', [`linux/${name}/build.sh`])
+  run('bash', ['linux/debian/build.sh'])
 }
 
 // 3. Boot.
@@ -72,11 +54,11 @@ function emulatorStale(): boolean {
     .some(f => statSync(`src/${f}`).mtimeMs > built)
 }
 
-/** Why an image needs (re)building, or undefined if it's up to date. */
-function imageStale({ name, dir, files }: Image): string | undefined {
-  if (!files.every(f => existsSync(`${dir}/${f}`))) return 'not built yet'
-  const hashFile = `${dir}/.inputs-hash`
+/** Why Debian needs (re)building, or undefined if it's up to date. */
+function imageStale(): string | undefined {
+  if (!FILES.every(f => existsSync(`${DIR}/${f}`))) return 'Debian is not set up yet'
+  const hashFile = `${DIR}/.inputs-hash`
   const built = existsSync(hashFile) ? readFileSync(hashFile, 'utf8').trim() : ''
-  const now = execFileSync('bash', ['linux/inputs-hash.sh', name], { encoding: 'utf8' }).trim()
-  return built === now ? undefined : `linux/${name}/ changed since it was built`
+  const now = execFileSync('bash', ['linux/inputs-hash.sh'], { encoding: 'utf8' }).trim()
+  return built === now ? undefined : 'linux/debian/ changed since it was built'
 }

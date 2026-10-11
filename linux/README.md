@@ -2,8 +2,8 @@
 
 ## Getting started
 
-On a fresh clone, one script installs everything the emulator and the image
-builds need, then `npm start` builds and boots Debian:
+On a fresh clone, one script installs everything the emulator needs, then
+`npm start` sets up and boots Debian:
 
 ```sh
 scripts/setup-macos.sh    # macOS: Homebrew, Podman, Node.js, Rust
@@ -16,88 +16,90 @@ They finish by building the emulator once, as a check. On Linux, open a new
 terminal before `npm start`: Node.js (fnm) and Rust (rustup) are installed
 into your home directory and put on PATH by your shell's startup file.
 
-The first `npm start` takes a while: it builds the Linux kernel and firmware
-with Buildroot, which compiles a cross toolchain first, and then the Debian
-disk. Later runs boot right away.
+The first `npm start` downloads and prepares Debian (a few minutes); later
+runs boot right away.
 
 `npm test` additionally needs a RISC-V bare-metal GCC for the test programs,
 installed as `riscv64-elf-gcc` (macOS: `brew install riscv64-elf-gcc`; Linux
 distributions name theirs differently, e.g. `riscv64-unknown-elf-gcc`), and
 the test suites' submodule (`git submodule update --init`).
 
-## What `npm start` does
+## What runs
 
-1. Compiles the emulator if needed, including its CPU core (see
-   [hart/README.md](../hart/README.md)).
-2. Builds what's missing or out of date (anything in its directory under
-   `linux/` changed):
-   - the kernel and firmware, `images/kernel/Image` and `fw_dynamic.bin`
-     (`linux/kernel/`, `npm run kernel:build`)
-   - the Debian disk, `images/debian/rootfs.ext4` (`linux/debian/`,
-     `npm run debian:build`)
-3. Boots it: OpenSBI (the firmware) at the start of RAM, Linux 6.18 4 MiB
-   later in S-mode, Debian 13 (trixie) on a virtio disk, the network card on
-   the emulator's NAT, 512 MiB of RAM. The CPU is RV64GC with Sv39 virtual
-   memory, what Debian's riscv64 port requires.
+All of it is Debian's, booted the way a RISC-V board boots it:
 
-Debian reaches the login prompt in about 35 s. Log in as `root`, no
+1. **OpenSBI** (Debian's `opensbi` package), the M-mode firmware, at the
+   start of RAM. It provides the SBI services Linux uses (timer, console,
+   power-off) and starts the next stage in S-mode.
+2. **U-Boot** (Debian's `u-boot-qemu`, the build for QEMU's virt machine),
+   2 MiB into RAM. It finds the virtio disk and starts GRUB from its EFI
+   system partition, providing UEFI to it.
+3. **GRUB** loads Debian's kernel and initrd from `/boot`, as on any Debian
+   machine.
+4. **Linux** (Debian's 6.12 kernel; its drivers for this machine's devices
+   are built in or come from the initrd), then **systemd**.
+
+The disk is Debian 13 (trixie)'s "nocloud" cloud image for riscv64. The
+machine has an RV64GC CPU with Sv39 virtual memory, what Debian's riscv64
+port requires, and 1 GiB of RAM.
+
+Debian reaches the login prompt in about 2 minutes. Log in as `root`, no
 password. `poweroff` shuts it down, and `npm start` exits with it; Ctrl-A
 then X quits the emulator at any time.
 
 Options after `--` go to the emulator: `npm start -- --snapshot` (see
-[The disk](#the-disk)), `npm start -- --memory 1024`.
+[The disk](#the-disk)), `npm start -- --memory 2048`.
 
-## The Debian disk
+Since the kernel boots from the disk, `apt upgrade` updates it as on any
+Debian machine; the next boot uses the new one.
 
-It's Debian's own riscv64 system, unmodified: Debian's packages, systemd as
-init, systemd-networkd and systemd-resolved for the network, and apt.
-`linux/debian/build.sh` builds it (about a minute and a half):
+## How Debian is set up
 
-1. [mmdebstrap](https://gitlab.mister-muffin.de/josch/mmdebstrap) downloads
-   Debian's minimal base system plus the packages in
-   `linux/debian/packages` from `deb.debian.org` and installs them. The
-   packages' install scripts are riscv64 programs: they run under QEMU's
-   user-mode emulator, through a `binfmt_misc` mounted inside the build
-   container only (Linux 6.7+), so nothing changes on your machine or in
-   Podman's VM. On older Linux kernels, `scripts/setup-linux.sh` sets QEMU
-   up on the host instead, and the build uses that.
-2. The files in `linux/debian/overlay/` are copied in: hostname, `fstab`,
-   the network configuration and apt settings. root's password is removed,
-   and apt's daily timers are switched off: on an emulated CPU they would
-   take over the machine for minutes at random times.
-3. `mke2fs` writes it all into a 4 GB ext4 disk image (`DEBIAN_DISK_SIZE` to
-   change it), and `e2fsck` checks the result. The file is sparse: about
-   200 MB on your disk.
+`linux/debian/build.sh` (`npm run debian:build`; `npm start` runs it when
+`images/debian/` is missing or anything in `linux/debian/` changed) does it
+in a Podman container, in a few minutes:
 
-Debian's packages are fetched fresh on every build, so a later build gets
-Debian's latest updates.
+1. Downloads the nocloud image from cloud.debian.org (the latest build of
+   Debian 13; about 300 MB) and checks it against Debian's SHA-512
+   checksums.
+2. Takes OpenSBI's `fw_dynamic.bin` and U-Boot's `u-boot.bin` out of
+   Debian's packages.
+3. Adapts the disk for the emulator, editing the root file system inside
+   the image (with `debugfs`, no mounting):
+   - root logs in without a password
+   - switched off (masked), because on an emulated CPU they take a lot of
+     time: `systemd-firstboot` (asks for locale, timezone and password on
+     the console), AppArmor (compiles its profiles at every boot, half a
+     minute) and apt's automatic updates (apt's timers and
+     unattended-upgrades, which would run apt in the background for minutes)
+   - the files in `linux/debian/overlay/`: the hostname, GRUB not waiting
+     on its menu, and no package description translations for apt (which
+     saves a third of `apt update`'s time)
+4. Grows the disk to 8 GB (`DEBIAN_DISK_SIZE`); the root file system grows
+   into it on the first boot.
 
-To have more packages on every new disk, add them to `linux/debian/packages`;
-for files, put them under `linux/debian/overlay/`. The next `npm start`
-rebuilds the disk.
+The results are in `images/debian/`: `disk.raw`, `fw_dynamic.bin`,
+`u-boot.bin`, and `VERSIONS`, which says which image and packages they came
+from. The disk file is sparse: about 1 GB on your disk.
 
 ## The disk
 
-`images/debian/rootfs.ext4` is a raw disk image holding an ext4 file system.
-The emulator attaches it as a virtio block device, and Linux mounts it as its
-root file system (`root=/dev/vda`).
+`images/debian/disk.raw` is a raw disk image (GPT: an EFI system partition
+and the root file system). The emulator attaches it as a virtio block device,
+`/dev/vda`.
 
 - **Writes go to the file.** Whatever you change in the guest is still there
   next boot, like a real disk.
 - **`npm start -- --snapshot`** keeps the guest's writes in memory and
   throws them away on exit; the file isn't touched.
-- **A rebuild replaces `rootfs.ext4`**, so anything changed in the guest is
-  lost. When `npm start` rebuilds, it first keeps the old disk as
-  `rootfs.ext4.bak`.
-- **On a Linux host** you can loop-mount the image to look inside while the
-  emulator is off: `sudo mount -o loop images/debian/rootfs.ext4 /mnt`.
+- **Setting Debian up again replaces `disk.raw`**, so anything changed in the
+  guest is lost. When `npm start` does it, it first keeps the old disk as
+  `disk.raw.bak`.
 
 Inside, it's ordinary Debian: `apt update` and `apt install <package>` fetch
 packages from Debian's mirrors through the emulator's network. Expect it to
 be slow, since apt works through Debian's whole package list on the emulated
-CPU: `apt update` takes about 2 minutes, installing a small package such as
-`htop` about half a minute. (Package description translations are switched
-off, in `overlay/etc/apt/apt.conf.d/`, which saves a third of that.)
+CPU: `apt update` takes about 2 minutes.
 
 ## The network
 
@@ -107,9 +109,9 @@ networking. No admin rights or extra programs are involved.
 
 | Address     | What it is |
 | ----------- | ---------- |
-| `10.0.2.15` | the guest, configured by DHCP at boot (systemd-networkd) |
+| `10.0.2.15` | the guest, configured by DHCP at boot |
 | `10.0.2.2`  | the router, which is also **your machine's `localhost`**: `curl http://10.0.2.2:8080/` reaches a server listening on port 8080 on the host |
-| `10.0.2.3`  | DNS, relayed to the host's resolver (systemd-resolved asks it) |
+| `10.0.2.3`  | DNS, relayed to the host's resolver |
 
 The guest can make outgoing TCP connections and send UDP (including DNS) to
 anywhere the host can reach. What doesn't work:
@@ -127,51 +129,20 @@ takes a moment: the TLS handshake's cryptography runs on the emulated CPU.
 The guest gets the date for certificate checks from the emulator's real-time
 clock.
 
-## The kernel and firmware
+## Where the setup runs
 
-`linux/kernel/build.sh` builds them from source with
-[Buildroot](https://buildroot.org) 2026.02 LTS: a cross toolchain, Linux 6.18
-and OpenSBI 1.6, configured for exactly the emulated CPU:
-
-- `linux/kernel/buildroot.fragment`: Buildroot settings on top of its
-  `qemu_riscv64_virt_defconfig` (the CPU, the toolchain, OpenSBI; no root
-  filesystem, Debian's disk is separate)
-- `linux/kernel/linux.fragment`: kernel options on top of the kernel's
-  `defconfig`. Everything is built in (no modules, no initramfs), with what
-  this machine doesn't have switched off and a few boot-time hogs removed.
-
-Changing the CPU or toolchain settings makes the next build start over from
-scratch (the build notices); changing kernel options reconfigures and
-recompiles the kernel. For Buildroot's menus, e.g. `linux/kernel/build.sh
-linux-menuconfig` (copy the result back into the fragment, or it's lost);
-`linux/kernel/build.sh <target>` runs any Buildroot make target, e.g.
-`clean`.
-
-## Where the builds run
-
-Both builds run in **Podman** containers (`linux/kernel/Containerfile`, a
-pinned Debian 12, and `linux/debian/Containerfile`, Debian 13), so they
-don't depend on your distribution or compiler (`linux/podman.sh` runs them):
+`linux/podman.sh` runs `linux/debian/build.sh` in a **Podman** container
+(`linux/debian/Containerfile`, Debian 13), so it doesn't depend on your
+system's tools:
 
 - **Linux:** Podman runs rootless, with no daemon.
 - **macOS:** Podman runs containers in its own small Linux VM, which
   `linux/podman.sh` creates and starts on first use. The project must live
   under your home directory, because that's what Podman shares with the VM.
 
-Your project directory is mounted into the container: the configuration goes
-in, and the images come out. Buildroot itself works in a Podman volume,
-`risc-emulator-kernel`, which keeps downloads and build state between runs
-(about 13 GB); `podman volume rm risc-emulator-kernel` starts it over from
-scratch. The first build compiles the cross toolchain, the kernel and the
-firmware, which takes a while; later builds are incremental.
-
-To skip the container on a Linux host, run the scripts with `NATIVE=1`. The
-kernel build needs Buildroot's host packages; the Debian build needs
-mmdebstrap, e2fsprogs and QEMU's user-mode emulator registered for riscv64
-(Debian/Ubuntu: `apt install mmdebstrap e2fsprogs qemu-user-binfmt
-arch-test`), and runs as root or with mmdebstrap's unshare mode set up.
-Native kernel builds work in `.buildroot/kernel/`; set `BUILD_DIR` to build
-elsewhere.
+To skip the container on a Debian or Ubuntu host, run `NATIVE=1
+linux/debian/build.sh` (it needs curl, xz-utils, e2fsprogs, fdisk and
+python3).
 
 ## Running other things: `npm run emulator`
 
@@ -180,12 +151,12 @@ preset. It boots exactly what you pass:
 
 | Option | |
 | ------ | - |
-| `<image>` | loaded at the start of RAM and entered in M-mode (a kernel, firmware or bare-metal program) |
-| `--kernel <file>` | with firmware as `<image>`: the kernel, loaded 4 MiB into RAM and entered in S-mode by OpenSBI |
+| `<image>` | loaded at the start of RAM and entered in M-mode (firmware or a bare-metal program) |
+| `--kernel <file>` | with firmware as `<image>`: the next stage (U-Boot, or a Linux kernel), loaded 2 MiB into RAM and entered in S-mode by OpenSBI |
 | `--disk <file>` | a raw disk image as `/dev/vda`; add `--snapshot` to discard writes |
 | `--net` | the network card on the user-mode NAT |
 | `--memory <MiB>` | RAM size (default 64) |
-| `--bootargs <string>` | the kernel command line |
+| `--bootargs <string>` | the kernel command line (for a kernel booted directly) |
 
 For example, `npm run emulator -- examples/build/hello.bin` runs a
 bare-metal example program (`npm run build:examples` builds them).
