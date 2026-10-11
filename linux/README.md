@@ -1,12 +1,15 @@
 # Building the Linux images from source
 
-There are two flavors, both RV32 with the root filesystem built into the
-kernel (an initramfs):
+**`npm start`** is all you normally need: it compiles the emulator if needed,
+builds the mmu image if it's missing or anything under `linux/` changed, and
+boots it. The rest of this page explains what goes into the images.
+
+There are two flavors, both RV32:
 
 | Flavor  | What it is | Build | Boot |
 | ------- | ---------- | ----- | ---- |
-| **mmu** | Regular Linux 6.18 with virtual memory (Sv32), running in S-mode on top of the OpenSBI firmware. Upstream [Buildroot](https://buildroot.org) 2026.02 LTS, glibc and BusyBox, plus extra packages, currently Midnight Commander (`mc`). | `npm run linux:build` → `images/linux-mmu/fw_jump.bin` + `Image` | `npm run linux` |
-| **nommu** | [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima)'s tiny no-MMU kernel running in M-mode, with BusyBox and uClibc. A prebuilt image can also be downloaded. | `npm run linux:nommu:build` → `images/linux/Image` | `npm run linux:nommu` |
+| **mmu** | Regular Linux 6.18 with virtual memory (Sv32), running in S-mode on top of the OpenSBI firmware. Upstream [Buildroot](https://buildroot.org) 2026.02 LTS, glibc and BusyBox, plus extra packages, currently Midnight Commander (`mc`) and `curl` (with HTTPS). The root filesystem is on a virtual disk. | `npm run linux:build` → `images/linux-mmu/fw_dynamic.bin`, `Image`, `rootfs.ext4` | `npm start` |
+| **nommu** | [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima)'s tiny no-MMU kernel running in M-mode, with BusyBox and uClibc. The root filesystem is built into the kernel (an initramfs). A prebuilt image can also be downloaded. | `npm run linux:nommu:build` → `images/linux/Image` | `npm run start:nommu` |
 
 Both are built by `linux/build.sh`; `FLAVOR=mmu` (default) or `FLAVOR=nommu`
 selects one.
@@ -35,15 +38,83 @@ than 15: GCC 15 defaults to C23, which the old Buildroot snapshot nommu uses
 The first build compiles a cross toolchain, the kernel and all packages. It
 needs a few GB of disk and takes a while. Later builds are incremental.
 
+## The disk (mmu flavor)
+
+`images/linux-mmu/rootfs.ext4` is a raw disk image holding an ext4 file
+system. The emulator attaches it as a virtio block device, and Linux mounts it
+as its root file system (`root=/dev/vda`). The file is sparse: it's 256 MB for
+the guest but only takes the space actually used.
+
+- **Writes go to the file.** Whatever you change in the guest is still there
+  next boot, like a real disk.
+- **`npm start -- --snapshot`** keeps the guest's writes in memory and
+  throws them away on exit; the file isn't touched.
+- **A rebuild replaces `rootfs.ext4`**, so anything changed in the guest is
+  lost. When `npm start` rebuilds, it first keeps the old disk as
+  `rootfs.ext4.bak`. Put what should survive in `linux/overlay` or
+  `linux/programs`.
+- **On a Linux host** you can loop-mount the image to look inside while the
+  emulator is off: `sudo mount -o loop images/linux-mmu/rootfs.ext4 /mnt`.
+- **Any raw disk image works:** `npm run linux -- --disk <file> …` attaches
+  it (see below).
+
+## The network (mmu flavor)
+
+`npm start` plugs a virtio network card (`eth0`) into a user-mode NAT
+built into the emulator (`src/net/user-network.ts`), like QEMU's default
+networking. No admin rights or extra programs are involved.
+
+| Address     | What it is |
+| ----------- | ---------- |
+| `10.0.2.15` | the guest, configured by DHCP at boot |
+| `10.0.2.2`  | the router, which is also **your machine's `localhost`**: `wget http://10.0.2.2:8080/` reaches a server listening on port 8080 on the host |
+| `10.0.2.3`  | DNS, relayed to the host's resolver |
+
+The guest can make outgoing TCP connections and send UDP (including DNS) to
+anywhere the host can reach. What doesn't work:
+- **No incoming connections.** Nothing outside can connect in yet: there's no
+  port forwarding.
+- **`ping` goes through the host's `ping` command.** The emulator can't
+  send ICMP itself (that needs root), so each echo request runs one `ping`
+  on the host. Replies are real, but the times include starting that
+  process (a few ms), and the TTL shown is always 64.
+- **No IPv6.** Names may resolve to IPv6 addresses, but connections go over
+  IPv4.
+
+For HTTPS use `curl`; BusyBox's `wget` speaks plain HTTP only. HTTPS is slow
+(around 10 s per request): the TLS handshake's cryptography runs on the
+emulated CPU. The guest gets the date for certificate checks from the
+emulator's real-time clock.
+
+The image waits up to 15 s at boot for `eth0`, so always boot it with
+the card attached (`--net`; `npm start` does).
+
 ## Console session
 
 The console runs a single login session (log in as `root`, no password).
 When it ends with `exit`, Ctrl-D or too many failed logins, the machine
-powers off, and `npm run linux` exits with it. This is set up in
+powers off, and `npm start` exits with it. This is set up in
 `linux/overlay/etc/inittab` and `linux/overlay/sbin/console-session`. To get
 the classic behaviour, where a new `login:` prompt appears after each logout,
 change the console line in `inittab` back to
 `console::respawn:/sbin/getty -L console 0 xterm-256color`.
+
+## Running other images: `npm run linux`
+
+`npm run linux -- <options> <image>` is the emulator itself, with nothing
+preset. It boots exactly what you pass:
+
+| Option | |
+| ------ | - |
+| `<image>` | loaded at the start of RAM and entered in M-mode (a kernel, firmware or bare-metal program) |
+| `--kernel <file>` | with firmware as `<image>`: the kernel, loaded 4 MiB into RAM and entered in S-mode by OpenSBI |
+| `--disk <file>` | a raw disk image as `/dev/vda`; add `--snapshot` to discard writes |
+| `--net` | the network card on the user-mode NAT |
+| `--memory <MiB>` | RAM size (default 64) |
+| `--bootargs <string>` | the kernel command line |
+
+For example, `npm run linux -- examples/build/hello.bin` runs a bare-metal
+example, and `npm run linux -- images/linux/Image` the nommu kernel.
 
 ## Adding things to the image
 

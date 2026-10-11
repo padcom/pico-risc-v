@@ -6,7 +6,8 @@
 #   mmu    (default) regular RV32 Linux with virtual memory (Sv32), running in
 #          S-mode under OpenSBI. Upstream Buildroot, uClibc-ng with threads and
 #          wide chars, plus extra packages such as Midnight Commander (mc).
-#          → images/linux-mmu/fw_dynamic.bin (firmware) + images/linux-mmu/Image
+#          → images/linux-mmu/fw_dynamic.bin (firmware), Image (kernel) and
+#            rootfs.ext4 (root filesystem disk image, replaced on every build)
 #   nommu  mini-rv32ima's tiny no-MMU kernel running in M-mode.
 #          → images/linux/Image
 #
@@ -164,12 +165,15 @@ if [ $# -gt 0 ]; then
   exit
 fi
 
-step "Building (toolchain, packages, programs, kernel with initramfs)"
+step "Building (toolchain, packages, programs, kernel, root filesystem)"
 make -C "$BR"
 
 mkdir -p "$OUT_DIR"
 cp "$BR/output/images/Image" "$OUT_DIR/Image"
 if [ "$FLAVOR" = mmu ]; then
   cp "$BR/output/images/fw_dynamic.bin" "$OUT_DIR/fw_dynamic.bin"
+  cp --sparse=always "$BR/output/images/rootfs.ext4" "$OUT_DIR/rootfs.ext4"
+  # What this image was built from; `npm start` rebuilds when it changes.
+  bash "$LINUX_DIR/inputs-hash.sh" >"$OUT_DIR/.inputs-hash"
 fi
 step "Linux image ready in ${OUT_DIR#"$ROOT"/}: $(find "$OUT_DIR" -maxdepth 1 -type f -printf '%f ')"

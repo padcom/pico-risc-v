@@ -1,23 +1,36 @@
+import type { BlockStorage } from './block-storage.js'
 import { Clint } from './clint.js'
 import { CPU } from './cpu.js'
 import { encodeFdt, type FdtNode } from './fdt.js'
+import { GoldfishRtc } from './goldfish-rtc.js'
+import { Plic } from './plic.js'
 import { RAM } from './ram.js'
 import { SystemBus } from './system-bus.js'
 import { Syscon } from './syscon.js'
 import { Terminal } from './terminal.js'
+import { VirtioBlock } from './virtio-blk.js'
+import { type NetworkBackend, VirtioNet } from './virtio-net.js'
 
 /**
  * Physical memory map. Compatible with mini-rv32ima, so its Linux kernel
  * images boot unmodified (and close to QEMU's `virt` board):
  *
+ *   0x0010_1000 - 0x0010_1fff   RTC (Goldfish, host time of day), PLIC source 3
+ *   0x0c00_0000 - 0x0fff_ffff   PLIC (external interrupts)
  *   0x1000_0000 - 0x1000_00ff   Terminal (16550-style UART)
+ *   0x1000_1000 - 0x1000_1fff   virtio block device (if a disk is attached), PLIC source 1
+ *   0x1000_2000 - 0x1000_2fff   virtio network card (if a network is attached), PLIC source 2
  *   0x1100_0000 - 0x1100_ffff   CLINT (timer + software interrupt)
  *   0x1110_0000 - 0x1110_0fff   Syscon (power-off / reboot)
  *   0x8000_0000 - ...           RAM; execution starts at its first byte,
  *                               the device tree sits in its last page(s)
  */
 export const MemoryMap = {
+  RTC: 0x0010_1000,
+  PLIC: 0x0c00_0000,
   TERMINAL: 0x1000_0000,
+  VIRTIO_DISK: 0x1000_1000,
+  VIRTIO_NET: 0x1000_2000,
   CLINT: 0x1100_0000,
   SYSCON: 0x1110_0000,
   RAM: 0x8000_0000,
@@ -31,6 +44,12 @@ export const DEFAULT_BOOTARGS = 'earlycon=uart8250,mmio,0x10000000,1000000 conso
 export interface MachineOptions {
   /** RAM size in bytes (default 64 MiB). */
   ramSize?: number
+  /** Disk attached as a virtio block device (/dev/vda in Linux). */
+  disk?: BlockStorage
+  /** Network the virtio network card (eth0 in Linux) is plugged into. */
+  network?: NetworkBackend
+  /** The card's MAC address (default 52:54:00:12:34:56). */
+  mac?: Uint8Array
   /** Called with every byte the program writes to the terminal. */
   output?: (byte: number) => void
   /**
@@ -80,6 +99,11 @@ export class Machine {
   readonly terminal: Terminal
   readonly clint: Clint
   readonly syscon: Syscon
+  readonly plic: Plic
+  readonly rtc = new GoldfishRtc()
+  readonly disk: VirtioBlock | undefined
+  readonly nic: VirtioNet | undefined
+  private readonly network: NetworkBackend | undefined
   readonly cpu: CPU
 
   private readonly bootargs: string
@@ -97,6 +121,9 @@ export class Machine {
     clock = 'realtime',
     instructionsPerMicrosecond = 10,
     bootargs = DEFAULT_BOOTARGS,
+    disk,
+    network,
+    mac = Uint8Array.of(0x52, 0x54, 0x00, 0x12, 0x34, 0x56),
   }: MachineOptions = {}) {
     this.bootargs = bootargs
     this.virtual = clock === 'virtual'
@@ -113,12 +140,30 @@ export class Machine {
       this.exit = command
       this.cpu.stop()
     })
+    this.plic = new Plic((bit, pending) => this.cpu.setInterruptPending(bit, pending))
+    const dma = (addr: number, length: number) => this.guestMemory(addr, length)
+    this.disk = disk && new VirtioBlock(disk, dma, high => this.plic.setLevel(DISK_IRQ, high))
+    this.network = network
+    this.nic = network && new VirtioNet(network, mac, dma, high => this.plic.setLevel(NET_IRQ, high))
 
     this.bus
       .map(MemoryMap.RAM, ramSize, this.ram)
+      .map(MemoryMap.RTC, GoldfishRtc.SIZE, this.rtc)
+      .map(MemoryMap.PLIC, Plic.SIZE, this.plic)
       .map(MemoryMap.TERMINAL, Terminal.SIZE, this.terminal)
       .map(MemoryMap.CLINT, Clint.SIZE, this.clint)
       .map(MemoryMap.SYSCON, Syscon.SIZE, this.syscon)
+    if (this.disk) this.bus.map(MemoryMap.VIRTIO_DISK, VirtioBlock.SIZE, this.disk)
+    if (this.nic) this.bus.map(MemoryMap.VIRTIO_NET, VirtioNet.SIZE, this.nic)
+  }
+
+  /** DMA for devices: a view of guest RAM at a physical address. */
+  private guestMemory(addr: number, length: number): Uint8Array {
+    const offset = addr - MemoryMap.RAM
+    if (offset < 0 || offset + length > this.ram.size) {
+      throw new RangeError(`DMA outside RAM: 0x${addr.toString(16)}+${length}`)
+    }
+    return this.ram.bytes.subarray(offset, offset + length)
   }
 
   /**
@@ -158,6 +203,9 @@ export class Machine {
     this.skippedMicros = 0
     this.cpu.reset(MemoryMap.RAM)
     this.clint.reset()
+    this.plic.reset()
+    this.disk?.reset()
+    this.nic?.reset()
     this.cpu.x[10] = 0 // a0: hart id
     this.cpu.x[11] = MemoryMap.RAM + dtbOffset // a1: device tree
     if (this.next) {
@@ -226,12 +274,15 @@ export class Machine {
    * The CPU sleeps in WFI: see whether it can be woken without waiting in the
    * real world. The timer line is only re-evaluated between slices, so a
    * deadline may have passed since; with the virtual clock, idle time up to the
-   * next deadline is skipped. Returns false if the CPU stays asleep.
+   * next deadline is skipped (unless the network is busy). Returns false if the
+   * CPU stays asleep.
    */
   private wake(): boolean {
     this.clint.update()
     if (this.cpu.mip & this.cpu.mie) return true
-    if (!this.virtual) return false
+    // While the guest waits on the real world (network), virtual time must not
+    // race ahead: its timeouts would expire before the host answers.
+    if (!this.virtual || this.network?.busy) return false
     const wait = this.microsUntilTimer()
     if (wait === Infinity) return false
     this.skippedMicros += wait
@@ -249,6 +300,7 @@ export class Machine {
     const CPU_PHANDLE = 1
     const INTC_PHANDLE = 2
     const SYSCON_PHANDLE = 3
+    const PLIC_PHANDLE = 4
     return {
       props: {
         '#address-cells': 2,
@@ -324,6 +376,48 @@ export class Machine {
                 compatible: ['sifive,clint0', 'riscv,clint0'],
               },
             },
+            [`plic@${hex(MemoryMap.PLIC)}`]: {
+              props: {
+                phandle: PLIC_PHANDLE,
+                compatible: ['sifive,plic-1.0.0', 'riscv,plic0'],
+                reg: reg(MemoryMap.PLIC, Plic.SIZE),
+                'interrupt-controller': true,
+                '#interrupt-cells': 1,
+                '#address-cells': 0,
+                'riscv,ndev': Plic.SOURCES - 1,
+                // context 0: machine external (11), context 1: supervisor external (9) of hart 0
+                'interrupts-extended': [INTC_PHANDLE, 11, INTC_PHANDLE, 9],
+              },
+            },
+            [`rtc@${hex(MemoryMap.RTC)}`]: {
+              props: {
+                compatible: 'google,goldfish-rtc',
+                reg: reg(MemoryMap.RTC, GoldfishRtc.SIZE),
+                // The alarm never fires, but Linux's driver wants an interrupt.
+                'interrupt-parent': PLIC_PHANDLE,
+                interrupts: RTC_IRQ,
+              },
+            },
+            ...(this.nic && {
+              [`virtio_mmio@${hex(MemoryMap.VIRTIO_NET)}`]: {
+                props: {
+                  compatible: 'virtio,mmio',
+                  reg: reg(MemoryMap.VIRTIO_NET, VirtioNet.SIZE),
+                  'interrupt-parent': PLIC_PHANDLE,
+                  interrupts: NET_IRQ,
+                },
+              },
+            }),
+            ...(this.disk && {
+              [`virtio_mmio@${hex(MemoryMap.VIRTIO_DISK)}`]: {
+                props: {
+                  compatible: 'virtio,mmio',
+                  reg: reg(MemoryMap.VIRTIO_DISK, VirtioBlock.SIZE),
+                  'interrupt-parent': PLIC_PHANDLE,
+                  interrupts: DISK_IRQ,
+                },
+              },
+            }),
           },
         },
       },
@@ -332,3 +426,8 @@ export class Machine {
 }
 
 const hex = (n: number) => n.toString(16)
+
+/** PLIC interrupt sources of the devices. */
+const DISK_IRQ = 1
+const NET_IRQ = 2
+const RTC_IRQ = 3

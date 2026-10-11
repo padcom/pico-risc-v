@@ -43,7 +43,6 @@
 # CONFIG_NETWORK_FILESYSTEMS is not set
 # CONFIG_BTRFS_FS is not set
 # CONFIG_XFS_FS is not set
-# CONFIG_VIRTIO_MENU is not set
 # CONFIG_SPI is not set
 # CONFIG_I2C is not set
 # CONFIG_GPIOLIB is not set
@@ -53,7 +52,6 @@
 # Boot-time hogs on an emulated CPU (found by sampling the PC during boot):
 # - the jitter-entropy RNG self-test (SHA-3 heavy); it comes in through IPsec
 #   (ESP → IV generators → default RNG → DRBG → jitterentropy), unused here
-# - gunzipping the built-in initramfs: keep it uncompressed instead
 # - ftrace's event setup
 # - legacy BSD ptys
 # CONFIG_INET_ESP is not set
@@ -63,14 +61,18 @@
 # CONFIG_CRYPTO_ECHAINIV is not set
 # CONFIG_CRYPTO_DRBG_MENU is not set
 # CONFIG_CRYPTO_JITTERENTROPY is not set
-# (The compression choice only exists once INITRAMFS_SOURCE is set, which
-# Buildroot does after merging fragments; set it here too, to Buildroot's value.)
-CONFIG_INITRAMFS_SOURCE="${BR_BINARIES_DIR}/rootfs.cpio"
-CONFIG_INITRAMFS_COMPRESSION_NONE=y
 # CONFIG_FTRACE is not set
 # CONFIG_LEGACY_PTYS is not set
 
-# Console on the 16550-style UART (polled: the emulator has no PLIC).
+# Root filesystem on a virtio block device (virtio-mmio, interrupts through the
+# PLIC): root=/dev/vda on the kernel command line.
+CONFIG_SIFIVE_PLIC=y
+CONFIG_VIRTIO_MENU=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_EXT4_FS=y
+
+# Console on the 16550-style UART (polled).
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_CONSOLE=y
 CONFIG_SERIAL_OF_PLATFORM=y

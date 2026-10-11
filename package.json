@@ -9,10 +9,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "start": "npm run build --silent && node dist/cli.js",
-    "linux": "npm run build --silent && node scripts/run-linux.ts mmu",
+    "start": "node scripts/start.ts",
+    "start:nommu": "node scripts/start.ts nommu",
+    "linux": "npm run build --silent && node dist/cli.js",
     "linux:build": "FLAVOR=mmu bash linux/build.sh",
-    "linux:nommu": "npm run build --silent && node scripts/linux-image.ts && node scripts/run-linux.ts nommu",
     "linux:nommu:build": "FLAVOR=nommu bash linux/build.sh",
     "linux:nommu:image": "node scripts/linux-image.ts"
   },

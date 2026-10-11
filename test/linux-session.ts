@@ -26,6 +26,26 @@ export class LinuxSession {
     }
   }
 
+  /**
+   * Like waitFor, but yields to the event loop between slices so host-side
+   * I/O (network sockets) can happen; when the guest idles waiting on it, waits
+   * a millisecond of real time.
+   */
+  async waitForAsync(text: string, budget = 300_000_000, timeoutMs = 60_000): Promise<void> {
+    const from = this.screen.length
+    const end = this.machine.cpu.instret + budget
+    const deadline = Date.now() + timeoutMs
+    while (!this.screen.includes(text, from)) {
+      const result = this.machine.run(100_000)
+      if (result === 'idle') await new Promise(resolve => setTimeout(resolve, 1))
+      else if (result !== 'limit') throw new Error(`machine stopped (${result}) waiting for ${JSON.stringify(text)}`)
+      else await new Promise(resolve => setImmediate(resolve))
+      if (this.machine.cpu.instret > end || Date.now() > deadline) {
+        throw new Error(`timed out waiting for ${JSON.stringify(text)}; screen ends with:\n${this.screen.slice(-2000)}`)
+      }
+    }
+  }
+
   type(text: string): void {
     this.machine.terminal.type(text)
   }

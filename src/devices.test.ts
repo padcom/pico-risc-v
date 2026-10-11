@@ -1,0 +1,293 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { type BlockStorage, MemoryStorage, SnapshotStorage } from './block-storage.js'
+import { MIP_MEIP, MIP_SEIP } from './csr.js'
+import { FileStorage } from './file-storage.js'
+import { GoldfishRtc } from './goldfish-rtc.js'
+import { Plic } from './plic.js'
+import { VirtioBlock } from './virtio-blk.js'
+
+describe('PLIC', () => {
+  function plic() {
+    let mip = 0
+    const p = new Plic((bit, on) => (mip = on ? mip | bit : mip & ~bit))
+    p.reset()
+    const enable = (ctx: number, mask: number) => p.write32(0x2000 + 0x80 * ctx, mask)
+    const threshold = (ctx: number, t: number) => p.write32(0x200000 + 0x1000 * ctx, t)
+    const claim = (ctx: number) => p.read32(0x200004 + 0x1000 * ctx)
+    const complete = (ctx: number, id: number) => p.write32(0x200004 + 0x1000 * ctx, id)
+    const priority = (id: number, prio: number) => p.write32(4 * id, prio)
+    return { p, mip: () => mip, enable, threshold, claim, complete, priority }
+  }
+
+  it('signals M-mode (context 0) and S-mode (context 1) external interrupts', () => {
+    const { p, mip, enable, priority } = plic()
+    priority(1, 1)
+    p.setLevel(1, true)
+    expect(mip()).toBe(0) // not enabled anywhere yet
+    enable(1, 1 << 1)
+    expect(mip()).toBe(MIP_SEIP)
+    enable(0, 1 << 1)
+    expect(mip()).toBe(MIP_MEIP | MIP_SEIP)
+    p.setLevel(1, false)
+    expect(mip()).toBe(0)
+  })
+
+  it('priority 0 never interrupts, and only priorities above the threshold do', () => {
+    const { p, mip, enable, threshold, priority } = plic()
+    enable(0, 1 << 3)
+    p.setLevel(3, true)
+    expect(mip()).toBe(0)
+    priority(3, 2)
+    expect(mip()).toBe(MIP_MEIP)
+    threshold(0, 2)
+    expect(mip()).toBe(0)
+    threshold(0, 1)
+    expect(mip()).toBe(MIP_MEIP)
+  })
+
+  it('claim returns the highest priority (lowest id on ties); a claimed source waits for complete', () => {
+    const { p, mip, enable, claim, complete, priority } = plic()
+    enable(1, (1 << 2) | (1 << 5) | (1 << 7))
+    priority(2, 1)
+    priority(5, 3)
+    priority(7, 3)
+    for (const id of [2, 5, 7]) p.setLevel(id, true)
+    expect(claim(1)).toBe(5)
+    expect(claim(1)).toBe(7)
+    expect(claim(1)).toBe(2)
+    expect(claim(1)).toBe(0) // nothing left
+    expect(mip()).toBe(0)
+    expect(p.read32(0x1000)).toBe(0) // in service: not pending
+    p.setLevel(7, false)
+    complete(1, 5) // line 5 still high → pending again
+    expect(mip()).toBe(MIP_SEIP)
+    expect(claim(1)).toBe(5)
+  })
+})
+
+/** A minimal virtio driver: sets the device up and submits requests through queue 0. */
+function virtioHarness(storage: BlockStorage) {
+  const ram = new Uint8Array(1 << 20)
+  const view = new DataView(ram.buffer)
+  let irq = false
+  let flushed = 0
+  const counting: BlockStorage = {
+    size: storage.size,
+    readOnly: storage.readOnly,
+    read: (offset, dest) => storage.read(offset, dest),
+    write: (offset, src) => storage.write(offset, src),
+    flush: () => flushed++,
+  }
+  const dev = new VirtioBlock(
+    counting,
+    (addr, length) => {
+      if (addr + length > ram.length) throw new RangeError('outside RAM')
+      return ram.subarray(addr, addr + length)
+    },
+    high => (irq = high),
+  )
+  const QUEUE = 8
+  const DESC = 0x1000
+  const AVAIL = 0x2000
+  const USED = 0x3000
+  dev.write32(0x070, 1 | 2) // ACKNOWLEDGE | DRIVER
+  dev.write32(0x024, 1)
+  dev.write32(0x020, 1) // VIRTIO_F_VERSION_1
+  dev.write32(0x070, 1 | 2 | 8) // FEATURES_OK
+  dev.write32(0x030, 0)
+  dev.write32(0x038, QUEUE)
+  dev.write32(0x080, DESC)
+  dev.write32(0x090, AVAIL)
+  dev.write32(0x0a0, USED)
+  dev.write32(0x044, 1)
+  dev.write32(0x070, 1 | 2 | 8 | 4) // DRIVER_OK
+
+  let availIdx = 0
+  let next = 0x10000 // bump allocator for request buffers, 16-byte aligned
+  const alloc = (n: number) => {
+    const at = next
+    next = (next + n + 15) & ~15
+    return at
+  }
+
+  /** Submit a request; buffers are [length, writable] pairs after the 16-byte header. */
+  function request(type: number, sector: number, buffers: { data?: Uint8Array; length?: number; writable: boolean }[]) {
+    const header = alloc(16)
+    view.setUint32(header, type, true)
+    view.setUint32(header + 8, sector, true)
+    const chain = [{ addr: header, length: 16, writable: false }]
+    for (const b of buffers) {
+      const length = b.data?.length ?? b.length!
+      const addr = alloc(length)
+      if (b.data) ram.set(b.data, addr)
+      chain.push({ addr, length, writable: b.writable })
+    }
+    const status = alloc(1)
+    ram[status] = 0xff
+    chain.push({ addr: status, length: 1, writable: true })
+    chain.forEach((d, i) => {
+      const at = DESC + 16 * i
+      view.setUint32(at, d.addr, true)
+      view.setUint32(at + 4, 0, true)
+      view.setUint32(at + 8, d.length, true)
+      view.setUint16(at + 12, (i < chain.length - 1 ? 1 : 0) | (d.writable ? 2 : 0), true)
+      view.setUint16(at + 14, i + 1, true)
+    })
+    view.setUint16(AVAIL + 4 + 2 * (availIdx % QUEUE), 0, true)
+    view.setUint16(AVAIL + 2, ++availIdx, true)
+    dev.write32(0x050, 0) // QueueNotify
+    const usedIdx = view.getUint16(USED + 2, true)
+    const slot = USED + 4 + 8 * ((usedIdx - 1) % QUEUE)
+    return {
+      status: ram[status],
+      usedIdx,
+      usedId: view.getUint32(slot, true),
+      usedLen: view.getUint32(slot + 4, true),
+      buffer: (i: number) => ram.subarray(chain[i + 1]!.addr, chain[i + 1]!.addr + chain[i + 1]!.length),
+    }
+  }
+
+  return { dev, request, irq: () => irq, flushed: () => flushed }
+}
+
+describe('virtio block device', () => {
+  const IN = 0, OUT = 1, FLUSH = 4, GET_ID = 8
+  const sector = (fill: number) => new Uint8Array(512).fill(fill)
+
+  it('identifies itself as a virtio-mmio v2 block device with the storage capacity', () => {
+    const { dev } = virtioHarness(new MemoryStorage(64 * 1024))
+    expect(dev.read32(0x000)).toBe(0x74726976)
+    expect(dev.read32(0x004)).toBe(2)
+    expect(dev.read32(0x008)).toBe(2)
+    expect(dev.read32(0x100)).toBe(128) // sectors
+    expect(dev.read32(0x104)).toBe(0)
+    dev.write32(0x014, 1)
+    expect(dev.read32(0x010) & 1).toBe(1) // VERSION_1
+  })
+
+  it('writes sectors to the storage and reads them back', () => {
+    const storage = new MemoryStorage(64 * 1024)
+    const { request } = virtioHarness(storage)
+    const w = request(OUT, 3, [{ data: new Uint8Array([...sector(0xaa), ...sector(0xbb)]), writable: false }])
+    expect(w.status).toBe(0)
+    expect(w.usedLen).toBe(1) // just the status byte
+    expect(storage.bytes[3 * 512]).toBe(0xaa)
+    expect(storage.bytes[5 * 512 - 1]).toBe(0xbb)
+
+    const r = request(IN, 3, [{ length: 1024, writable: true }])
+    expect(r.status).toBe(0)
+    expect(r.usedLen).toBe(1025)
+    expect(r.buffer(0)[0]).toBe(0xaa)
+    expect(r.buffer(0)[1023]).toBe(0xbb)
+  })
+
+  it('scatters a read across several buffers', () => {
+    const storage = new MemoryStorage(new Uint8Array(4096).map((_, i) => i >> 9))
+    const { request } = virtioHarness(storage)
+    const r = request(IN, 1, [
+      { length: 512, writable: true },
+      { length: 1024, writable: true },
+    ])
+    expect(r.status).toBe(0)
+    expect(r.buffer(0).every(b => b === 1)).toBe(true)
+    expect([r.buffer(1)[0], r.buffer(1)[1023]]).toEqual([2, 3])
+  })
+
+  it('reports I/O errors beyond the end and on read-only disks, UNSUPP for unknown requests', () => {
+    expect(virtioHarness(new MemoryStorage(4096)).request(IN, 8, [{ length: 512, writable: true }]).status).toBe(1)
+    const ro = virtioHarness(new MemoryStorage(4096, true))
+    ro.dev.write32(0x014, 0)
+    expect(ro.dev.read32(0x010) & (1 << 5)).not.toBe(0) // VIRTIO_BLK_F_RO
+    expect(ro.request(OUT, 0, [{ data: sector(1), writable: false }]).status).toBe(1)
+    expect(virtioHarness(new MemoryStorage(4096)).request(99, 0, []).status).toBe(2)
+  })
+
+  it('flushes and reports its id', () => {
+    const h = virtioHarness(new MemoryStorage(4096))
+    expect(h.request(FLUSH, 0, []).status).toBe(0)
+    expect(h.flushed()).toBe(1)
+    const id = h.request(GET_ID, 0, [{ length: 20, writable: true }])
+    expect(new TextDecoder().decode(id.buffer(0)).replace(/\0+$/, '')).toBe('risc-emulator disk')
+  })
+
+  it('raises its interrupt line on completion until the driver acknowledges', () => {
+    const h = virtioHarness(new MemoryStorage(4096))
+    expect(h.irq()).toBe(false)
+    const r = h.request(FLUSH, 0, [])
+    expect([r.usedIdx, r.usedId]).toEqual([1, 0])
+    expect(h.irq()).toBe(true)
+    expect(h.dev.read32(0x060)).toBe(1)
+    h.dev.write32(0x064, 1)
+    expect(h.irq()).toBe(false)
+  })
+
+  it('a status write of 0 resets the device', () => {
+    const h = virtioHarness(new MemoryStorage(4096))
+    h.request(FLUSH, 0, [])
+    h.dev.write32(0x070, 0)
+    expect([h.dev.read32(0x070), h.dev.read32(0x044), h.irq()]).toEqual([0, 0, false])
+  })
+})
+
+describe('Goldfish RTC', () => {
+  it('reports the host time in nanoseconds, high half latched by reading the low half', () => {
+    let now = Date.UTC(2026, 9, 11, 12, 0, 0, 123)
+    const rtc = new GoldfishRtc(() => now)
+    const read = () => (BigInt(rtc.read32(0x00)) | (BigInt(rtc.read32(0x04)) << 32n))
+    expect(read()).toBe(BigInt(now) * 1_000_000n)
+    const low = rtc.read32(0x00)
+    now += 10_000 // the high half stays latched until TIME_LOW is read again
+    expect((BigInt(rtc.read32(0x04)) << 32n) | BigInt(low)).toBe(BigInt(now - 10_000) * 1_000_000n)
+  })
+
+  it('can be set (HIGH, then LOW), and keeps running from there', () => {
+    let now = 1_000_000
+    const rtc = new GoldfishRtc(() => now)
+    const set = 1_700_000_000_000_000_000n // 2023-11-14
+    rtc.write32(0x04, Number(set >> 32n))
+    rtc.write32(0x00, Number(set & 0xffff_ffffn))
+    now += 5 // ms
+    const t = BigInt(rtc.read32(0x00)) | (BigInt(rtc.read32(0x04)) << 32n)
+    expect(t).toBe(set + 5_000_000n)
+  })
+})
+
+describe('storage', () => {
+  it('a snapshot overlay reads through to its base but never writes to it', () => {
+    const base = new MemoryStorage(new Uint8Array(10000).fill(7))
+    const snap = new SnapshotStorage(base)
+    snap.write(4090, new Uint8Array(12).fill(9)) // straddles two 4 KiB chunks
+    const back = new Uint8Array(20)
+    snap.read(4085, back)
+    expect([...back]).toEqual([7, 7, 7, 7, 7, ...Array(12).fill(9), 7, 7, 7])
+    expect(base.bytes.every(b => b === 7)).toBe(true)
+    expect(snap.dirtyBytes).toBe(8192)
+  })
+
+  describe('file-backed', () => {
+    let dir: string
+    afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+    it('reads and writes the image file in place', () => {
+      dir = mkdtempSync(join(tmpdir(), 'risc-disk-'))
+      const path = join(dir, 'disk.img')
+      writeFileSync(path, new Uint8Array(8192))
+      const disk = new FileStorage(path)
+      expect(disk.size).toBe(8192)
+      disk.write(1000, new Uint8Array([1, 2, 3]))
+      disk.flush()
+      disk.close()
+      expect([...readFileSync(path).subarray(1000, 1003)]).toEqual([1, 2, 3])
+
+      const ro = new FileStorage(path, { readOnly: true })
+      const out = new Uint8Array(4)
+      ro.read(999, out)
+      expect([...out]).toEqual([0, 1, 2, 3])
+      expect(() => ro.write(0, out)).toThrow(/read-only/)
+      ro.close()
+    })
+  })
+})

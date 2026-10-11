@@ -3,17 +3,29 @@
  * Interactive runner: boots a flat binary image (Linux `Image` or a bare-metal
  * program) and connects the emulated terminal to this process's stdin/stdout.
  *
- *   node dist/cli.js [--memory <MiB>] [--kernel <file>] [--bootargs <string>] [--virtual-clock] <image>
+ *   node dist/cli.js [--memory <MiB>] [--kernel <file>] [--disk <file> [--snapshot]] [--net]
+ *                    [--bootargs <string>] [--virtual-clock] <image>
  *
  * With --kernel, <image> is firmware (OpenSBI's fw_dynamic.bin): the kernel is
  * loaded 4 MiB into RAM (RV32 kernels must be 4 MiB aligned) and the firmware
  * told to enter it there in S-mode.
  *
+ * --disk attaches a raw disk image file as a virtio block device (/dev/vda);
+ * the guest's writes go to the file. With --snapshot they are kept in memory
+ * instead and discarded on exit, leaving the file untouched.
+ *
+ * --net plugs a virtio network card (eth0) into a user-mode NAT: the guest
+ * gets 10.0.2.15 by DHCP, can make outgoing TCP/UDP connections and use DNS;
+ * 10.0.2.2 is this host's localhost.
+ *
  * Press Ctrl-A then X to quit (Ctrl-A Ctrl-A sends a literal Ctrl-A).
  */
 import { readFileSync } from 'node:fs'
 import { parseArgs } from 'node:util'
+import { type BlockStorage, SnapshotStorage } from './block-storage.js'
+import { FileStorage } from './file-storage.js'
 import { Machine } from './machine.js'
+import { UserNetwork } from './net/user-network.js'
 
 /** Instructions per scheduling slice; small enough to keep input responsive. */
 const SLICE = 200_000
@@ -22,7 +34,9 @@ const CTRL_A = 0x01
 const KERNEL_OFFSET = 0x400000
 
 function usage(): never {
-  console.error('usage: risc-emulator [--memory <MiB>] [--kernel <file>] [--bootargs <string>] [--virtual-clock] <image>')
+  console.error(
+    'usage: risc-emulator [--memory <MiB>] [--kernel <file>] [--disk <file> [--snapshot]] [--net] [--bootargs <string>] [--virtual-clock] <image>',
+  )
   process.exit(2)
 }
 
@@ -33,6 +47,9 @@ const { values, positionals } = (() => {
       options: {
         memory: { type: 'string', default: '64' },
         kernel: { type: 'string' },
+        disk: { type: 'string' },
+        snapshot: { type: 'boolean', default: false },
+        net: { type: 'boolean', default: false },
         bootargs: { type: 'string' },
         'virtual-clock': { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h' },
@@ -53,8 +70,15 @@ const flush = () => {
   pending = []
 }
 
+const diskFile = values.disk ? new FileStorage(values.disk, { readOnly: values.snapshot }) : undefined
+const disk: BlockStorage | undefined = diskFile && values.snapshot ? new SnapshotStorage(diskFile) : diskFile
+
+const network = values.net ? new UserNetwork() : undefined
+
 const machine = new Machine({
   ramSize,
+  disk,
+  network,
   bootargs: values.bootargs,
   clock: values['virtual-clock'] ? 'virtual' : 'realtime',
   output: byte => pending.push(byte),
@@ -68,6 +92,8 @@ machine.boot(
 
 function quit(code: number, message?: string): never {
   flush()
+  diskFile?.close()
+  network?.close()
   if (process.stdin.isTTY) process.stdin.setRawMode(false)
   if (message) process.stderr.write(`\n${message}\n`)
   process.exit(code)

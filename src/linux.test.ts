@@ -5,7 +5,7 @@ import { Machine } from './machine.js'
 const IMAGE = new URL('../images/linux/Image', import.meta.url)
 
 /**
- * Boots the Linux image (`npm run linux:image` downloads it, `npm run linux:build` builds it),
+ * Boots the nommu Linux image (`npm run linux:nommu:image` downloads it, `npm run linux:nommu:build` builds it),
  * logs in, runs a few commands and ends the session (which powers off). Uses the virtual clock, so the run
  * is deterministic and idle time costs nothing.
  */
@@ -36,7 +36,7 @@ describe.skipIf(!existsSync(IMAGE))('Linux (mini-rv32ima nommu kernel)', () => {
     machine.terminal.type('echo "$(uname -m) says $((6*7))"\n')
     waitFor('riscv32 says 42')
 
-    // Images built from source (npm run linux:build) contain linux/programs/hello.
+    // Images built from source (npm run linux:nommu:build) contain linux/programs/hello.
     machine.terminal.type('if [ -x /usr/local/bin/hello ]; then hello from-test; else echo "(no hello)"; fi; echo "done-$((40+2))"\n')
     waitFor('done-42')
     expect(screen).toMatch(/Hello from Linux \S+ on riscv32!\r\n  argv\[1\] = from-test|\(no hello\)\r\n/)
