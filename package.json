@@ -1,14 +1,16 @@
 {
   "name": "risc-emulator",
   "version": "0.1.0",
-  "description": "RISC-V (RV32IMA) system emulator in TypeScript that boots Linux",
+  "description": "RISC-V (RV32IMA) system emulator in TypeScript, with its CPU core in Rust/WebAssembly, that boots Linux",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "npm run build:wasm --silent && tsc -p tsconfig.build.json",
+    "build:wasm": "node scripts/build-wasm.ts",
     "build:examples": "make -C examples",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "bench": "npm run build --silent && make -s -C examples && node scripts/bench.ts",
     "start": "node scripts/start.ts",
     "start:nommu": "node scripts/start.ts nommu",
     "linux": "npm run build --silent && node dist/cli.js",

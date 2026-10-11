@@ -12,7 +12,8 @@
     "types": [
       "node"
     ],
-    "preserveConstEnums": true
+    "preserveConstEnums": true,
+    "rewriteRelativeImportExtensions": true
   },
   "include": [
     "src",

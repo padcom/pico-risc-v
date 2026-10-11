@@ -1,6 +1,7 @@
 # Building the Linux images from source
 
-**`npm start`** is all you normally need: it compiles the emulator if needed,
+**`npm start`** is all you normally need: it compiles the emulator if needed
+(including its CPU core, see [hart/README.md](../hart/README.md)),
 builds the mmu image if it's missing or anything under `linux/` changed, and
 boots it. The rest of this page explains what goes into the images.
 

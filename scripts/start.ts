@@ -10,10 +10,13 @@
  *   the old disk image is kept as rootfs.ext4.bak, since a rebuild replaces it.
  * nommu: mini-rv32ima's no-MMU Linux, downloaded if missing.
  *
- * The emulator itself (dist/) is recompiled when any src/ file is newer.
+ * The emulator itself is brought up to date first: its CPU core (hart/, Rust →
+ * build/hart.wasm; cargo rebuilds only on changes), and dist/ when any src/
+ * file is newer.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { constants, copyFileSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { buildWasm } from './build-wasm.ts'
 
 const MMU = 'images/linux-mmu'
 const FLAVORS = {
@@ -45,6 +48,7 @@ const run = (cmd: string, args: string[], env: NodeJS.ProcessEnv = {}) =>
   execFileSync(cmd, args, { stdio: 'inherit', env: { ...process.env, ...env } })
 
 // 1. The emulator.
+buildWasm()
 if (emulatorStale()) {
   console.log('[start] compiling the emulator')
   run(process.execPath, ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.build.json'])

@@ -6,11 +6,14 @@ import { type Bus, BusError } from './bus.js'
  */
 export class RAM implements Bus {
   readonly bytes: Uint8Array
+  readonly size: number
   private readonly view: DataView
 
-  constructor(readonly size: number) {
-    this.bytes = new Uint8Array(size)
-    this.view = new DataView(this.bytes.buffer)
+  /** `size` bytes of new RAM, or RAM over existing memory (e.g. the CPU's, see CPUOptions.ram). */
+  constructor(sizeOrBytes: number | Uint8Array) {
+    this.bytes = typeof sizeOrBytes === 'number' ? new Uint8Array(sizeOrBytes) : sizeOrBytes
+    this.size = this.bytes.length
+    this.view = new DataView(this.bytes.buffer, this.bytes.byteOffset, this.bytes.byteLength)
   }
 
   /** Copy raw bytes (e.g. a program image) into RAM at the given offset. */

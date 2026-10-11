@@ -4,7 +4,7 @@ import { CPU } from './cpu.js'
 import { encodeFdt, type FdtNode } from './fdt.js'
 import { GoldfishRtc } from './goldfish-rtc.js'
 import { Plic } from './plic.js'
-import { RAM } from './ram.js'
+import type { RAM } from './ram.js'
 import { SystemBus } from './system-bus.js'
 import { Syscon } from './syscon.js'
 import { Terminal } from './terminal.js'
@@ -129,9 +129,14 @@ export class Machine {
     this.virtual = clock === 'virtual'
     this.ipu = instructionsPerMicrosecond
 
-    this.ram = new RAM(ramSize)
     this.terminal = new Terminal(output)
-    this.cpu = new CPU(this.bus, { resetVector: MemoryMap.RAM, readTime: () => this.clint.mtime })
+    // RAM lives inside the CPU core (fast); devices reach it through the bus.
+    this.cpu = new CPU(this.bus, {
+      resetVector: MemoryMap.RAM,
+      readTime: () => this.clint.mtime,
+      ram: { base: MemoryMap.RAM, size: ramSize },
+    })
+    this.ram = this.cpu.ram!
     this.clint = new Clint(
       () => this.now(),
       (bit, pending) => this.cpu.setInterruptPending(bit, pending),
@@ -306,7 +311,7 @@ export class Machine {
         '#address-cells': 2,
         '#size-cells': 2,
         compatible: 'riscv-minimal-nommu',
-        model: 'risc-emulator (TypeScript RV32IMA)',
+        model: 'risc-emulator (RV32IMA)',
       },
       children: {
         chosen: {

@@ -12,7 +12,8 @@ LDFLAGS := -T link.ld -Wl,--gc-sections -Wl,--no-warn-rwx-segments
 COMMON  := crt0.S link.ld terminal.h
 
 # matmul-m: same source as matmul, compiled for hardware multiply (RV32IM).
-PROGRAMS := hello matmul matmul-m
+# bench: CPU benchmark (npm run bench), also RV32IM.
+PROGRAMS := hello matmul matmul-m bench
 
 all: $(PROGRAMS:%=build/%.bin)
 
@@ -23,7 +24,7 @@ endef
 build/%.elf: %/*.c $(COMMON) | build
 	$(link)
 
-build/matmul-m.elf: MARCH := rv32im
+build/matmul-m.elf build/bench.elf: MARCH := rv32im
 build/matmul-m.elf: matmul/*.c $(COMMON) | build
 	$(link)
 
