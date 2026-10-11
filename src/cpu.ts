@@ -50,6 +50,7 @@ interface Core {
   init(resetVector: bigint, flags: number): void
   ram_alloc(base: number, size: number): number
   registers(): number
+  fp_registers(): number
   reset(pc: bigint): void
   run(maxSteps: number): number
   step(): void
@@ -70,8 +71,8 @@ function coreModule(): WebAssembly.Module {
 }
 
 /**
- * RV32IMAC or RV64IMAC hart with machine, supervisor and user privilege modes
- * (Zicsr, Zifencei) and virtual memory (Sv32 / Sv39).
+ * RV32GC or RV64GC hart (IMAFDC, Zicsr, Zifencei) with machine, supervisor
+ * and user privilege modes and virtual memory (Sv32 / Sv39).
  *
  * The instruction set is implemented in Rust (hart/), compiled to WebAssembly;
  * each CPU is its own instance of that module. This class connects it to the
@@ -88,6 +89,8 @@ export class CPU {
    * RV64 the low halves (writes sign-extend; use x64 or setRegister for more).
    */
   readonly x: Int32Array
+  /** f0..f31, raw bits (single-precision values NaN-boxed: upper 32 bits all ones). */
+  readonly f: BigUint64Array
   /** RAM inside the core, if requested in the options. */
   readonly ram: RAM | undefined
   private readonly core: Core
@@ -132,6 +135,7 @@ export class CPU {
       this.ram = new RAM(new Uint8Array(this.core.memory.buffer, offset, ram.size))
     }
     this.x64 = new BigInt64Array(this.core.memory.buffer, this.core.registers(), 32)
+    this.f = new BigUint64Array(this.core.memory.buffer, this.core.fp_registers(), 32)
     this.x = lowHalves(new Int32Array(this.core.memory.buffer, this.core.registers(), 64))
   }
 

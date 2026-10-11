@@ -1,4 +1,5 @@
-# Minimal C runtime start-up: set up gp and the stack, clear .bss, call main().
+# Minimal C runtime start-up: set up gp and the stack, enable the FPU (if the
+# program uses it), clear .bss, call main().
 # When main returns, its result is left in a0 and the machine is powered off
 # through the syscon device (see src/syscon.ts).
 
@@ -14,6 +15,13 @@ _start:
     .option pop
 
     la      sp, __stack_top
+
+#ifdef __riscv_flen
+    # The FPU is off after reset (FP instructions are illegal) until
+    # mstatus.FS says otherwise: set it to Initial.
+    li      t0, 1 << 13
+    csrs    mstatus, t0
+#endif
 
     la      t0, __bss_start
     la      t1, __bss_end

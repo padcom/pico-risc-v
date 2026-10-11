@@ -13,3 +13,8 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+[dependencies]
+# IEEE 754 arithmetic in software: every rounding mode and exception flag, as
+# RISC-V needs them (WebAssembly's floats only round to nearest, without flags).
+softfp = { version = "0.1", default-features = false }

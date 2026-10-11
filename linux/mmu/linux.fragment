@@ -1,9 +1,9 @@
 # Kernel config fragment for the mmu flavor, applied on top of the kernel's
 # rv32_defconfig (see linux/mmu/buildroot.fragment).
 
-# Match the emulated CPU: RV32IMAC, no FPU or vector instructions.
+# Match the emulated CPU: RV32IMAFDC / RV64IMAFDC, no vector instructions.
 CONFIG_RISCV_ISA_C=y
-# CONFIG_FPU is not set
+CONFIG_FPU=y
 # CONFIG_RISCV_ISA_V is not set
 # No UEFI: we boot through OpenSBI.
 # CONFIG_EFI is not set

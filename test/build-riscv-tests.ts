@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
  * as the examples. make only rebuilds what changed. Without the submodule or
  * the toolchain, the tests are skipped.
  */
-const SUITES = ['ui', 'um', 'ua', 'uc', 'si', 'mi']
+const SUITES = ['ui', 'um', 'ua', 'uf', 'ud', 'uc', 'si', 'mi']
 
 export default function setup() {
   const root = fileURLToPath(new URL('../', import.meta.url))

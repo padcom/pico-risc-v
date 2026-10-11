@@ -258,11 +258,11 @@ describe('Zicsr', () => {
     expect(cpu.mscratch).toBe(0x50)
   })
 
-  it('misa reports RV32 with I, M, A, C, S and U', () => {
+  it('misa reports RV32 with I, M, A, F, D, C, S and U', () => {
     const { cpu } = run([a.csrrs(1, Csr.misa, 0), a.ebreak()])
     const misa = cpu.x[1]! >>> 0
     expect(misa >>> 30).toBe(1)
-    for (const ext of 'IMACSU') expect(misa & (1 << (ext.charCodeAt(0) - 65))).not.toBe(0)
+    for (const ext of 'IMAFDCSU') expect(misa & (1 << (ext.charCodeAt(0) - 65))).not.toBe(0)
   })
 
   it('mepc keeps bit 1 (instructions are 2-byte aligned)', () => {

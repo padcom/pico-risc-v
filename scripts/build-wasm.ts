@@ -3,7 +3,8 @@
  * loads. Cargo only rebuilds what changed, so this is cheap to run often;
  * build/hart.wasm is only replaced when its contents change.
  *
- * `node scripts/build-wasm.ts test` runs the core's own (Rust) tests instead.
+ * `node scripts/build-wasm.ts test [cargo test arguments]` runs the core's
+ * own (Rust) tests instead.
  *
  * Needs Rust with the wasm32-unknown-unknown target:
  *   brew install rustup && rustup default stable && rustup target add wasm32-unknown-unknown
@@ -29,7 +30,10 @@ function cargo(...args: string[]): void {
         '  brew install rustup && rustup default stable && rustup target add wasm32-unknown-unknown',
     )
   }
-  execFileSync(cargo, [...args, '--quiet', '--manifest-path', join(root, 'hart', 'Cargo.toml')], {
+  // Options go before a `--` (what follows is for the test binary).
+  const split = args.includes('--') ? args.indexOf('--') : args.length
+  const options = ['--quiet', '--manifest-path', join(root, 'hart', 'Cargo.toml')]
+  execFileSync(cargo, [...args.slice(0, split), ...options, ...args.slice(split)], {
     stdio: 'inherit',
     env: { ...process.env, PATH },
   })
@@ -44,6 +48,6 @@ export function buildWasm(): void {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  if (process.argv[2] === 'test') cargo('test')
+  if (process.argv[2] === 'test') cargo('test', ...process.argv.slice(3))
   else buildWasm()
 }

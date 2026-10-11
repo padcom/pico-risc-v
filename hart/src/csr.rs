@@ -1,6 +1,11 @@
 //! CSR addresses, register fields and trap causes (privileged spec).
 //! The TypeScript side has the same values in src/csr.ts and src/trap.ts.
 
+// Floating point (F, D)
+pub const FFLAGS: u32 = 0x001;
+pub const FRM: u32 = 0x002;
+pub const FCSR: u32 = 0x003;
+
 // Supervisor trap setup / handling, address translation
 pub const SSTATUS: u32 = 0x100;
 pub const SIE: u32 = 0x104;
@@ -68,6 +73,9 @@ pub const MSTATUS_MPIE: u64 = 1 << 7;
 pub const MSTATUS_SPP: u64 = 1 << 8;
 pub const MSTATUS_MPP_SHIFT: u32 = 11;
 pub const MSTATUS_MPP: u64 = 3 << MSTATUS_MPP_SHIFT;
+/// Floating-point unit state: 0 off (FP instructions are illegal), 1 initial,
+/// 2 clean, 3 dirty (something changed it; the OS saves it on context switch).
+pub const MSTATUS_FS: u64 = 3 << 13;
 pub const MSTATUS_MPRV: u64 = 1 << 17;
 pub const MSTATUS_SUM: u64 = 1 << 18;
 pub const MSTATUS_MXR: u64 = 1 << 19;

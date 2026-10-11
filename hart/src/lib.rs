@@ -12,10 +12,13 @@
 //! JavaScript), whatever the XLEN.
 
 mod csr;
+mod fpu;
 mod hart;
 mod memory;
 mod mmu;
 mod rvc;
+#[cfg(test)]
+mod testfloat;
 
 use core::cell::UnsafeCell;
 use hart::Hart;
@@ -63,6 +66,12 @@ pub extern "C" fn ram_alloc(base: u32, size: u32) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn registers() -> *mut u64 {
     hart().x.as_mut_ptr()
+}
+
+/// Where f0..f31 live in linear memory (32 × 64 bits; singles NaN-boxed).
+#[unsafe(no_mangle)]
+pub extern "C" fn fp_registers() -> *mut u64 {
+    hart().f.as_mut_ptr()
 }
 
 #[unsafe(no_mangle)]

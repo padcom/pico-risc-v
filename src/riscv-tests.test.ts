@@ -8,7 +8,8 @@ import { Machine, MemoryMap } from './machine.js'
  * vendor/riscv-tests), built by test/build-riscv-tests.ts into
  * build/riscv-tests/<xlen>/:
  *
- *   rv<xlen>ui/um/ua/uc  user-level instructions: base, multiply, atomics, compressed
+ *   rv<xlen>ui/um/ua/uf/ud/uc  user-level instructions: base, multiply, atomics,
+ *                        single and double floating point, compressed
  *   rv<xlen>si/mi        supervisor- and machine-mode behaviour
  *
  * Each comes as -p- (physical memory, M-mode) and -v- (the same test in

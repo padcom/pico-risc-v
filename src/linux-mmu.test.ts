@@ -62,7 +62,7 @@ for (const { flavor, xlen, mmu } of FLAVORS) {
       s.type('grep -E "^(isa|mmu)" /proc/cpuinfo; echo "done-$((40+2))"\n')
       s.waitFor('done-42')
       expect(s.screen).toMatch(new RegExp(`mmu\\s*:\\s*${mmu}`))
-      expect(s.screen).toMatch(new RegExp(`isa\\s*:\\s*rv${xlen}imac`)) // compressed instructions
+      expect(s.screen).toMatch(new RegExp(`isa\\s*:\\s*rv${xlen}imafdc`)) // RV32GC / RV64GC
 
       // Randomness is ready right away (seeded through the device tree), even
       // on a disk without a saved seed: /dev/random blocks until it is.
@@ -72,6 +72,10 @@ for (const { flavor, xlen, mmu } of FLAVORS) {
       s.type('hello from-mmu\n')
       s.waitFor('argv[1] = from-mmu')
       expect(s.screen).toMatch(new RegExp(`Hello from Linux \\S+ on riscv${xlen}!`))
+
+      // Floating point in user space (hard-float ABI): awk computes in doubles.
+      s.type(`awk 'BEGIN { printf "fp=%.12f\\n", 3 / 7 * 1.5 - 0.1 }'\n`)
+      s.waitFor('fp=0.542857142857')
 
       // Midnight Commander: wait for its menu bar, then quit with F10.
       s.type('mc\n')

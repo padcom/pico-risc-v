@@ -15,7 +15,8 @@ COMMON  := crt0.S link.ld terminal.h
 # matmul-m: same source as matmul, compiled for hardware multiply (RV32IM).
 # bench: CPU benchmark (npm run bench), also RV32IM; bench-c the same with
 # compressed instructions (RV32IMC), bench64 for RV64 (RV64IMC).
-PROGRAMS := hello matmul matmul-m bench bench-c bench64
+# fbench32 / fbench64: floating-point test program for RV32GC / RV64GC.
+PROGRAMS := hello matmul matmul-m bench bench-c bench64 fbench32 fbench64
 
 all: $(PROGRAMS:%=build/%.bin)
 
@@ -38,6 +39,20 @@ build/bench64.elf: MARCH := rv64imc
 build/bench64.elf: MABI := lp64
 build/bench64.elf: CFLAGS += -mcmodel=medany
 build/bench64.elf: bench/*.c $(COMMON) | build
+	$(link)
+
+# Floating point: no fused multiply-adds, no libm (sqrt is the instruction),
+# so the results are exact functions of the program and match other CPUs.
+FPFLAGS := -ffp-contract=off -fno-math-errno
+build/fbench32.elf: MARCH := rv32gc
+build/fbench32.elf: MABI := ilp32d
+build/fbench32.elf: CFLAGS += $(FPFLAGS)
+build/fbench32.elf: fbench/*.c $(COMMON) | build
+	$(link)
+build/fbench64.elf: MARCH := rv64gc
+build/fbench64.elf: MABI := lp64d
+build/fbench64.elf: CFLAGS += $(FPFLAGS) -mcmodel=medany
+build/fbench64.elf: fbench/*.c $(COMMON) | build
 	$(link)
 build/matmul-m.elf: matmul/*.c $(COMMON) | build
 	$(link)

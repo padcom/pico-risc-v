@@ -66,6 +66,10 @@ export const MSTATUS_MPIE = 1 << 7
 export const MSTATUS_SPP = 1 << 8
 export const MSTATUS_MPP_SHIFT = 11
 export const MSTATUS_MPP = 3 << MSTATUS_MPP_SHIFT
+/** Floating-point unit state: 0 off, 1 initial, 2 clean, 3 dirty. */
+export const MSTATUS_FS = 3 << 13
+/** RV32: some extension state (FP) is dirty (on RV64 bit 63). */
+export const MSTATUS_SD32 = 1 << 31
 export const MSTATUS_MPRV = 1 << 17
 export const MSTATUS_SUM = 1 << 18
 export const MSTATUS_MXR = 1 << 19

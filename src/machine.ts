@@ -356,7 +356,7 @@ export class Machine {
         '#address-cells': 2,
         '#size-cells': 2,
         compatible: 'riscv-minimal-nommu',
-        model: `risc-emulator (RV${xlen}IMAC)`,
+        model: `risc-emulator (RV${xlen}GC)`,
       },
       children: {
         chosen: {
@@ -382,9 +382,9 @@ export class Machine {
                 compatible: 'riscv',
                 // Old-style ISA string, plus the newer binding that kernels
                 // built without CONFIG_RISCV_ISA_FALLBACK (6.x) insist on.
-                'riscv,isa': `rv${xlen}imac`,
+                'riscv,isa': `rv${xlen}imafdc`,
                 'riscv,isa-base': `rv${xlen}i`,
-                'riscv,isa-extensions': ['i', 'm', 'a', 'c', 'zicsr', 'zifencei', 'zicntr'],
+                'riscv,isa-extensions': ['i', 'm', 'a', 'f', 'd', 'c', 'zicsr', 'zifencei', 'zicntr'],
                 'mmu-type': xlen === 64 ? 'riscv,sv39' : 'riscv,sv32',
               },
               children: {

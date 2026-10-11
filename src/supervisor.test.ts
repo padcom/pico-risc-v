@@ -6,9 +6,11 @@ import {
   MIP_MTIP,
   MIP_SSIP,
   MIP_STIP,
+  MSTATUS_FS,
   MSTATUS_MIE,
   MSTATUS_MPRV,
   MSTATUS_MXR,
+  MSTATUS_SD32,
   MSTATUS_SIE,
   MSTATUS_SPIE,
   MSTATUS_SPP,
@@ -348,7 +350,10 @@ describe('supervisor mode and delegation', () => {
       mode: Priv.Supervisor,
       paging: false,
     })
-    expect(cpu.x[11]).toBe(MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR)
+    // FS written as dirty (3) also shows as SD, the top bit.
+    expect(cpu.x[11]! >>> 0).toBe(
+      (MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_FS | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_SD32) >>> 0,
+    )
     expect(cpu.mstatus & MSTATUS_MIE).toBe(0) // M bits untouched
   })
 

@@ -260,6 +260,17 @@ describe('C programs compiled with GNU toolchain', () => {
     expect(compressed.screen).toBe(plain.screen)
   })
 
+  it('floating point (RV32GC and RV64GC) gives the same bits as the same C code on the host', () => {
+    // examples/fbench prints the exact bits of its results; this is what the
+    // same program prints compiled natively (Apple Silicon, no FMA contraction).
+    const expected = ['mandelbrot 40ef46b9389c4324', 'nbody 3fe6787f5c2f0c63', 'singles 42e9fd5a', '8ebc280f4d0ed7a4', ''].join('\n')
+    for (const [program, xlen] of [['fbench32', 32], ['fbench64', 64]] as const) {
+      const { result, screen } = runBench(program, xlen)
+      expect(result).toBe('poweroff')
+      expect(screen).toBe(expected)
+    }
+  })
+
   it('the benchmark built for RV64 computes the same on an RV64 machine', () => {
     const rv64 = runBench('bench64', 64)
     expect(rv64.result).toBe('poweroff')

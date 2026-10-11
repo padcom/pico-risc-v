@@ -28,7 +28,7 @@ describe.skipIf(!existsSync(IMAGE))('Linux (mini-rv32ima nommu kernel)', () => {
 
     waitFor('login: ')
     expect(screen).toMatch(/Linux version \d+\.\d+/) // prebuilt: 6.1.14; built from source: 6.8-rc1
-    expect(screen).toContain('riscv: base ISA extensions acim') // C: from the device tree
+    expect(screen).toContain('riscv: base ISA extensions acdfim') // from the device tree
     expect(screen).toContain('ttyS0 at MMIO 0x10000000')
 
     machine.terminal.type('root\n')

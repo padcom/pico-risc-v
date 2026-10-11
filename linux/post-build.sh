@@ -36,10 +36,10 @@ if grep -q '^BR2_BINFMT_FLAT=y' "$BR2_CONFIG"; then
   # shellcheck disable=SC2054 # the commas belong to -Wl,
   LDFLAGS=(-Wl,-elf2flt="-r -s $STACK_SIZE" -Wl,--gc-sections)
 elif [[ $CC == */riscv64-* ]]; then
-  CFLAGS=(-march=rv64imac -mabi=lp64 -O2 -Wall)
+  CFLAGS=(-march=rv64gc -mabi=lp64d -O2 -Wall)
   LDFLAGS=()
 else
-  CFLAGS=(-march=rv32imac -mabi=ilp32 -O2 -Wall)
+  CFLAGS=(-march=rv32gc -mabi=ilp32d -O2 -Wall)
   LDFLAGS=()
 fi
 

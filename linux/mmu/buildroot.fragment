@@ -1,16 +1,16 @@
 # Buildroot settings for the mmu flavor, applied on top of Buildroot's
 # configs/qemu_riscv32_virt_defconfig (see linux/build.sh).
 
-# CPU: exactly what the emulator implements, RV32IMAC (no FPU). The MMU
-# itself is on by default. Changing these rebuilds everything from scratch
-# (linux/build.sh notices).
+# CPU: exactly what the emulator implements, RV32IMAFDC (RV32GC) with the
+# hard-float ABI. The MMU itself is on by default. Changing these rebuilds
+# everything from scratch (linux/build.sh notices).
 BR2_riscv_custom=y
 BR2_RISCV_ISA_RVM=y
 BR2_RISCV_ISA_RVA=y
-# BR2_RISCV_ISA_RVF is not set
-# BR2_RISCV_ISA_RVD is not set
+BR2_RISCV_ISA_RVF=y
+BR2_RISCV_ISA_RVD=y
 BR2_RISCV_ISA_RVC=y
-BR2_RISCV_ABI_ILP32=y
+BR2_RISCV_ABI_ILP32D=y
 
 # C library: glibc (Buildroot's default); it has the threads and wide
 # characters GLib, and so mc, need.
@@ -35,11 +35,11 @@ BR2_TARGET_ROOTFS_EXT2_LABEL="rootfs"
 # Firmware: OpenSBI's fw_dynamic.bin goes at the start of RAM; the emulator
 # tells it where the kernel is (struct fw_dynamic_info in a2), so it needs no
 # built-in load addresses and leaves the device tree where the emulator put it.
-# OpenSBI defaults to IMAFDC: build it for our CPU (passed via the environment,
-# which its Makefile honours for PLATFORM_RISCV_ISA).
+# OpenSBI is built for exactly our CPU (passed via the environment, which its
+# Makefile honours for PLATFORM_RISCV_ISA).
 BR2_TARGET_OPENSBI_INSTALL_DYNAMIC_IMG=y
 # BR2_TARGET_OPENSBI_INSTALL_JUMP_IMG is not set
-BR2_TARGET_OPENSBI_ADDITIONAL_VARIABLES="PLATFORM_RISCV_ISA=rv32imac_zicsr_zifencei"
+BR2_TARGET_OPENSBI_ADDITIONAL_VARIABLES="PLATFORM_RISCV_ISA=rv32imafdc_zicsr_zifencei"
 
 # Packages
 BR2_PACKAGE_NCURSES=y

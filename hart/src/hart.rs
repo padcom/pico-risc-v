@@ -1,5 +1,6 @@
-//! RV32IMAC / RV64IMAC hart with machine, supervisor and user privilege modes
-//! (Zicsr, Zifencei) and virtual memory (Sv32 / Sv39).
+//! RV32GC / RV64GC hart (IMAFDC, Zicsr, Zifencei) with machine, supervisor
+//! and user privilege modes and virtual memory (Sv32 / Sv39). Floating point
+//! is in fpu.rs.
 //!
 //! The register width (XLEN) is chosen when the hart is set up. The code is
 //! written once, generic over it (`X64`), and compiled for each, so neither
@@ -18,7 +19,7 @@ use crate::rvc;
 
 /// A synchronous exception: aborts the instruction, then the hart enters the
 /// trap handler. `tval` is the value the spec puts in mtval/stval.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Trap {
     pub cause: u32,
     pub tval: u64,
@@ -42,14 +43,15 @@ pub const WFI_STALL: u32 = 1;
 pub const STOPPED_AT_BREAKPOINT: u32 = 2;
 pub const STOPPED: u32 = 3;
 
-/// misa extensions: A, C, I, M, S, U (MXL, the XLEN, goes on top).
-const MISA_EXTENSIONS: u64 = 1 << 0 | 1 << 2 | 1 << 8 | 1 << 12 | 1 << 18 | 1 << 20;
+/// misa extensions: A, C, D, F, I, M, S, U (MXL, the XLEN, goes on top).
+const MISA_EXTENSIONS: u64 = 1 << 0 | 1 << 2 | 1 << 3 | 1 << 5 | 1 << 8 | 1 << 12 | 1 << 18 | 1 << 20;
 
 const MSTATUS_WRITABLE: u64 = MSTATUS_SIE | MSTATUS_MIE | MSTATUS_SPIE | MSTATUS_MPIE | MSTATUS_SPP
-    | MSTATUS_MPP | MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_TVM | MSTATUS_TW | MSTATUS_TSR;
+    | MSTATUS_MPP | MSTATUS_FS | MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_TVM | MSTATUS_TW
+    | MSTATUS_TSR;
 /// The part of mstatus writable through sstatus...
-const SSTATUS_WRITABLE: u64 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR;
-/// ...and visible through it (on RV64 also UXL).
+const SSTATUS_WRITABLE: u64 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_FS | MSTATUS_SUM | MSTATUS_MXR;
+/// ...and visible through it (on RV64 also UXL; SD is added when read).
 const SSTATUS_VISIBLE: u64 = SSTATUS_WRITABLE | 3 << 32;
 const MIE_WRITABLE: u64 = MIP_SSIP | MIP_MSIP | MIP_STIP | MIP_MTIP | MIP_SEIP | MIP_MEIP;
 /// mip bits software may write; the machine ones are driven by devices (CLINT).
@@ -73,6 +75,14 @@ const AMO: u32 = 0x2f;
 const OP: u32 = 0x33;
 const LUI: u32 = 0x37;
 const OP_32: u32 = 0x3b;
+// Floating point (fpu.rs)
+const LOAD_FP: u32 = 0x07;
+const STORE_FP: u32 = 0x27;
+const FMADD: u32 = 0x43;
+const FMSUB: u32 = 0x47;
+const FNMSUB: u32 = 0x4b;
+const FNMADD: u32 = 0x4f;
+const OP_FP: u32 = 0x53;
 const BRANCH: u32 = 0x63;
 const JALR: u32 = 0x67;
 const JAL: u32 = 0x6f;
@@ -94,6 +104,10 @@ pub struct Hart {
     pub priv_: u32,
     /// RV64 (else RV32); set once, before running.
     pub xlen64: bool,
+    /// f0..f31 (single-precision values NaN-boxed), and fcsr's two fields.
+    pub f: [u64; 32],
+    pub fflags: u32,
+    pub frm: u32,
 
     // Machine-mode CSR state (sstatus, sie and sip are views of these)
     pub mstatus: u64,
@@ -159,6 +173,9 @@ impl Hart {
             pc: 0,
             priv_: PRIV_M,
             xlen64: false,
+            f: [0; 32],
+            fflags: 0,
+            frm: 0,
             mstatus: 0,
             mie: 0,
             mip: 0,
@@ -203,6 +220,9 @@ impl Hart {
     pub fn reset(&mut self, pc: u64) {
         self.address_mask = if self.xlen64 { u64::MAX } else { 0xffff_ffff };
         self.x = [0; 32];
+        self.f = [0; 32];
+        self.fflags = 0;
+        self.frm = 0;
         self.pc = pc & self.address_mask;
         self.priv_ = PRIV_M;
         self.mstatus = if self.xlen64 { MSTATUS_UXL_SXL_64 } else { 0 };
@@ -272,7 +292,11 @@ impl Hart {
                         inst => (inst, 2),
                     }
                 };
-                self.execute::<X64>(inst, pc, addr::<X64>(pc.wrapping_add(length)))
+                match self.execute::<X64>(inst, pc, addr::<X64>(pc.wrapping_add(length))) {
+                    // An illegal compressed instruction reports its own 16 bits.
+                    Err(trap) if trap.cause == ILLEGAL_INSTRUCTION && length == 2 => Err(illegal(word & 0xffff)),
+                    result => result,
+                }
             }
             Err(trap) => Err(trap),
         };
@@ -362,7 +386,7 @@ impl Hart {
 
     /// Write a destination register (RV32: sign-extended from 32 bits).
     #[inline(always)]
-    fn set<const X64: bool>(&mut self, rd: usize, value: u64) {
+    pub(crate) fn set<const X64: bool>(&mut self, rd: usize, value: u64) {
         self.x[rd] = if X64 { value } else { sext32(value) };
     }
 
@@ -548,6 +572,8 @@ impl Hart {
                 }
             }
 
+            LOAD_FP | STORE_FP | FMADD | FMSUB | FNMSUB | FNMADD | OP_FP => self.execute_fp::<X64>(inst)?,
+
             SYSTEM => {
                 if funct3 == 0 {
                     next_pc = self.system(inst, pc, next_pc)?;
@@ -642,7 +668,8 @@ impl Hart {
 
     fn read_csr<const X64: bool>(&mut self, csr: u32, inst: u32) -> Result<u64> {
         let value = match csr {
-            MSTATUS => self.mstatus,
+            FFLAGS | FRM | FCSR => self.read_fcsr(csr).ok_or(illegal(inst))?,
+            MSTATUS => self.mstatus | self.state_dirty::<X64>(),
             MISA => MISA_EXTENSIONS | if X64 { 2 << 62 } else { 1 << 30 },
             MEDELEG => self.medeleg,
             MIDELEG => self.mideleg,
@@ -657,7 +684,7 @@ impl Hart {
             MSTATUSH if !X64 => 0,
             MCOUNTINHIBIT | MVENDORID | MARCHID | MIMPID | MHARTID | MCONFIGPTR => 0,
 
-            SSTATUS => self.mstatus & SSTATUS_VISIBLE,
+            SSTATUS => self.mstatus & SSTATUS_VISIBLE | self.state_dirty::<X64>(),
             SIE => self.mie & self.mideleg,
             SIP => self.mip & self.mideleg,
             STVEC => self.stvec,
@@ -700,6 +727,11 @@ impl Hart {
         Ok(addr::<X64>(value))
     }
 
+    /// mstatus.SD (the top bit): some extension state (here only FP) is dirty.
+    fn state_dirty<const X64: bool>(&self) -> u64 {
+        if self.mstatus & MSTATUS_FS == MSTATUS_FS { 1 << if X64 { 63 } else { 31 } } else { 0 }
+    }
+
     fn check_time_access(&self, csr: u32, inst: u32) -> Result<()> {
         if !self.has_time {
             return Err(illegal(inst));
@@ -721,6 +753,7 @@ impl Hart {
 
     fn write_csr<const X64: bool>(&mut self, csr: u32, value: u64) {
         match csr {
+            FFLAGS | FRM | FCSR => self.write_fcsr(csr, value), // readable, so FP is on
             MSTATUS => {
                 let mut v = value & MSTATUS_WRITABLE;
                 if v & MSTATUS_MPP == 2 << MSTATUS_MPP_SHIFT {
@@ -848,13 +881,13 @@ impl Hart {
 
 /// Sign-extend from 32 bits.
 #[inline(always)]
-const fn sext32(v: u64) -> u64 {
+pub(crate) const fn sext32(v: u64) -> u64 {
     v as i32 as i64 as u64
 }
 
 /// An address: on RV32, 32 bits.
 #[inline(always)]
-const fn addr<const X64: bool>(v: u64) -> u64 {
+pub(crate) const fn addr<const X64: bool>(v: u64) -> u64 {
     if X64 { v } else { v & 0xffff_ffff }
 }
 
@@ -937,7 +970,7 @@ fn remu<const X64: bool>(a: u64, b: u64) -> u64 {
     }
 }
 
-const fn illegal(inst: u32) -> Trap {
+pub(crate) const fn illegal(inst: u32) -> Trap {
     Trap::new(ILLEGAL_INSTRUCTION, inst as u64)
 }
 
@@ -953,10 +986,10 @@ const fn vector(tvec: u64, cause: u32, interrupt: bool) -> u64 {
 }
 
 // Immediate decoders. All sign-extended to 64 bits.
-const fn imm_i(i: u32) -> u64 {
+pub(crate) const fn imm_i(i: u32) -> u64 {
     (i as i32 >> 20) as u64
 }
-const fn imm_s(i: u32) -> u64 {
+pub(crate) const fn imm_s(i: u32) -> u64 {
     ((i as i32 >> 25) << 5 | ((i >> 7) & 0x1f) as i32) as u64
 }
 const fn imm_b(i: u32) -> u64 {
