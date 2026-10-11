@@ -20,7 +20,20 @@ describe('Terminal device', () => {
     const out: number[] = []
     const t = new Terminal(b => out.push(b))
     t.write8(Terminal.THR, 0x41)
-    t.write8(3, 0x42) // other registers ignore writes
+    t.write8(7, 0x42) // other registers ignore writes
+    expect(out).toEqual([0x41])
+  })
+
+  it('takes the baud-rate divisor at offsets 0 and 1 while LCR.DLAB is set, without transmitting it', () => {
+    const out: number[] = []
+    const t = new Terminal(b => out.push(b))
+    t.write8(Terminal.LCR, 0x03 | Terminal.LCR_DLAB) // 8N1, divisor latch on (as Linux sets a speed)
+    t.write8(Terminal.DLL, 0x6d)
+    t.write8(Terminal.DLM, 0x00)
+    expect(t.read8(Terminal.DLL)).toBe(0x6d)
+    expect(t.read8(Terminal.LCR)).toBe(0x83)
+    t.write8(Terminal.LCR, 0x03)
+    t.write8(Terminal.THR, 0x41)
     expect(out).toEqual([0x41])
   })
 

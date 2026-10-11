@@ -1,0 +1,17 @@
+# Build environment for linux/debian/build.sh (used through linux/podman.sh):
+# mmdebstrap to install Debian, QEMU's user-mode emulator to run the
+# packages' riscv64 install scripts, and e2fsprogs (with libarchive, which
+# it loads to read the tarball) for the disk image.
+FROM docker.io/library/debian:13
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      mmdebstrap qemu-user arch-test gpg debian-archive-keyring ca-certificates \
+      e2fsprogs libarchive13t64 \
+ && rm -rf /var/lib/apt/lists/*
+
+# UTF-8 file names (libarchive refuses them in the default "C" locale).
+ENV LC_ALL=C.UTF-8
+
+# Tells linux/debian/build.sh it is already inside the build container.
+ENV RISC_EMULATOR_BUILD_CONTAINER=1

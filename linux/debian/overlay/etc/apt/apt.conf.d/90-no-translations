@@ -1,0 +1,4 @@
+// No package description translations (Translation-* files): apt update
+// downloads and parses about a third less, which on an emulated CPU means
+// minutes. English descriptions come with the package lists anyway.
+Acquire::Languages "none";

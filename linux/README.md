@@ -5,20 +5,23 @@
 builds the mmu image if it's missing or anything under `linux/` changed, and
 boots it. The rest of this page explains what goes into the images.
 
-There are three flavors:
+There are three flavors built with Buildroot, plus Debian:
 
 | Flavor  | What it is | Build | Boot |
 | ------- | ---------- | ----- | ---- |
 | **mmu** | Regular RV32 Linux 6.18 with virtual memory (Sv32), running in S-mode on top of the OpenSBI firmware. Upstream [Buildroot](https://buildroot.org) 2026.02 LTS, glibc and BusyBox, plus extra packages, currently Midnight Commander (`mc`) and `curl` (with HTTPS). The root filesystem is on a virtual disk. | `npm run linux:build` → `images/linux-mmu/fw_dynamic.bin`, `Image`, `rootfs.ext4` | `npm start` |
 | **rv64** | The same for RV64 (Sv39 virtual memory): the mmu flavor's configuration plus `linux/rv64/`. | `npm run linux:rv64:build` → `images/linux-rv64/` (the same files) | `npm run start:rv64` |
+| **debian** | [Debian](https://www.debian.org) 13 (trixie) for riscv64, installed from Debian's own packages, with systemd and apt. It boots on the rv64 flavor's kernel and firmware. See [Debian](#debian) below. | `npm run debian:build` → `images/debian/rootfs.ext4` | `npm run start:debian` |
 | **nommu** | [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima)'s tiny no-MMU kernel running in M-mode, with BusyBox and uClibc. The root filesystem is built into the kernel (an initramfs). A prebuilt image can also be downloaded. | `npm run linux:nommu:build` → `images/linux/Image` | `npm run start:nommu` |
 
-All are built by `linux/build.sh`; `FLAVOR=mmu` (default), `FLAVOR=rv64` or
-`FLAVOR=nommu` selects one. Like mmu, `npm run start:rv64` builds its image
-first if it's missing or out of date.
+The Buildroot flavors are built by `linux/build.sh`; `FLAVOR=mmu` (default),
+`FLAVOR=rv64` or `FLAVOR=nommu` selects one. Debian's disk is built by
+`linux/debian/build.sh`. Like mmu, `npm run start:rv64` and `npm run
+start:debian` build what they need first if it's missing or out of date.
 
-The build runs in a **Podman** container (`linux/Containerfile`, a pinned
-Debian 12), so it doesn't depend on your distribution or compiler:
+The builds run in **Podman** containers (`linux/Containerfile`, a pinned
+Debian 12, and `linux/debian/Containerfile`), so they don't depend on your
+distribution or compiler:
 
 - **Linux:** install Podman (`apt install podman` / `dnf install podman`).
   It runs rootless, with no daemon.
@@ -41,6 +44,44 @@ than 15: GCC 15 defaults to C23, which the old Buildroot snapshot nommu uses
 
 The first build compiles a cross toolchain, the kernel and all packages. It
 needs a few GB of disk and takes a while. Later builds are incremental.
+
+## Debian
+
+`npm run start:debian` boots Debian 13 (trixie) for riscv64, the same
+system as on any RISC-V board: Debian's own packages, unmodified, with systemd
+as init, systemd-networkd and systemd-resolved for the network, and apt. It
+runs on the rv64 flavor's kernel and OpenSBI (built first if needed), with
+512 MiB of RAM. It reaches the login prompt in about 35 s. Log in as `root`,
+no password. `poweroff` shuts it down.
+
+The disk, `images/debian/rootfs.ext4`, is built by `linux/debian/build.sh`
+(`npm run debian:build`, about a minute and a half):
+
+1. [mmdebstrap](https://gitlab.mister-muffin.de/josch/mmdebstrap) downloads
+   Debian's minimal base system plus the packages in
+   `linux/debian/packages` from `deb.debian.org` and installs them. The
+   packages' install scripts are riscv64 programs: they run under QEMU's
+   user-mode emulator, through a `binfmt_misc` mounted inside the build
+   container only (Linux 6.7+), so nothing changes in Podman's VM.
+2. The files in `linux/debian/overlay/` are copied in: hostname, `fstab`,
+   the network configuration and apt settings. root's password is removed, and apt's daily
+   timers are switched off: on an emulated CPU they would take over the
+   machine for minutes at random times.
+3. `mke2fs` writes it all into a 4 GB ext4 disk image (`DEBIAN_DISK_SIZE` to
+   change it). The file is sparse: about 200 MB on your disk.
+
+Debian's packages are fetched fresh on every build, so a later build gets
+Debian's latest updates. Like the other disks, a rebuild replaces
+`rootfs.ext4`; `npm run start:debian` keeps the old one as `rootfs.ext4.bak`
+when it rebuilds (when anything in `linux/debian/` changed).
+
+Inside, it's ordinary Debian: `apt update` and `apt install <package>` fetch
+packages from Debian's mirrors through the emulator's network. Expect it to
+be slow, since apt works through Debian's whole package list on the emulated
+CPU: `apt update` takes about 2 minutes, installing a small package such as
+`htop` about half a minute. (Package description translations are switched
+off, in `overlay/etc/apt/apt.conf.d/`, which saves a third of that.) To have
+packages on every new disk, list them in `linux/debian/packages` instead.
 
 ## The disk (mmu flavor)
 

@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { answerA } from '../test/dns.js'
 import { LinuxSession } from '../test/linux-session.js'
 import { type BlockStorage, SnapshotStorage } from './block-storage.js'
 import { FileStorage } from './file-storage.js'
@@ -150,18 +151,4 @@ for (const { flavor, xlen, mmu } of FLAVORS) {
       }
     })
   })
-}
-
-/** A DNS response giving every A query in `query` the address `addr`. */
-function answerA(query: Buffer, addr: number[]): Buffer {
-  let end = 12
-  while (query[end] !== 0) end += query[end]! + 1 // QNAME labels
-  end += 5 // zero label, QTYPE, QCLASS
-  const answer = Buffer.from([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, ...addr]) // name → offset 12, A, IN, TTL 60
-  const response = Buffer.concat([query.subarray(0, end), answer])
-  response.writeUInt16BE(0x8180, 2) // response, recursion available, no error
-  response.writeUInt16BE(1, 6) // ANCOUNT
-  response.writeUInt16BE(0, 8) // NSCOUNT
-  response.writeUInt16BE(0, 10) // ARCOUNT
-  return response
 }

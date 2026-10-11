@@ -14,11 +14,13 @@
     "bench": "npm run build --silent && make -s -C examples && node scripts/bench.ts",
     "start": "node scripts/start.ts",
     "start:rv64": "node scripts/start.ts rv64",
+    "start:debian": "node scripts/start.ts debian",
     "start:nommu": "node scripts/start.ts nommu",
     "linux": "npm run build --silent && node dist/cli.js",
     "linux:build": "FLAVOR=mmu bash linux/build.sh",
     "linux:rv64:build": "FLAVOR=rv64 bash linux/build.sh",
     "linux:nommu:build": "FLAVOR=nommu bash linux/build.sh",
+    "debian:build": "bash linux/debian/build.sh",
     "linux:nommu:image": "node scripts/linux-image.ts"
   },
   "keywords": [

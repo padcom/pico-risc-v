@@ -1,23 +1,37 @@
 #!/usr/bin/env bash
 #
-# Runs linux/build.sh inside a Podman container built from linux/Containerfile,
-# so the build doesn't depend on the host's distribution or compiler.
+# Runs linux/build.sh inside a Podman container built from linux/Containerfile
+# (or, for FLAVOR=debian, linux/debian/build.sh in a container from
+# linux/debian/Containerfile), so the build doesn't depend on the host's
+# distribution or compiler.
 #
 #   - the project directory is bind-mounted at /work: linux/programs,
-#     linux/overlay and linux/configs go in, images/linux/Image comes out
-#   - Buildroot works in a named volume, "risc-emulator-buildroot-mmu" or
-#     "risc-emulator-buildroot" (nommu): a Linux, case-sensitive file system
-#     that keeps downloads and build state between runs. `podman volume rm
-#     <name>` throws it all away.
+#     linux/overlay and linux/configs go in, the images come out
+#   - Buildroot works in a named volume per flavor,
+#     "risc-emulator-buildroot-mmu", "-rv64" or "risc-emulator-buildroot"
+#     (nommu): a Linux, case-sensitive file system that keeps downloads and
+#     build state between runs. `podman volume rm <name>` throws it all away.
 #   - on macOS Podman runs containers in its own Linux VM ("podman machine");
 #     it is created and started here if needed
 #
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-IMAGE=localhost/risc-emulator-buildroot
 FLAVOR=${FLAVOR:-mmu}
-VOLUME=risc-emulator-buildroot$([ "$FLAVOR" = nommu ] || echo "-$FLAVOR") # one per flavor
+if [ "$FLAVOR" = debian ]; then
+  IMAGE=localhost/risc-emulator-debian
+  CONTEXT=$ROOT/linux/debian
+  SCRIPT=linux/debian/build.sh
+  # Mounting a binfmt_misc of the container's own, to run riscv64 programs
+  # with QEMU while building (see linux/debian/build.sh); no build volume.
+  extra=(--cap-add SYS_ADMIN)
+else
+  IMAGE=localhost/risc-emulator-buildroot
+  CONTEXT=$ROOT/linux
+  SCRIPT=linux/build.sh
+  volume=risc-emulator-buildroot$([ "$FLAVOR" = nommu ] || echo "-$FLAVOR") # one per flavor
+  extra=(--volume "$volume:/build" --env BUILD_DIR=/build)
+fi
 
 die() { echo "error: $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }
@@ -46,21 +60,20 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 
 step "Preparing the build container"
-podman build --tag "$IMAGE" --file "$ROOT/linux/Containerfile" "$ROOT/linux"
+podman build --tag "$IMAGE" --file "$CONTEXT/Containerfile" "$CONTEXT"
 
 tty=() # (expanded below in a way that also works with macOS's bash 3.2 and set -u)
 [ -t 0 ] && [ -t 1 ] && tty=(--interactive --tty) # e.g. for linux-menuconfig
 
-step "Running linux/build.sh in the container"
+step "Running $SCRIPT in the container"
 # No SELinux separation (the podman machine, Fedora, ... enforce it): this is
 # our own build tool, and with it, files in the build volume can end up with
 # labels a later container may not touch (seen as "Permission denied" for root).
 # It also leaves the project directory's labels alone.
 exec podman run --rm ${tty[@]+"${tty[@]}"} \
   --security-opt label=disable \
-  --volume "$VOLUME:/build" \
+  "${extra[@]}" \
   --volume "$ROOT:/work" \
   --workdir /work \
-  --env BUILD_DIR=/build \
   --env FLAVOR="$FLAVOR" \
-  "$IMAGE" bash linux/build.sh "$@"
+  "$IMAGE" bash "$SCRIPT" "$@"

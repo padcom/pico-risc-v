@@ -2,7 +2,7 @@
 #
 # Prints a fingerprint (SHA-256) of everything a Linux image is built from.
 #
-#   linux/inputs-hash.sh [mmu|rv64]   (default mmu)
+#   linux/inputs-hash.sh [mmu|rv64|debian]   (default mmu)
 #
 # linux/build.sh stores it next to the image; `npm start` rebuilds the
 # image when it no longer matches. Works on the host (macOS: shasum) and in
@@ -19,10 +19,13 @@ else
 fi
 
 # A hash of the per-file "hash  path" lines (same format from both tools).
-flavor_dirs=(linux/mmu)
-[ "${1:-mmu}" = rv64 ] && flavor_dirs+=(linux/rv64)
-find "${flavor_dirs[@]}" linux/overlay linux/programs linux/build.sh linux/post-build.sh linux/Containerfile \
-  -type f ! -name .DS_Store -print0 |
+case "${1:-mmu}" in
+  mmu) inputs=(linux/mmu) ;;
+  rv64) inputs=(linux/mmu linux/rv64) ;;
+  debian) inputs=(linux/debian) ;; # a Debian disk; the kernel is rv64's
+esac
+[ "${1:-mmu}" = debian ] || inputs+=(linux/overlay linux/programs linux/build.sh linux/post-build.sh linux/Containerfile)
+find "${inputs[@]}" -type f ! -name .DS_Store -print0 |
   LC_ALL=C sort -z |
   xargs -0 "${hasher[@]}" |
   "${hasher[@]}" | cut -d' ' -f1
