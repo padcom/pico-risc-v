@@ -1,5 +1,5 @@
 import { createSocket } from 'node:dgram'
-import { createServer, type Server } from 'node:net'
+import { connect, createServer, type Server } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
@@ -232,6 +232,68 @@ describe('user-mode network (NAT)', () => {
     const rst = await expectFrame(tcpFrom(closedPort))
     expect(rst.flags & TCP_RST).toBe(TCP_RST)
     expect(rst.ack).toBe(6)
+  })
+
+  it('forwards a host port to the guest: the guest gets a connection from 10.0.2.2', async () => {
+    const { net, sendIp, expectFrame } = guest()
+    cleanup.push(() => net.close())
+    const hostPort = await net.forward(0, 22)
+    const toPort22 = (f: Uint8Array) => {
+      const p = parseIpv4(parseEthernet(f)!.payload)
+      if (p?.proto !== PROTO_TCP || p.src !== GATEWAY_IP || p.dst !== GUEST_IP) return undefined
+      const s = parseTcp(p.payload)!
+      return s.dstPort === 22 ? s : undefined
+    }
+    const client = connect(hostPort, '127.0.0.1')
+    let received = ''
+    client.on('data', (d: Buffer) => (received += d.toString()))
+    const clientClosed = new Promise(resolve => client.on('close', resolve))
+    client.write('ping')
+
+    const syn = await expectFrame(toPort22)
+    expect(syn.flags).toBe(TCP_SYN)
+    const seg = (s: Partial<Tcp>) =>
+      sendIp(tcp(GUEST_IP, GATEWAY_IP, { srcPort: 22, dstPort: syn.srcPort, seq: 0, ack: 0, flags: TCP_ACK, window: 65535, data: new Uint8Array(0), ...s }))
+    const ours = (syn.seq + 1) >>> 0
+    seg({ seq: 7000, ack: ours, flags: TCP_SYN | TCP_ACK, mss: 1460 })
+    expect((await expectFrame(toPort22)).ack).toBe(7001) // the handshake's last ACK
+    expect(net.busy).toBe(true)
+
+    // The client's data reaches the guest; the guest's reaches the client.
+    const ping = await expectFrame(f => {
+      const s = toPort22(f)
+      return s?.data.length ? s : undefined
+    })
+    expect(text(ping.data)).toBe('ping')
+    seg({ seq: 7001, ack: (ours + 4) >>> 0, flags: TCP_ACK | TCP_PSH, data: bytes('PONG') })
+    await expect.poll(() => received).toBe('PONG')
+
+    // The client closes: FIN to the guest; the guest closes too.
+    client.end()
+    const fin = await expectFrame(f => {
+      const s = toPort22(f)
+      return s && s.flags & TCP_FIN ? s : undefined
+    })
+    seg({ seq: 7005, ack: (fin.seq + 1) >>> 0, flags: TCP_FIN | TCP_ACK })
+    await clientClosed
+    await expect.poll(() => net.busy).toBe(false)
+  })
+
+  it('closes a forwarded connection the guest refuses (nothing listens on the port)', async () => {
+    const { net, sendIp, expectFrame } = guest()
+    cleanup.push(() => net.close())
+    const hostPort = await net.forward(0, 2222)
+    const client = connect(hostPort, '127.0.0.1')
+    const clientClosed = new Promise(resolve => client.on('close', resolve))
+    client.on('error', () => {})
+    const syn = await expectFrame(f => {
+      const p = parseIpv4(parseEthernet(f)!.payload)
+      const s = p?.proto === PROTO_TCP ? parseTcp(p.payload) : undefined
+      return s?.dstPort === 2222 ? s : undefined
+    })
+    sendIp(tcp(GUEST_IP, GATEWAY_IP, { srcPort: 2222, dstPort: syn.srcPort, seq: 0, ack: (syn.seq + 1) >>> 0, flags: TCP_RST | TCP_ACK, window: 0, data: new Uint8Array(0) }))
+    await clientClosed
+    expect(net.busy).toBe(false)
   })
 
   it('relays UDP to the host and DNS to the configured resolver', async () => {

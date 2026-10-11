@@ -4,7 +4,8 @@
  * program) and connects the emulated terminal to this process's stdin/stdout.
  *
  *   node dist/cli.js [--memory <MiB>] [--kernel <file>] [--disk <file> [--snapshot]]
- *                    [--net] [--bootargs <string>] [--virtual-clock] <image>
+ *                    [--net [--forward <host port>:<guest port>]...] [--bootargs <string>]
+ *                    [--virtual-clock] <image>
  *
  * The machine has one RV64GC CPU.
  *
@@ -19,7 +20,9 @@
  *
  * --net plugs a virtio network card (eth0) into a user-mode NAT: the guest
  * gets 10.0.2.15 by DHCP, can make outgoing TCP/UDP connections and use DNS;
- * 10.0.2.2 is this host's localhost.
+ * 10.0.2.2 is this host's localhost. --forward 2222:22 (repeatable) lets
+ * connections in: one to this host's localhost:2222 reaches the guest's
+ * port 22 (e.g. ssh -p 2222 root@localhost).
  *
  * Press Ctrl-A then X to quit (Ctrl-A Ctrl-A sends a literal Ctrl-A).
  */
@@ -38,7 +41,7 @@ const KERNEL_OFFSET = 0x200000
 
 function usage(): never {
   console.error(
-    'usage: risc-emulator [--memory <MiB>] [--kernel <file>] [--disk <file> [--snapshot]] [--net] [--bootargs <string>] [--virtual-clock] <image>',
+    'usage: risc-emulator [--memory <MiB>] [--kernel <file>] [--disk <file> [--snapshot]] [--net [--forward <host port>:<guest port>]...] [--bootargs <string>] [--virtual-clock] <image>',
   )
   process.exit(2)
 }
@@ -53,6 +56,7 @@ const { values, positionals } = (() => {
         disk: { type: 'string' },
         snapshot: { type: 'boolean', default: false },
         net: { type: 'boolean', default: false },
+        forward: { type: 'string', multiple: true, default: [] },
         bootargs: { type: 'string' },
         'virtual-clock': { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h' },
@@ -76,7 +80,21 @@ const flush = () => {
 const diskFile = values.disk ? new FileStorage(values.disk, { readOnly: values.snapshot }) : undefined
 const disk: BlockStorage | undefined = diskFile && values.snapshot ? new SnapshotStorage(diskFile) : diskFile
 
+const forwards = values.forward.map(spec => {
+  const [host, guest, extra] = spec.split(':').map(Number)
+  const port = (n: number | undefined) => n !== undefined && Number.isInteger(n) && n > 0 && n < 65536
+  return port(host) && port(guest) && extra === undefined ? { host: host!, guest: guest! } : usage()
+})
+if (forwards.length && !values.net) usage()
+
 const network = values.net ? new UserNetwork() : undefined
+for (const { host, guest } of forwards) {
+  // A port in use (say, by another emulator) is no reason not to run.
+  await network!.forward(host, guest).then(
+    () => process.stdin.isTTY && process.stderr.write(`[risc-emulator] localhost:${host} is forwarded to the guest's port ${guest}\n`),
+    (e: Error) => process.stderr.write(`[risc-emulator] can't forward localhost:${host} to the guest's port ${guest}: ${e.message}\n`),
+  )
+}
 
 const machine = new Machine({
   ramSize,

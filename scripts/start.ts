@@ -12,7 +12,8 @@
  *    copy of it. A rebuild replaces disk.raw too, keeping the old one as
  *    disk.raw.bak.
  * 3. Boot: OpenSBI at the start of RAM, U-Boot 2 MiB later; U-Boot starts
- *    GRUB from the disk, GRUB Debian's kernel. eth0 on the user-mode network.
+ *    GRUB from the disk, GRUB Debian's kernel. eth0 on the user-mode network,
+ *    with localhost:2222 forwarded to Debian's port 22 (ssh).
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, renameSync, statSync } from 'node:fs'
@@ -20,7 +21,15 @@ import { buildWasm } from './build-wasm.ts'
 
 const DIR = 'images/debian'
 const FILES = ['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw']
-const ARGS = ['--memory', '1024', '--kernel', `${DIR}/u-boot.bin`, '--disk', `${DIR}/disk.raw`, '--net', `${DIR}/fw_dynamic.bin`]
+// Port 2222 on this machine is Debian's port 22: ssh -p 2222 root@localhost
+// once openssh-server is installed in Debian (and you can log in: see linux/README.md).
+const ARGS = [
+  '--memory', '1024',
+  '--kernel', `${DIR}/u-boot.bin`,
+  '--disk', `${DIR}/disk.raw`,
+  '--net', '--forward', '2222:22',
+  `${DIR}/fw_dynamic.bin`,
+]
 
 const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'inherit' })
 

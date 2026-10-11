@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { createSocket, type Socket as UdpSocket } from 'node:dgram'
 import { getServers } from 'node:dns'
-import { connect, type Socket } from 'node:net'
+import { connect, createServer, type Server, type Socket } from 'node:net'
 import type { NetworkBackend } from '../virtio-net.js'
 import {
   arpReply,
@@ -41,6 +41,8 @@ const NETMASK = ip('255.255.255.0')
 const ROUTER_MAC = Uint8Array.of(0x52, 0x55, 0x0a, 0x00, 0x02, 0x02)
 
 const MSS = 1460
+/** Forwarded connections come from 10.0.2.2, from ports here on. */
+const FORWARD_PORTS = 40000
 const WINDOW = 65535
 const UDP_IDLE_MS = 60_000
 const UDP_REPLY_WAIT_MS = 3_000
@@ -76,14 +78,18 @@ const systemPing = (host: string) =>
  *   - relays other UDP datagrams through host UDP sockets
  *   - terminates the guest's TCP connections and opens matching host TCP
  *     connections, copying data both ways
+ *   - forwards host ports to guest ports (`forward()`): each connection to
+ *     the host port becomes one from 10.0.2.2 to the guest port
  *
- * Connections to 10.0.2.2 go to the host's 127.0.0.1. Outgoing only: nothing
- * from outside can connect in.
+ * Connections to 10.0.2.2 go to the host's 127.0.0.1.
  */
 export class UserNetwork implements NetworkBackend {
   private receive: (frame: Uint8Array) => void = () => {}
   private guestMac = BROADCAST_MAC
   private readonly connections = new Map<string, TcpConnection>()
+  private readonly servers: Server[] = []
+  /** Next port that forwarded connections come from (as 10.0.2.2). */
+  private nextForwardPort = FORWARD_PORTS
   private readonly udpRelays = new Map<string, UdpRelay>()
   private readonly dnsHost: string
   private readonly dnsPort: number
@@ -108,8 +114,42 @@ export class UserNetwork implements NetworkBackend {
   }
 
   close(): void {
+    for (const s of this.servers) s.close()
     for (const c of this.connections.values()) c.destroy()
     for (const r of this.udpRelays.values()) r.close()
+  }
+
+  /**
+   * Forward TCP port `hostPort` on the host (at `hostAddress`, by default
+   * only reachable from the host itself) to `guestPort` on the guest, like
+   * QEMU's hostfwd: each connection to it becomes a connection from
+   * 10.0.2.2 to the guest. Resolves once listening, to the port (useful
+   * with 0: any free one); rejects if it can't (e.g. the port is taken).
+   */
+  forward(hostPort: number, guestPort: number, hostAddress = '127.0.0.1'): Promise<number> {
+    const server = createServer(socket => {
+      const port = this.forwardPort(guestPort)
+      const key = `${guestPort}>${GATEWAY_IP}:${port}`
+      this.connections.set(key, TcpConnection.toGuest(this, key, socket, guestPort, port))
+    })
+    return new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(hostPort, hostAddress, () => {
+        server.off('error', reject)
+        server.unref() // listening alone doesn't keep the process alive
+        this.servers.push(server)
+        resolve((server.address() as { port: number }).port)
+      })
+    })
+  }
+
+  /** A port for a new forwarded connection to come from, not in use. */
+  private forwardPort(guestPort: number): number {
+    for (;;) {
+      const port = this.nextForwardPort
+      this.nextForwardPort = port === 0xffff ? FORWARD_PORTS : port + 1
+      if (!this.connections.has(`${guestPort}>${GATEWAY_IP}:${port}`)) return port
+    }
   }
 
   send(frame: Uint8Array): void {
@@ -185,7 +225,7 @@ export class UserNetwork implements NetworkBackend {
     const existing = this.connections.get(key)
     if (existing) return existing.fromGuest(segment)
     if ((segment.flags & (TCP_SYN | TCP_ACK)) === TCP_SYN) {
-      this.connections.set(key, new TcpConnection(this, key, src, dst, segment))
+      this.connections.set(key, TcpConnection.fromGuest(this, key, src, dst, segment))
     } else if (!(segment.flags & TCP_RST)) {
       // Not a connection we know: reset it.
       const len = segment.data.length + (segment.flags & TCP_FIN ? 1 : 0)
@@ -298,21 +338,25 @@ class UdpRelay {
 }
 
 /**
- * One guest TCP connection, terminated here and continued over a host socket.
- * The link to the guest is in-memory and lossless, so we never retransmit; we
- * only have to respect the guest's receive window.
+ * One guest TCP connection, terminated here and continued over a host socket:
+ * either one the guest opened (to the host it connects to), or one to a
+ * forwarded host port (to the guest). The link to the guest is in-memory and
+ * lossless, so we never retransmit; we only have to respect the guest's
+ * receive window.
  */
 class TcpConnection {
-  private readonly guestPort: number
-  private readonly remotePort: number
-  private readonly socket: Socket
-  private state: 'connecting' | 'syn-received' | 'established' = 'connecting'
+  /**
+   * - connecting: the guest's SYN came, we're connecting to the host
+   * - syn-received: connected; our SYN-ACK went to the guest
+   * - syn-sent: forwarded; our SYN went to the guest
+   */
+  private state: 'connecting' | 'syn-received' | 'syn-sent' | 'established' = 'connecting'
   private readonly iss = (Math.random() * 0x1_0000_0000) >>> 0
   private sndUna = this.iss // oldest byte the guest hasn't acknowledged
   private sndNxt = this.iss // next byte we send
-  private rcvNxt: number // next byte we expect from the guest
-  private guestWindow: number
-  private readonly mss: number
+  private rcvNxt = 0 // next byte we expect from the guest
+  private guestWindow = 0
+  private mss = 536
   private backlog: Buffer[] = [] // host data not yet sent to the guest
   private backlogBytes = 0
   private hostEnded = false
@@ -320,43 +364,69 @@ class TcpConnection {
   private guestFin = false
   private closed = false
 
-  constructor(
+  /** The guest opened it (its SYN): connect to where it's going. */
+  static fromGuest(net: UserNetwork, key: string, guestIp: number, remoteIp: number, syn: Tcp): TcpConnection {
+    const socket = connect(net.hostEndpoint(remoteIp, syn.dstPort))
+    const c = new TcpConnection(net, key, socket, guestIp, syn.srcPort, remoteIp, syn.dstPort)
+    c.rcvNxt = seqAdd(syn.seq, 1)
+    c.guestWindow = syn.window
+    c.mss = Math.min(syn.mss ?? 536, MSS)
+    socket.on('connect', () => {
+      c.state = 'syn-received'
+      c.sendSynAck()
+    })
+    return c
+  }
+
+  /** A client connected to a forwarded port: open a connection to the guest from 10.0.2.2:`fromPort`. */
+  static toGuest(net: UserNetwork, key: string, socket: Socket, guestPort: number, fromPort: number): TcpConnection {
+    const c = new TcpConnection(net, key, socket, GUEST_IP, guestPort, GATEWAY_IP, fromPort)
+    c.state = 'syn-sent'
+    c.sndNxt = seqAdd(c.iss, 1)
+    c.segment(TCP_SYN, new Uint8Array(0), c.iss, MSS)
+    return c
+  }
+
+  private constructor(
     private readonly net: UserNetwork,
     private readonly key: string,
+    private readonly socket: Socket,
     private readonly guestIp: number,
+    private readonly guestPort: number,
+    /** The other end, as the guest sees it. */
     private readonly remoteIp: number,
-    syn: Tcp,
+    private readonly remotePort: number,
   ) {
-    this.guestPort = syn.srcPort
-    this.remotePort = syn.dstPort
-    this.rcvNxt = seqAdd(syn.seq, 1)
-    this.guestWindow = syn.window
-    this.mss = Math.min(syn.mss ?? 536, MSS)
-
-    this.socket = connect(net.hostEndpoint(remoteIp, syn.dstPort))
-    this.socket.setNoDelay(true)
-    this.socket.on('connect', () => {
-      this.state = 'syn-received'
-      this.sendSynAck()
-    })
-    this.socket.on('data', (data: Buffer) => { // a Buffer: no encoding is set
+    socket.setNoDelay(true)
+    socket.on('data', (data: Buffer) => { // a Buffer: no encoding is set
       this.backlog.push(data)
       this.backlogBytes += data.length
-      if (this.backlogBytes > BACKLOG_HIGH) this.socket.pause()
+      if (this.backlogBytes > BACKLOG_HIGH) socket.pause()
       this.pump()
     })
-    this.socket.on('end', () => {
+    socket.on('end', () => {
       this.hostEnded = true
       this.pump()
     })
-    this.socket.on('error', () => this.reset())
-    this.socket.on('close', () => {
+    socket.on('error', () => this.reset())
+    socket.on('close', () => {
       if (this.state !== 'established' && !this.closed) this.reset() // refused / failed before the handshake ended
     })
   }
 
   fromGuest(s: Tcp): void {
     if (s.flags & TCP_RST) return this.destroy()
+    if (this.state === 'syn-sent') {
+      // The guest's answer to our SYN: SYN-ACK, then it's open.
+      if ((s.flags & (TCP_SYN | TCP_ACK)) !== (TCP_SYN | TCP_ACK) || s.ack !== this.sndNxt) return
+      this.state = 'established'
+      this.sndUna = s.ack
+      this.rcvNxt = seqAdd(s.seq, 1)
+      this.guestWindow = s.window
+      this.mss = Math.min(s.mss ?? 536, MSS)
+      this.segment(TCP_ACK)
+      return this.pump()
+    }
     if (s.flags & TCP_SYN) {
       if (this.state === 'syn-received') this.sendSynAck() // our SYN-ACK got lost? (can't happen, but harmless)
       return
@@ -392,7 +462,7 @@ class TcpConnection {
 
   /** Send what the guest's window allows; FIN once the host is done and everything is out. */
   private pump(): void {
-    if (this.state === 'connecting' || this.closed) return
+    if (this.state === 'connecting' || this.state === 'syn-sent' || this.closed) return
     while (this.backlogBytes > 0) {
       const room = this.guestWindow - seqDiff(this.sndNxt, this.sndUna)
       const n = Math.min(room, this.mss, this.backlogBytes)

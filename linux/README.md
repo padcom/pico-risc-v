@@ -134,9 +134,25 @@ networking. No admin rights or extra programs are involved.
 | `10.0.2.3`  | DNS, relayed to the host's resolver |
 
 The guest can make outgoing TCP connections and send UDP (including DNS) to
-anywhere the host can reach. What doesn't work:
-- **No incoming connections.** Nothing outside can connect in yet: there's no
-  port forwarding.
+anywhere the host can reach. Connections in come through **forwarded
+ports**: `npm start` forwards `localhost:2222` on your machine to Debian's
+port 22, so ssh works once Debian runs an ssh server:
+
+```sh
+apt install openssh-server        # in Debian, once
+ssh -p 2222 root@localhost        # on your machine
+```
+
+root logs in over ssh without a password, as on the console
+(`overlay/etc/ssh/sshd_config.d/emulator.conf`). Only your machine can
+connect: the forwarded port listens on `localhost`, not on your network. To
+forward other ports, run the emulator yourself with `--forward
+<host port>:<guest port>` (see below). If 2222 is taken (say, by a second
+emulator), the emulator says so and runs without it.
+
+What doesn't work:
+- **Only what's forwarded comes in.** Other ports can't be reached from
+  outside.
 - **`ping` goes through the host's `ping` command.** The emulator can't
   send ICMP itself (that needs root), so each echo request runs one `ping`
   on the host. Replies are real, but the times include starting that
@@ -175,6 +191,7 @@ preset. It boots exactly what you pass:
 | `--kernel <file>` | with firmware as `<image>`: the next stage (U-Boot, or a Linux kernel), loaded 2 MiB into RAM and entered in S-mode by OpenSBI |
 | `--disk <file>` | a raw disk image as `/dev/vda`; add `--snapshot` to discard writes |
 | `--net` | the network card on the user-mode NAT |
+| `--forward <host port>:<guest port>` | with `--net`: connections to `localhost:<host port>` reach the guest's `<guest port>` (repeatable) |
 | `--memory <MiB>` | RAM size (default 64) |
 | `--bootargs <string>` | the kernel command line (for a kernel booted directly) |
 
