@@ -188,12 +188,17 @@ export class Machine {
     if (this.nic) this.bus.map(MemoryMap.VIRTIO_NET, VirtioNet.SIZE, this.nic)
   }
 
-  /** DMA for devices: a view of guest RAM at a physical address. */
+  /**
+   * DMA for devices: a view of guest RAM at a physical address. The device may
+   * write through it, so the CPU forgets any instructions it decoded from
+   * there (they'd be stale).
+   */
   private guestMemory(addr: number, length: number): Uint8Array {
     const offset = addr - MemoryMap.RAM
     if (offset < 0 || offset + length > this.ram.size) {
       throw new RangeError(`DMA outside RAM: 0x${addr.toString(16)}+${length}`)
     }
+    this.cpu.codeWritten(addr, length)
     return this.ram.bytes.subarray(offset, offset + length)
   }
 

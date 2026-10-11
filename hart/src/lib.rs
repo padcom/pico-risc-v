@@ -11,6 +11,7 @@
 //! Register and CSR values cross over as 64-bit integers (BigInt in
 //! JavaScript).
 
+mod blocks;
 mod csr;
 mod fpu;
 mod hart;
@@ -56,6 +57,12 @@ pub extern "C" fn ram_alloc(base: u32, size: u32) -> *mut u8 {
     h.ram = vec![0u8; size as usize].leak().as_mut_ptr();
     h.ram_base = base as u64;
     h.ram_size = size as u64;
+    // The decoded-instruction cache, sized for it.
+    let pages = (size as usize).div_ceil(4096);
+    h.blocks = vec![blocks::EMPTY_BLOCK; blocks::BLOCKS];
+    h.ops = vec![blocks::NO_OP; blocks::OPS];
+    h.code_lines = vec![0; pages];
+    h.page_versions = vec![0; pages];
     h.ram
 }
 
@@ -69,6 +76,16 @@ pub extern "C" fn registers() -> *mut u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn fp_registers() -> *mut u64 {
     hart().f.as_mut_ptr()
+}
+
+/// A device wrote (or may have written) RAM at physical `pa..pa + len`.
+#[unsafe(no_mangle)]
+pub extern "C" fn code_written(pa: u64, len: u32) {
+    let h = hart();
+    let offset = pa.wrapping_sub(h.ram_base);
+    if offset < h.ram_size {
+        h.code_written(offset, (len as u64).min(h.ram_size - offset));
+    }
 }
 
 #[unsafe(no_mangle)]

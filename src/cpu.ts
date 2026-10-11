@@ -51,6 +51,7 @@ interface Core {
   registers(): number
   fp_registers(): number
   reset(pc: bigint): void
+  code_written(pa: bigint, length: number): void
   run(maxSteps: number): number
   step(): void
   stop(): void
@@ -175,6 +176,15 @@ export class CPU {
   /** Return to the power-on state and start executing at `pc`. */
   reset(pc: number): void {
     this.core.reset(u64(pc))
+  }
+
+  /**
+   * RAM at physical `addr..addr + length` has been (or may be) written other
+   * than by the CPU, e.g. by a device's DMA: decoded instructions from there
+   * are discarded. (Not needed before reset(), which discards them all.)
+   */
+  codeWritten(addr: number, length: number): void {
+    this.core.code_written(u64(addr), length)
   }
 
   /** Ask `run()` to return after the current instruction (call it from a device). */

@@ -8,7 +8,18 @@ the NAT, the machine and CLI) is TypeScript in `src/`; `src/cpu.ts` loads
 **What's here:** RV64GC (IMAFDC with Zicsr and Zifencei), machine,
 supervisor and user modes with trap delegation, and Sv39 paging with a TLB.
 Compressed (16-bit) instructions are expanded into the 32-bit instructions
-they stand for (a table lookup), then executed like those. (Earlier versions
+they stand for (a table lookup), then executed like those.
+
+`run()` executes code from a **decoded-instruction cache** (`blocks.rs`):
+basic blocks (the instructions up to the next jump, branch or system
+instruction, within a page) are decoded once, keyed by physical address, and
+then run as a tight loop, with one address translation and one interrupt
+check per block. The cache is coherent with memory: a write to a 64-byte line
+holding cached code, by the CPU or by a device (DMA, which the machine
+reports through `codeWritten`), retires the blocks of that page, so software
+never runs stale instructions, FENCE.I or not. `step()` is the plain
+interpreter: fetch, decode, execute one instruction; `run()` falls back to it
+for whatever a block can't do. (Earlier versions
 also did RV32; the code and the riscv-tests for it are in the git history.)
 
 Floating point (F and D) is IEEE 754 in software, with the
@@ -23,6 +34,7 @@ a zero of the same sign lost that sign (0 × −1 + −0 gave +0).
 
 - `src/hart.rs`: hart state, the run loop, traps and interrupts, and the
   instruction set
+- `src/blocks.rs`: the decoded-instruction cache
 - `src/memory.rs`: physical memory, and loads and stores
 - `src/mmu.rs`: Sv39 address translation, and the TLB
 - `src/fpu.rs`: floating point (F and D)
@@ -89,12 +101,13 @@ run executes exactly the same instructions:
 
 | | bare-metal | compressed | debian boot |
 |---|---|---|---|
-| this core, RV64GC | 240 MIPS | 225 MIPS | 145 MIPS, 124 s |
+| RV64GC, instruction by instruction | 240 MIPS | 225 MIPS | 145 MIPS, 124 s |
+| RV64GC, decoded-instruction cache | 460 MIPS | 455 MIPS | 266 MIPS, 63 s |
 
 Measured on an Apple Silicon Mac with Node 26. Earlier, when the core also
 did RV32 (see the git history), the TypeScript CPU it replaced ran the
 bare-metal benchmark at 66 MIPS, this core at 265 MIPS before compressed
-instructions and 238 MIPS with floating point. The compressed-instruction
-support costs some speed: fetching handles 2- and 4-byte instructions, and
-each compressed one is expanded (a table lookup). A cache of decoded
-instructions would win that back, and more.
+instructions and 238 MIPS with floating point. Compressed instructions cost
+some speed when executed one by one (fetching handles 2- and 4-byte
+instructions, and each compressed one is expanded); from the cache they run
+as fast as any other.

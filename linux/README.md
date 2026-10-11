@@ -43,7 +43,7 @@ The disk is Debian 13 (trixie)'s "nocloud" cloud image for riscv64. The
 machine has an RV64GC CPU with Sv39 virtual memory, what Debian's riscv64
 port requires, and 1 GiB of RAM.
 
-Debian reaches the login prompt in about 2 minutes. Log in as `root`, no
+Debian reaches the login prompt in about a minute. Log in as `root`, no
 password. `poweroff` shuts it down, and `npm start` exits with it; Ctrl-A
 then X quits the emulator at any time.
 
@@ -97,9 +97,10 @@ and the root file system). The emulator attaches it as a virtio block device,
   `disk.raw.bak`.
 
 Inside, it's ordinary Debian: `apt update` and `apt install <package>` fetch
-packages from Debian's mirrors through the emulator's network. Expect it to
-be slow, since apt works through Debian's whole package list on the emulated
-CPU: `apt update` takes about 2 minutes.
+packages from Debian's mirrors through the emulator's network. It's slower
+than on real hardware, since apt works through Debian's whole package list
+on the emulated CPU: `apt update` takes about 25 s, installing a small
+package such as `htop` a few seconds.
 
 ## The network
 

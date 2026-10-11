@@ -11,6 +11,7 @@ use crate::hart::{Hart, Result, Trap};
 // is kept in registers across them.
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "env")]
+#[allow(improper_ctypes)] // the hart only goes by as an opaque pointer
 unsafe extern "C" {
     /// A device read; returns the (unsigned) value, or -1 on a bus error.
     fn bus_read(hart: *mut Hart, addr: u32, width: u32) -> f64;
@@ -73,6 +74,7 @@ impl Hart {
                     4 => p.cast::<u32>().write_unaligned(value as u32),
                     _ => p.cast::<u64>().write_unaligned(value),
                 }
+                self.code_written(offset as u64, width as u64);
                 true
             },
             None => self.device_write(pa, width, value),

@@ -5,6 +5,7 @@
 //! (mepc/mcause/mtval, mtvec), or into S-mode when delegated through
 //! medeleg/mideleg (sepc/scause/stval, stvec).
 
+use crate::blocks::{Block, Op};
 use crate::csr::*;
 use crate::memory::Access;
 use crate::mmu::{Paging, TLB_EMPTY, TLB_SIZE};
@@ -28,7 +29,7 @@ pub type Result<T> = core::result::Result<T, Trap>;
 
 /// Not an exception: EBREAK with `break_on_ebreak` set, which stops `run()`
 /// with the pc left on the EBREAK.
-const STOP_AT_BREAKPOINT: u32 = u32::MAX;
+pub(crate) const STOP_AT_BREAKPOINT: u32 = u32::MAX;
 
 /// Why `run()` returned (src/cpu.ts maps these to its StopReason names).
 pub const LIMIT: u32 = 0;
@@ -152,6 +153,15 @@ pub struct Hart {
     pub(crate) tlb_vpn: [u64; TLB_SIZE],
     pub(crate) tlb_ppn: [u32; TLB_SIZE],
     pub(crate) tlb_flags: [u8; TLB_SIZE],
+
+    // The decoded-instruction cache (blocks.rs), set up with the RAM.
+    pub(crate) blocks: Vec<Block>,
+    pub(crate) ops: Vec<Op>,
+    pub(crate) ops_used: usize,
+    /// Per RAM page: which of its 64-byte lines hold cached code (a bit each)...
+    pub(crate) code_lines: Vec<u64>,
+    /// ...and a version, bumped when one of those is written.
+    pub(crate) page_versions: Vec<u32>,
 }
 
 impl Hart {
@@ -199,6 +209,11 @@ impl Hart {
             tlb_vpn: [TLB_EMPTY; TLB_SIZE],
             tlb_ppn: [0; TLB_SIZE],
             tlb_flags: [0; TLB_SIZE],
+            blocks: Vec::new(),
+            ops: Vec::new(),
+            ops_used: 0,
+            code_lines: Vec::new(),
+            page_versions: Vec::new(),
         }
     }
 
@@ -234,17 +249,27 @@ impl Hart {
         self.waiting = false;
         self.reservation = NO_RESERVATION;
         self.flush_tlb();
+        self.flush_blocks(); // RAM was (re)loaded without the hart seeing it
+        self.code_lines.fill(0);
         self.update_translation();
     }
 
-    /// Execute up to `max_steps` steps (instructions or trap entries).
+    /// Execute up to `max_steps` steps (instructions or trap entries): whole
+    /// decoded blocks where possible (blocks.rs), else one at a time.
     pub fn run(&mut self, max_steps: u32) -> u32 {
         self.stop_reason = 0;
-        for _ in 0..max_steps {
+        let mut remaining = max_steps;
+        while remaining > 0 {
             if self.waiting && self.mip & self.mie == 0 {
                 return WFI_STALL;
             }
-            self.step();
+            match self.run_block(remaining) {
+                0 => {
+                    self.step();
+                    remaining -= 1;
+                }
+                steps => remaining -= steps,
+            }
             if self.stop_reason != 0 {
                 return self.stop_reason;
             }
@@ -320,7 +345,7 @@ impl Hart {
         false
     }
 
-    fn enter_trap(&mut self, cause: u32, interrupt: bool, epc: u64, tval: u64) {
+    pub(crate) fn enter_trap(&mut self, cause: u32, interrupt: bool, epc: u64, tval: u64) {
         let delegated = (if interrupt { self.mideleg } else { self.medeleg }) & (1 << cause) != 0;
         let cause_value = if interrupt { 1 << 63 | cause as u64 } else { cause as u64 };
         if self.priv_ <= PRIV_S && delegated {
@@ -553,6 +578,12 @@ impl Hart {
             _ => return Err(illegal(inst)),
         }
         Ok(next_pc)
+    }
+
+    /// `execute`, not inlined: for the decoded blocks' less common instructions.
+    #[inline(never)]
+    pub(crate) fn execute_generic(&mut self, inst: u32, pc: u64, next_pc: u64) -> Result<u64> {
+        self.execute(inst, pc, next_pc)
     }
 
     /// ECALL / EBREAK / MRET / SRET / WFI / SFENCE.VMA; returns the next pc.

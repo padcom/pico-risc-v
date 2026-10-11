@@ -164,6 +164,47 @@ describe('Machine.run with the virtual clock', () => {
   })
 })
 
+describe('decoded-instruction cache', () => {
+  // A function at RAM + 0x40 returning a constant (addi a0, zero, n; ret),
+  // called, patched by the program itself (a plain store, no FENCE.I) and
+  // called again: the second call must run the new instruction.
+  const RETURN = (n: number) => a.addi(10, 0, n)
+  const program = [
+    a.auipc(5, 0), // 0x00: t0 = RAM
+    a.jal(1, 0x3c), // 0x04: call 0x40
+    a.addi(9, 10, 0), // 0x08: s1 = the first call's result
+    a.lw(6, 5, 0x80), // 0x0c: t1 = the new instruction
+    a.sw(6, 5, 0x40), // 0x10: patch the function
+    a.jal(1, 0x2c), // 0x14: call 0x40 again
+    a.lui(5, MemoryMap.SYSCON), a.lui(6, 0x5000), a.addi(6, 6, 0x555), a.sw(6, 5, 0), // 0x18: power off
+  ]
+  const boot = () => {
+    const m = new Machine({ ramSize: 1024 * 1024, clock: 'virtual' })
+    const image = new Uint8Array(0x84)
+    image.set(toBytes(program))
+    image.set(toBytes([RETURN(1), a.jalr(0, 1, 0)]), 0x40)
+    image.set(toBytes([RETURN(2)]), 0x80)
+    m.boot(image)
+    return m
+  }
+
+  it('sees code the program modifies, without FENCE.I', () => {
+    const m = boot()
+    expect(m.run(10_000)).toBe('poweroff')
+    expect([m.cpu.x[9], m.cpu.x[10]]).toEqual([1, 2])
+  })
+
+  it('sees code a device writes (DMA), once told through codeWritten', () => {
+    const m = boot()
+    m.run(10_000) // decodes (and caches) the function, as patched: returns 2
+    m.ram.write32(0x40, RETURN(3)) // as a device would write it...
+    m.cpu.codeWritten(MemoryMap.RAM + 0x40, 4) // ...through Machine's DMA, which says so
+    m.cpu.write('pc', MemoryMap.RAM)
+    expect(m.run(10_000)).toBe('poweroff')
+    expect([m.cpu.x[9], m.cpu.x[10]]).toEqual([3, 2])
+  })
+})
+
 describe('Syscon', () => {
   it('reports power-off and reboot commands', () => {
     const seen: string[] = []
