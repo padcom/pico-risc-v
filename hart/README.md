@@ -100,7 +100,7 @@ run executes exactly the same instructions:
 - **debian:** Debian's cloud image boots to the login prompt (OpenSBI,
   U-Boot, GRUB, Debian's kernel, systemd; with a fixed date and random
   seed), from the disk as built (`images/debian/pristine.raw`, not the
-  `disk.raw` you use, so your changes don't change it): about 18 billion
+  `disk.raw` you use, so your changes don't change it): about 12 billion
   instructions.
 
 | | bare-metal | compressed | debian boot |
@@ -108,6 +108,7 @@ run executes exactly the same instructions:
 | RV64GC, instruction by instruction | 240 MIPS | 225 MIPS | 145 MIPS, 124 s |
 | RV64GC, decoded-instruction cache | 460 MIPS | 455 MIPS | 260 MIPS, 69 s |
 | ...branches inside blocks, cheaper loads and stores | 505 MIPS | 505 MIPS | 300 MIPS, 60 s |
+| ...and Debian's boot trimmed (linux/README.md) | 505 MIPS | 505 MIPS | 284 MIPS, 43 s |
 
 Measured on an Apple Silicon Mac with Node 26. Earlier, when the core also
 did RV32 (see the git history), the TypeScript CPU it replaced ran the

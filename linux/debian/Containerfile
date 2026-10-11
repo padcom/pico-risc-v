@@ -1,11 +1,12 @@
 # Build environment for linux/debian/build.sh (used through linux/podman.sh):
 # downloading Debian's image and firmware packages (curl, apt), checking and
-# adapting the disk image (e2fsprogs, sfdisk).
+# adapting the disk image (e2fsprogs, sfdisk), trimming its initrd (cpio,
+# zstd, kmod).
 FROM docker.io/library/debian:13
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates curl xz-utils e2fsprogs fdisk python3 \
+      ca-certificates curl xz-utils e2fsprogs fdisk python3 cpio zstd kmod \
  && rm -rf /var/lib/apt/lists/*
 
 # Tells linux/debian/build.sh it is already inside the build container.

@@ -122,6 +122,6 @@ cat <<EOF
   npm start
 
 The first run sets Debian up (it downloads Debian's cloud image and
-firmware, a few minutes), then boots it; that takes about a minute. Log in
+firmware, a few minutes), then boots it; that takes under a minute. Log in
 as root, no password; poweroff quits. See linux/README.md for more.
 EOF

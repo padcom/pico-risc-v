@@ -43,7 +43,7 @@ The disk is Debian 13 (trixie)'s "nocloud" cloud image for riscv64. The
 machine has an RV64GC CPU with Sv39 virtual memory, what Debian's riscv64
 port requires, and 1 GiB of RAM.
 
-Debian reaches the login prompt in about a minute. Log in as `root`, no
+Debian reaches the login prompt in about 45 seconds. Log in as `root`, no
 password. `poweroff` shuts it down, and `npm start` exits with it; Ctrl-A
 then X quits the emulator at any time.
 
@@ -65,16 +65,31 @@ in a Podman container, in a few minutes:
 2. Takes OpenSBI's `fw_dynamic.bin` and U-Boot's `u-boot.bin` out of
    Debian's packages.
 3. Adapts the disk for the emulator, editing the root file system inside
-   the image (with `debugfs`, no mounting):
+   the image (with `debugfs`, no mounting). On an emulated CPU everything
+   a distribution does at boot takes long, so the boot is trimmed to what
+   this machine needs:
    - root logs in without a password
-   - switched off (masked), because on an emulated CPU they take a lot of
-     time: `systemd-firstboot` (asks for locale, timezone and password on
-     the console), AppArmor (compiles its profiles at every boot, half a
-     minute) and apt's automatic updates (apt's timers and
-     unattended-upgrades, which would run apt in the background for minutes)
+   - switched off (masked): `systemd-firstboot` (asks for locale, timezone
+     and password on the console), AppArmor (compiles its profiles at every
+     boot, half a minute), apt's automatic updates (apt's timers and
+     unattended-upgrades, which would run apt in the background for
+     minutes), and boot-time chores for things the machine doesn't have or
+     need: loading the graphics stack (`modprobe@drm`), GRUB's
+     successful-boot record, LVM snapshot cleanup (`e2scrub_reap`),
+     foreign executable formats (`systemd-binfmt`), NTP (`timesyncd`; the
+     emulator's clock is the host's)
+   - `/boot/efi` (the EFI system partition) is mounted when first used,
+     not checked and mounted at every boot: only GRUB updates need it
    - the files in `linux/debian/overlay/`: the hostname, GRUB not waiting
-     on its menu, and no package description translations for apt (which
-     saves a third of `apt update`'s time)
+     on its menu, no package description translations for apt (which saves
+     a third of `apt update`'s time), the Wi-Fi stack blacklisted (there's
+     no wireless hardware, but systemd-networkd's request for it loads it:
+     over 10 s), and `MODULES=dep` for initrds Debian makes later (after a
+     kernel upgrade)
+   - the initrd trimmed to what mounting the root file system takes: from
+     599 modules (nearly every storage and file system driver, 39 MB) to the
+     7 for the virtio disk and ext4, stored uncompressed, without udev's
+     hardware database: 24 MB that the kernel unpacks without decompressing
 4. Grows the disk to 8 GB (`DEBIAN_DISK_SIZE`); the root file system grows
    into it on the first boot.
 
