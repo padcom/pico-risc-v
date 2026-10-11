@@ -13,7 +13,8 @@ import { UserNetwork } from './net/user-network.js'
 /** Set up by linux/debian/build.sh (npm start runs it). */
 const FIRMWARE = new URL('../images/debian/fw_dynamic.bin', import.meta.url)
 const UBOOT = new URL('../images/debian/u-boot.bin', import.meta.url)
-const DISK = fileURLToPath(new URL('../images/debian/disk.raw', import.meta.url))
+// The disk as built (not disk.raw, the one npm start boots, which you change).
+const DISK = fileURLToPath(new URL('../images/debian/pristine.raw', import.meta.url))
 /** Instructions to wait for any one thing at the shell (logging in alone takes over 1 billion). */
 const BUDGET = 5_000_000_000
 

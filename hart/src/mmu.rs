@@ -28,6 +28,11 @@ pub const TLB_SIZE: usize = 4096;
 /// Marks an empty TLB entry (virtual page numbers have at most 52 bits).
 pub const TLB_EMPTY: u64 = u64::MAX;
 
+// tlb_ok: in the low bits whether loads and stores are allowed, above them
+// the context that was checked for (Hart::data_ok_tag); 0: not checked.
+pub const DATA_LOAD_OK: u8 = 1;
+pub const DATA_STORE_OK: u8 = 2;
+
 /// Address translation modes (from satp).
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -37,8 +42,40 @@ pub enum Paging {
 }
 
 impl Hart {
+    /// Translate a load's or store's `vaddr` (the access within one page), for
+    /// the current data privilege. Each TLB entry remembers whether loads and
+    /// stores were allowed the last time it was checked, and in which context
+    /// (`data_ok_tag`: privilege, SUM, MXR); while that's the current one,
+    /// that's the whole check.
+    #[inline(always)]
+    pub(crate) fn translate_data(&mut self, vaddr: u64, access: Access) -> Result<u64> {
+        let vpn = vaddr >> 12;
+        let i = vpn as usize & (TLB_SIZE - 1);
+        let ok = self.tlb_ok[i];
+        let bit = if access == Access::Store { DATA_STORE_OK } else { DATA_LOAD_OK };
+        if self.tlb_vpn[i] == vpn && ok & !(DATA_LOAD_OK | DATA_STORE_OK) == self.data_ok_tag && ok & bit != 0 {
+            return Ok((self.tlb_ppn[i] as u64) << 12 | (vaddr & 0xfff));
+        }
+        self.translate_data_slow(vaddr, access)
+    }
+
+    #[inline(never)]
+    fn translate_data_slow(&mut self, vaddr: u64, access: Access) -> Result<u64> {
+        let pa = self.translate(vaddr, access, self.data_priv)?;
+        let i = (vaddr >> 12) as usize & (TLB_SIZE - 1);
+        if self.tlb_vpn[i] == vaddr >> 12 {
+            let flags = self.tlb_flags[i] as u64;
+            let load = self.permitted(flags, Access::Load, self.data_priv);
+            // (A store to a clean page also has to go through the walk, to set D.)
+            let store = flags & PTE_D != 0 && self.permitted(flags, Access::Store, self.data_priv);
+            self.tlb_ok[i] = self.data_ok_tag | if load { DATA_LOAD_OK } else { 0 } | if store { DATA_STORE_OK } else { 0 };
+        }
+        Ok(pa)
+    }
+
     pub(crate) fn flush_tlb(&mut self) {
         self.tlb_vpn.fill(TLB_EMPTY);
+        self.fetch_vpage = TLB_EMPTY;
     }
 
     /// Translate `vaddr` for an access by `priv_` (the effective privilege: for
@@ -125,6 +162,7 @@ impl Hart {
         self.tlb_vpn[i] = vpn;
         self.tlb_ppn[i] = ppn as u32;
         self.tlb_flags[i] = pte as u8;
+        self.tlb_ok[i] = 0;
         Ok(ppn << 12 | (vaddr & 0xfff))
     }
 

@@ -16,7 +16,9 @@
 # linux/debian/overlay/), and is grown to DEBIAN_DISK_SIZE; the root file
 # system grows into it on the first boot.
 #
-# → images/debian/disk.raw, fw_dynamic.bin (OpenSBI), u-boot.bin, VERSIONS
+# → images/debian/pristine.raw (the disk as built: npm start gives you a copy
+#   to use, disk.raw; tests and benchmarks boot this one, unchanged),
+#   fw_dynamic.bin (OpenSBI), u-boot.bin, VERSIONS
 #
 # Runs in a Podman container (linux/podman.sh, linux/debian/Containerfile);
 # set NATIVE=1 to run directly on a Linux host with curl, xz, e2fsprogs,
@@ -131,12 +133,12 @@ sfdisk -q --relocate gpt-bak-std disk.raw 2>/dev/null
 echo ', +' | sfdisk -q --no-reread --no-tell-kernel -N 1 disk.raw
 
 mkdir -p "$OUT_DIR"
-cp --sparse=always disk.raw "$OUT_DIR/disk.raw"
+cp --sparse=always disk.raw "$OUT_DIR/pristine.raw"
 cp fw_dynamic.bin u-boot.bin VERSIONS "$OUT_DIR/"
 # (Checked again where it landed: the project directory may be a shared folder,
 # e.g. in Podman's VM on macOS.)
-e2fsck -fn "$OUT_DIR/disk.raw?offset=$offset" >/dev/null || die "images/debian/disk.raw has errors after copying it there"
+e2fsck -fn "$OUT_DIR/pristine.raw?offset=$offset" >/dev/null || die "images/debian/pristine.raw has errors after copying it there"
 # What this was built from; `npm start` rebuilds when it changes.
 bash "$ROOT/linux/inputs-hash.sh" >"$OUT_DIR/.inputs-hash"
-step "Debian ready in images/debian ($(du -h "$OUT_DIR/disk.raw" | cut -f1) used of $SIZE):"
+step "Debian ready in images/debian ($(du -h "$OUT_DIR/pristine.raw" | cut -f1) used of $SIZE):"
 sed 's/^/    /' "$OUT_DIR/VERSIONS"

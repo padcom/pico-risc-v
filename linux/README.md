@@ -78,15 +78,18 @@ in a Podman container, in a few minutes:
 4. Grows the disk to 8 GB (`DEBIAN_DISK_SIZE`); the root file system grows
    into it on the first boot.
 
-The results are in `images/debian/`: `disk.raw`, `fw_dynamic.bin`,
-`u-boot.bin`, and `VERSIONS`, which says which image and packages they came
-from. The disk file is sparse: about 1 GB on your disk.
+The results are in `images/debian/`: `pristine.raw` (the disk as built),
+`fw_dynamic.bin`, `u-boot.bin`, and `VERSIONS`, which says which image and
+packages they came from. The disk is sparse: about 1 GB on your disk.
 
 ## The disk
 
-`images/debian/disk.raw` is a raw disk image (GPT: an EFI system partition
-and the root file system). The emulator attaches it as a virtio block device,
-`/dev/vda`.
+`images/debian/disk.raw` is the disk `npm start` boots, a raw disk image
+(GPT: an EFI system partition and the root file system), attached as a virtio
+block device, `/dev/vda`. It starts as a copy of `pristine.raw` (on macOS a
+clone, which takes no extra space until it changes); `npm test` and `npm run
+bench` boot `pristine.raw` itself, read-only, so what you do in Debian
+doesn't change their results.
 
 - **Writes go to the file.** Whatever you change in the guest is still there
   next boot, like a real disk.
@@ -94,7 +97,8 @@ and the root file system). The emulator attaches it as a virtio block device,
   throws them away on exit; the file isn't touched.
 - **Setting Debian up again replaces `disk.raw`**, so anything changed in the
   guest is lost. When `npm start` does it, it first keeps the old disk as
-  `disk.raw.bak`.
+  `disk.raw.bak`. To start over with a fresh disk, delete `disk.raw`: the
+  next `npm start` copies `pristine.raw` again.
 
 Inside, it's ordinary Debian: `apt update` and `apt install <package>` fetch
 packages from Debian's mirrors through the emulator's network. It's slower

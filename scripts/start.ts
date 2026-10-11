@@ -7,8 +7,10 @@
  * 1. The emulator: its CPU core (hart/, Rust → build/hart.wasm; cargo
  *    rebuilds only on changes), and dist/ when any src/ file is newer.
  * 2. Debian (linux/debian/build.sh → images/debian/), when it's missing or
- *    linux/debian/ changed (see linux/inputs-hash.sh). That replaces the
- *    disk, so the old one is kept as disk.raw.bak.
+ *    linux/debian/ changed (see linux/inputs-hash.sh). The build makes
+ *    pristine.raw, the disk as built; the disk you use, disk.raw, starts as a
+ *    copy of it. A rebuild replaces disk.raw too, keeping the old one as
+ *    disk.raw.bak.
  * 3. Boot: OpenSBI at the start of RAM, U-Boot 2 MiB later; U-Boot starts
  *    GRUB from the disk, GRUB Debian's kernel. eth0 on the user-mode network.
  */
@@ -17,7 +19,7 @@ import { existsSync, readdirSync, readFileSync, renameSync, statSync } from 'nod
 import { buildWasm } from './build-wasm.ts'
 
 const DIR = 'images/debian'
-const FILES = ['fw_dynamic.bin', 'u-boot.bin', 'disk.raw']
+const FILES = ['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw']
 const ARGS = ['--memory', '1024', '--kernel', `${DIR}/u-boot.bin`, '--disk', `${DIR}/disk.raw`, '--net', `${DIR}/fw_dynamic.bin`]
 
 const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'inherit' })
@@ -33,12 +35,16 @@ if (emulatorStale()) {
 const reason = imageStale()
 if (reason) {
   console.log(`[start] ${reason}: building it (linux/debian/build.sh)`)
+  run('bash', ['linux/debian/build.sh'])
   if (existsSync(`${DIR}/disk.raw`)) {
     // Moved, not copied: instant, and the (sparse) file stays sparse.
     renameSync(`${DIR}/disk.raw`, `${DIR}/disk.raw.bak`)
-    console.log(`[start] the rebuild replaces ${DIR}/disk.raw; the old one is kept as disk.raw.bak`)
+    console.log(`[start] a new ${DIR}/disk.raw replaces yours; the old one is kept as disk.raw.bak`)
   }
-  run('bash', ['linux/debian/build.sh'])
+}
+if (!existsSync(`${DIR}/disk.raw`)) {
+  // A sparse copy: on macOS a clone (instant, shares the unchanged blocks).
+  run('cp', process.platform === 'darwin' ? ['-c', `${DIR}/pristine.raw`, `${DIR}/disk.raw`] : ['--sparse=always', `${DIR}/pristine.raw`, `${DIR}/disk.raw`])
 }
 
 // 3. Boot.

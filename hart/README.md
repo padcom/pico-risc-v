@@ -11,10 +11,12 @@ Compressed (16-bit) instructions are expanded into the 32-bit instructions
 they stand for (a table lookup), then executed like those.
 
 `run()` executes code from a **decoded-instruction cache** (`blocks.rs`):
-basic blocks (the instructions up to the next jump, branch or system
-instruction, within a page) are decoded once, keyed by physical address, and
-then run as a tight loop, with one address translation and one interrupt
-check per block. The cache is coherent with memory: a write to a 64-byte line
+blocks (the instructions up to the next jump or system instruction, within a
+page; a conditional branch leaves the block when taken) are decoded once,
+keyed by physical address, and then run as a tight loop, with one interrupt
+check per block and, while consecutive blocks are on the same page, no
+address translation. Loads and stores check permissions once per TLB entry
+and privilege context, not on every access. The cache is coherent with memory: a write to a 64-byte line
 holding cached code, by the CPU or by a device (DMA, which the machine
 reports through `codeWritten`), retires the blocks of that page, so software
 never runs stale instructions, FENCE.I or not. `step()` is the plain
@@ -97,12 +99,15 @@ run executes exactly the same instructions:
 - **compressed:** the same program built with compressed instructions.
 - **debian:** Debian's cloud image boots to the login prompt (OpenSBI,
   U-Boot, GRUB, Debian's kernel, systemd; with a fixed date and random
-  seed): about 18 billion instructions.
+  seed), from the disk as built (`images/debian/pristine.raw`, not the
+  `disk.raw` you use, so your changes don't change it): about 18 billion
+  instructions.
 
 | | bare-metal | compressed | debian boot |
 |---|---|---|---|
 | RV64GC, instruction by instruction | 240 MIPS | 225 MIPS | 145 MIPS, 124 s |
-| RV64GC, decoded-instruction cache | 460 MIPS | 455 MIPS | 266 MIPS, 63 s |
+| RV64GC, decoded-instruction cache | 460 MIPS | 455 MIPS | 260 MIPS, 69 s |
+| ...branches inside blocks, cheaper loads and stores | 505 MIPS | 505 MIPS | 300 MIPS, 60 s |
 
 Measured on an Apple Silicon Mac with Node 26. Earlier, when the core also
 did RV32 (see the git history), the TypeScript CPU it replaced ran the

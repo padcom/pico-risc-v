@@ -8,7 +8,7 @@
 use crate::blocks::{Block, Op};
 use crate::csr::*;
 use crate::memory::Access;
-use crate::mmu::{Paging, TLB_EMPTY, TLB_SIZE};
+use crate::mmu::{DATA_LOAD_OK, DATA_STORE_OK, Paging, TLB_EMPTY, TLB_SIZE};
 use crate::rvc;
 
 /// A synchronous exception: aborts the instruction, then the hart enters the
@@ -91,8 +91,9 @@ const SFENCE_VMA: u32 = 0x12000073; // funct7 0001001, rs2/rs1 vary
 
 #[repr(C)]
 pub struct Hart {
-    /// x0..x31; x0 is re-zeroed after every instruction.
-    pub x: [u64; 32],
+    /// x0..x31; x0 is re-zeroed after every instruction. (The 33rd is where
+    /// decoded instructions write x0: blocks::SINK.)
+    pub x: [u64; 33],
     pub pc: u64,
     pub priv_: u32,
     /// f0..f31 (single-precision values NaN-boxed), and fcsr's two fields.
@@ -153,11 +154,21 @@ pub struct Hart {
     pub(crate) tlb_vpn: [u64; TLB_SIZE],
     pub(crate) tlb_ppn: [u32; TLB_SIZE],
     pub(crate) tlb_flags: [u8; TLB_SIZE],
+    /// Whether loads / stores may use the entry, as last checked (mmu.rs: translate_data).
+    pub(crate) tlb_ok: [u8; TLB_SIZE],
+    /// The context loads and stores are checked in: the data privilege, SUM
+    /// and MXR, in tlb_ok's format.
+    pub(crate) data_ok_tag: u8,
 
     // The decoded-instruction cache (blocks.rs), set up with the RAM.
     pub(crate) blocks: Vec<Block>,
     pub(crate) ops: Vec<Op>,
     pub(crate) ops_used: usize,
+    /// The virtual page blocks were last run from, and its physical page:
+    /// consecutive blocks are mostly on the same one, which then needs no
+    /// translating. Forgotten when translation or privilege changes.
+    pub(crate) fetch_vpage: u64,
+    pub(crate) fetch_ppage: u64,
     /// Per RAM page: which of its 64-byte lines hold cached code (a bit each)...
     pub(crate) code_lines: Vec<u64>,
     /// ...and a version, bumped when one of those is written.
@@ -167,7 +178,7 @@ pub struct Hart {
 impl Hart {
     pub const fn new() -> Hart {
         Hart {
-            x: [0; 32],
+            x: [0; 33],
             pc: 0,
             priv_: PRIV_M,
             f: [0; 32],
@@ -209,9 +220,13 @@ impl Hart {
             tlb_vpn: [TLB_EMPTY; TLB_SIZE],
             tlb_ppn: [0; TLB_SIZE],
             tlb_flags: [0; TLB_SIZE],
+            tlb_ok: [0; TLB_SIZE],
+            data_ok_tag: 0,
             blocks: Vec::new(),
             ops: Vec::new(),
             ops_used: 0,
+            fetch_vpage: TLB_EMPTY,
+            fetch_ppage: 0,
             code_lines: Vec::new(),
             page_versions: Vec::new(),
         }
@@ -219,7 +234,7 @@ impl Hart {
 
     /// Return to the power-on state and start executing at `pc`.
     pub fn reset(&mut self, pc: u64) {
-        self.x = [0; 32];
+        self.x = [0; 33];
         self.f = [0; 32];
         self.fflags = 0;
         self.frm = 0;
@@ -376,6 +391,7 @@ impl Hart {
     /// Recompute which accesses need translating, and how; call after any
     /// change to priv, mstatus or satp.
     pub(crate) fn update_translation(&mut self) {
+        self.fetch_vpage = TLB_EMPTY;
         self.paging = if self.satp >> SATP_MODE_SHIFT == SATP_MODE_SV39 { Paging::Sv39 } else { Paging::Bare };
         let paging = self.paging != Paging::Bare;
         self.data_priv = if self.priv_ == PRIV_M && self.mstatus & MSTATUS_MPRV != 0 {
@@ -385,6 +401,11 @@ impl Hart {
         };
         self.translate_fetch = paging && self.priv_ != PRIV_M;
         self.translate_data = paging && self.data_priv != PRIV_M;
+        // Nonzero, and never with the ok bits set.
+        let sum = if self.mstatus & MSTATUS_SUM != 0 { 4 } else { 0 };
+        let mxr = if self.mstatus & MSTATUS_MXR != 0 { 8 } else { 0 };
+        let context = self.data_priv as u8 | sum | mxr;
+        self.data_ok_tag = (context | 0x10) << 2 & !(DATA_LOAD_OK | DATA_STORE_OK);
     }
 
     /// Execute one instruction (a compressed one expanded); returns the next

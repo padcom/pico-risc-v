@@ -173,6 +173,24 @@ describe('Sv39 address translation', () => {
     expect(cpu.x[10]).toBe(42)
   })
 
+  it('a permission checked once is checked again when SUM changes (same page, same TLB entry)', () => {
+    // VA + 4K: its TLB entry isn't the code's (VA's would be, and every fetch
+    // would replace it), so the second load finds the first one's.
+    const r = run([a.lw(10, 11, 0), a.addi(12, 0, 0), a.csrrc(0, Csr.sstatus, 13), a.lw(12, 11, 0)], {
+      mode: Priv.Supervisor,
+      mstatus: MSTATUS_SUM,
+      setup: (cpu, ram) => {
+        ram.write32(L0 + 8, pte(3, V | R | W | U))
+        ram.write32(0x3000, 42)
+        cpu.x[11] = VA + 0x1000
+        cpu.x[13] = MSTATUS_SUM
+      },
+    })
+    expect(r.cpu.x[10]).toBe(42) // with SUM
+    expectMachineTrap(r, TrapCause.LoadPageFault, VA + 0x1000) // and without
+    expect(r.cpu.mepc).toBe(CODE + 12)
+  })
+
   it('MXR makes execute-only pages readable', () => {
     const execOnly = (cpu: CPU, ram: RAM) => {
       ram.write32(L0, pte(3, V | X))

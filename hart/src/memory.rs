@@ -166,7 +166,7 @@ impl Hart {
         } else if (vaddr & 0xfff) + width as u64 > 0x1000 {
             return self.load_split(vaddr, width);
         } else {
-            self.translate(vaddr, Access::Load, self.data_priv)?
+            self.translate_data(vaddr, Access::Load)?
         };
         self.phys_read(pa, width).ok_or(Trap::new(LOAD_ACCESS_FAULT, vaddr))
     }
@@ -187,7 +187,7 @@ impl Hart {
         } else if (vaddr & 0xfff) + width as u64 > 0x1000 {
             return self.store_split(vaddr, width, value);
         } else {
-            self.translate(vaddr, Access::Store, self.data_priv)?
+            self.translate_data(vaddr, Access::Store)?
         };
         if self.phys_write(pa, width, value) { Ok(()) } else { Err(Trap::new(STORE_ACCESS_FAULT, vaddr)) }
     }

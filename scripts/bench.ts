@@ -6,7 +6,8 @@
  *   compressed  the same, built with compressed instructions (RV64IMC)
  *   debian      Debian's cloud image (OpenSBI, U-Boot, GRUB, Debian's kernel and
  *               initrd, systemd; Sv39 paging, the virtio disk as a read-only
- *               snapshot, no network card) booting to the login prompt
+ *               snapshot, no network card) booting to the login prompt, from
+ *               images/debian/pristine.raw (as built, not the disk you use)
  *
  * All run on the virtual clock (Debian with a fixed date and random seed), so
  * every run executes exactly the same instructions; the numbers are comparable
@@ -40,7 +41,7 @@ function bareMetal(program = 'bench'): Result {
 }
 
 function debian(): Result | undefined {
-  const files = ['fw_dynamic.bin', 'u-boot.bin', 'disk.raw'].map(f => new URL(`images/debian/${f}`, root))
+  const files = ['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].map(f => new URL(`images/debian/${f}`, root))
   if (!files.every(existsSync)) return undefined
   const [firmware, uboot, disk] = files as [URL, URL, URL]
 

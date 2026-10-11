@@ -1,7 +1,8 @@
 //! The decoded-instruction cache: basic blocks of pre-decoded instructions.
 //!
-//! A block is the instructions from some address up to the next jump, branch
-//! or system instruction, within one page (at most `MAX_BLOCK` of them). It's
+//! A block is the instructions from some address up to the next jump or
+//! system instruction, within one page (at most `MAX_BLOCK` of them); a
+//! conditional branch leaves it when taken. It's
 //! decoded once, keyed by its physical address, then run as a tight loop: one
 //! address translation and one interrupt check per block instead of per
 //! instruction, no fetching, and decoding reduced to a lookup. Common integer
@@ -48,11 +49,15 @@ pub const EMPTY_BLOCK: Block = Block { pa: 0, version: 0, start: 0, count: 0 };
 #[derive(Clone, Copy)]
 pub struct Op {
     kind: Kind,
+    /// The destination register; for x0, `SINK` (fast kinds only).
     rd: u8,
     rs1: u8,
     rs2: u8,
     /// 2 (compressed) or 4.
     len: u8,
+    /// Loads, stores and `Execute*`: they may reach devices (which can read
+    /// the instruction count and stop the CPU) or read the counters.
+    sync: bool,
     /// The immediate, sign-extended from 32 bits when used (shift amounts for
     /// shifts). For `Execute` / `ExecuteEnd`: a compressed instruction's own
     /// 16 bits (an illegal-instruction trap reports those).
@@ -61,7 +66,11 @@ pub struct Op {
     inst: u32,
 }
 
-pub const NO_OP: Op = Op { kind: Kind::Execute, rd: 0, rs1: 0, rs2: 0, len: 0, imm: 0, inst: 0 };
+pub const NO_OP: Op = Op { kind: Kind::Execute, rd: 0, rs1: 0, rs2: 0, len: 0, sync: true, imm: 0, inst: 0 };
+
+/// Where decoded instructions write x0: a spare register after x31, so x0
+/// stays 0 without being cleared after each.
+pub const SINK: u8 = 32;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -73,8 +82,10 @@ enum Kind {
     Addiw, Slliw, Srliw, Sraiw, Addw, Subw, Sllw, Srlw, Sraw,
     Mulw, Divw, Divuw, Remw, Remuw,
     Lb, Lh, Lw, Ld, Lbu, Lhu, Lwu, Sb, Sh, Sw, Sd,
+    // Branches leave the block when taken; it continues after them.
+    Beq, Bne, Blt, Bge, Bltu, Bgeu,
     // The rest end a block.
-    Beq, Bne, Blt, Bge, Bltu, Bgeu, Jal, Jalr,
+    Jal, Jalr,
     /// Through `execute` (floating point, atomics, fences), continuing the block.
     Execute,
     /// Through `execute`, ending the block: system instructions (CSRs, traps,
@@ -87,7 +98,11 @@ enum Kind {
 
 impl Kind {
     fn ends_block(self) -> bool {
-        self as u8 >= Kind::Beq as u8 && self != Kind::Execute
+        self as u8 >= Kind::Jal as u8 && self != Kind::Execute
+    }
+
+    fn sync(self) -> bool {
+        (Kind::Lb as u8..=Kind::Sd as u8).contains(&(self as u8)) || self as u8 >= Kind::Execute as u8
     }
 }
 
@@ -98,8 +113,9 @@ fn decode(inst: u32, len: u8, raw: u32) -> Op {
     let rs2 = ((inst >> 20) & 0x1f) as u8;
     let funct3 = (inst >> 12) & 7;
     let funct7 = inst >> 25;
-    let op = |kind, imm: u64| Op { kind, rd, rs1, rs2, len, imm: imm as i32, inst };
-    let generic = |kind| Op { kind, rd, rs1, rs2, len, imm: raw as i32, inst };
+    let fast_rd = if rd == 0 { SINK } else { rd };
+    let op = |kind: Kind, imm: u64| Op { kind, rd: fast_rd, rs1, rs2, len, sync: kind.sync(), imm: imm as i32, inst };
+    let generic = |kind: Kind| Op { kind, rd, rs1, rs2, len, sync: true, imm: raw as i32, inst };
     use Kind::*;
     match inst & 0x7f {
         0x13 => {
@@ -235,13 +251,19 @@ impl Hart {
             return 0; // no cache, or an interrupt to look at first
         }
         let pc = self.pc;
-        let pa = if self.translate_fetch {
+        let pa = if !self.translate_fetch {
+            pc
+        } else if pc >> 12 == self.fetch_vpage {
+            self.fetch_ppage << 12 | (pc & 0xfff)
+        } else {
             match self.translate(pc, Access::Fetch, self.priv_) {
-                Ok(pa) => pa,
+                Ok(pa) => {
+                    self.fetch_vpage = pc >> 12;
+                    self.fetch_ppage = pa >> 12;
+                    pa
+                }
                 Err(_) => return 0, // the regular path raises the fault
             }
-        } else {
-            pc
         };
         let offset = pa.wrapping_sub(self.ram_base);
         if offset >= self.ram_size {
@@ -286,7 +308,7 @@ impl Hart {
                 decode(inst, 4, 0)
             } else {
                 match rvc::expanded(low) {
-                    0 => Op { kind: Kind::Illegal, rd: 0, rs1: 0, rs2: 0, len: 2, imm: low as i32, inst: 0 },
+                    0 => Op { kind: Kind::Illegal, rd: 0, rs1: 0, rs2: 0, len: 2, sync: true, imm: low as i32, inst: 0 },
                     inst => decode(inst, 2, low),
                 }
             };
@@ -309,25 +331,33 @@ impl Hart {
 
     /// Run a block: like `step()` for each instruction, minus fetching,
     /// decoding and interrupt checks. Returns the steps taken.
+    ///
+    /// The instruction count is brought up to date where something can see it
+    /// (before instructions marked `sync`, and on the way out), not after
+    /// every instruction.
     #[inline(always)]
     fn execute_block(&mut self, block: Block) -> u32 {
         let mut pc = self.pc;
+        let retired = self.retired;
         for k in 0..block.count {
             // SAFETY: decode_block put block.count ops from block.start into ops,
             // and nothing removes them while the block is valid.
             let op = unsafe { *self.ops.get_unchecked((block.start + k) as usize) };
             let next = pc.wrapping_add(op.len as u64);
+            if op.sync {
+                self.retired = retired + k as u64;
+            }
             match self.execute_op(&op, pc, next) {
                 Ok(target) => {
-                    self.x[0] = 0;
-                    self.retired += 1;
-                    if target != next || self.stop_reason != 0 {
+                    if target != next || (op.sync && self.stop_reason != 0) {
+                        self.retired = retired + k as u64 + 1;
                         self.pc = target;
                         return k + 1; // a jump, or a device stopped the CPU
                     }
                     pc = next;
                 }
                 Err(trap) => {
+                    self.retired = retired + k as u64;
                     self.pc = pc;
                     if trap.cause == STOP_AT_BREAKPOINT {
                         self.stop_reason = STOPPED_AT_BREAKPOINT;
@@ -340,6 +370,7 @@ impl Hart {
                 }
             }
         }
+        self.retired = retired + block.count as u64;
         self.pc = pc;
         block.count
     }
@@ -425,7 +456,12 @@ impl Hart {
                 self.x[rd] = next;
                 return Ok(target);
             }
-            Execute | ExecuteEnd => return self.execute_generic(op.inst, pc, next),
+            Execute | ExecuteEnd => {
+                // (It writes x0 like any register, then x0 is cleared.)
+                let result = self.execute_generic(op.inst, pc, next);
+                self.x[0] = 0;
+                return result;
+            }
             Illegal => return Err(illegal(op.imm as u32)),
         };
         Ok(next)
