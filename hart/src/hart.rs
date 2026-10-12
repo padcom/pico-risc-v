@@ -5,7 +5,8 @@
 //! (mepc/mcause/mtval, mtvec), or into S-mode when delegated through
 //! medeleg/mideleg (sepc/scause/stval, stvec).
 
-use crate::blocks::{Block, Op};
+use crate::blocks::{Block, FETCH_CACHE, Op};
+use crate::jit::{JIT_TLB_EMPTY, Jit, JitTlbEntry};
 use crate::csr::*;
 use crate::memory::Access;
 use crate::mmu::{DATA_LOAD_OK, DATA_STORE_OK, Paging, TLB_EMPTY, TLB_SIZE};
@@ -159,20 +160,28 @@ pub struct Hart {
     /// The context loads and stores are checked in: the data privilege, SUM
     /// and MXR, in tlb_ok's format.
     pub(crate) data_ok_tag: u8,
+    /// The JIT's TLB (jit.rs), and the context its entries are tagged with
+    /// (the data translation context, and the TLB's epoch).
+    pub(crate) jit_tlb: [JitTlbEntry; TLB_SIZE],
+    pub(crate) jit_ctx: u64,
+    pub(crate) jit: Jit,
 
     // The decoded-instruction cache (blocks.rs), set up with the RAM.
     pub(crate) blocks: Vec<Block>,
     pub(crate) ops: Vec<Op>,
     pub(crate) ops_used: usize,
-    /// The virtual page blocks were last run from, and its physical page:
-    /// consecutive blocks are mostly on the same one, which then needs no
-    /// translating. Forgotten when translation or privilege changes.
-    pub(crate) fetch_vpage: u64,
-    pub(crate) fetch_ppage: u64,
+    /// Fetch translations for blocks (blocks.rs: FETCH_CACHE): virtual pages
+    /// with the context (fetch_ctx: privilege, and an epoch bumped by TLB
+    /// flushes) in the low bits, and their physical pages.
+    pub(crate) fetch_tags: [u64; FETCH_CACHE],
+    pub(crate) fetch_pages: [u32; FETCH_CACHE],
+    pub(crate) fetch_ctx: u64,
     /// Per RAM page: which of its 64-byte lines hold cached code (a bit each)...
     pub(crate) code_lines: Vec<u64>,
     /// ...and a version, bumped when one of those is written.
     pub(crate) page_versions: Vec<u32>,
+    /// Set when that happens (for the JIT: see jit_op).
+    pub(crate) code_changed: bool,
 }
 
 impl Hart {
@@ -222,13 +231,18 @@ impl Hart {
             tlb_flags: [0; TLB_SIZE],
             tlb_ok: [0; TLB_SIZE],
             data_ok_tag: 0,
+            jit_tlb: [JIT_TLB_EMPTY; TLB_SIZE],
+            jit_ctx: 0,
+            jit: Jit::new(),
             blocks: Vec::new(),
             ops: Vec::new(),
             ops_used: 0,
-            fetch_vpage: TLB_EMPTY,
-            fetch_ppage: 0,
+            fetch_tags: [TLB_EMPTY; FETCH_CACHE],
+            fetch_pages: [0; FETCH_CACHE],
+            fetch_ctx: 0,
             code_lines: Vec::new(),
             page_versions: Vec::new(),
+            code_changed: false,
         }
     }
 
@@ -391,7 +405,7 @@ impl Hart {
     /// Recompute which accesses need translating, and how; call after any
     /// change to priv, mstatus or satp.
     pub(crate) fn update_translation(&mut self) {
-        self.fetch_vpage = TLB_EMPTY;
+        self.fetch_ctx = self.fetch_ctx & !3 | self.priv_ as u64;
         self.paging = if self.satp >> SATP_MODE_SHIFT == SATP_MODE_SV39 { Paging::Sv39 } else { Paging::Bare };
         let paging = self.paging != Paging::Bare;
         self.data_priv = if self.priv_ == PRIV_M && self.mstatus & MSTATUS_MPRV != 0 {
@@ -406,6 +420,7 @@ impl Hart {
         let mxr = if self.mstatus & MSTATUS_MXR != 0 { 8 } else { 0 };
         let context = self.data_priv as u8 | sum | mxr;
         self.data_ok_tag = (context | 0x10) << 2 & !(DATA_LOAD_OK | DATA_STORE_OK);
+        self.update_jit_ctx();
     }
 
     /// Execute one instruction (a compressed one expanded); returns the next

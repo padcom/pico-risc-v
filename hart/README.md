@@ -14,8 +14,7 @@ they stand for (a table lookup), then executed like those.
 blocks (the instructions up to the next jump or system instruction, within a
 page; a conditional branch leaves the block when taken) are decoded once,
 keyed by physical address, and then run as a tight loop, with one interrupt
-check per block and, while consecutive blocks are on the same page, no
-address translation. Loads and stores check permissions once per TLB entry
+check per block and, for pages run recently, no address translation. Loads and stores check permissions once per TLB entry
 and privilege context, not on every access. The cache is coherent with memory: a write to a 64-byte line
 holding cached code, by the CPU or by a device (DMA, which the machine
 reports through `codeWritten`), retires the blocks of that page, so software
@@ -23,6 +22,19 @@ never runs stale instructions, FENCE.I or not. `step()` is the plain
 interpreter: fetch, decode, execute one instruction; `run()` falls back to it
 for whatever a block can't do. (Earlier versions
 also did RV32; the code and the riscv-tests for it are in the git history.)
+
+Code that runs often is compiled by a **JIT** (`jit.rs`) to WebAssembly,
+which V8 compiles to machine code. The unit is a page of RAM: once a page has
+run 2000 instructions from the cache, its blocks become one function, a loop
+around a switch over them, so jumps and branches within the page stay in
+compiled code. Registers are WebAssembly locals within a block; loads and
+stores to RAM go straight to memory through a TLB of the JIT's own;
+everything else (floating point, atomics, CSRs, a TLB miss) goes back to the
+interpreter for that instruction. The functions are put into the core's
+function table, so `run()` calls them directly. A page compiled again for
+the same code needs twice as much running each time; pages whose code
+changes start over. The JIT is on by default (`jit: false` in the CPU's or
+the machine's options turns it off); the riscv-tests run both ways.
 
 Floating point (F and D) is IEEE 754 in software, with the
 [softfp](https://crates.io/crates/softfp) crate: all five rounding modes and
@@ -37,6 +49,7 @@ a zero of the same sign lost that sign (0 × −1 + −0 gave +0).
 - `src/hart.rs`: hart state, the run loop, traps and interrupts, and the
   instruction set
 - `src/blocks.rs`: the decoded-instruction cache
+- `src/jit.rs`: the JIT
 - `src/memory.rs`: physical memory, and loads and stores
 - `src/mmu.rs`: Sv39 address translation, and the TLB
 - `src/fpu.rs`: floating point (F and D)
@@ -109,6 +122,7 @@ run executes exactly the same instructions:
 | RV64GC, decoded-instruction cache | 460 MIPS | 455 MIPS | 260 MIPS, 69 s |
 | ...branches inside blocks, cheaper loads and stores | 505 MIPS | 505 MIPS | 300 MIPS, 60 s |
 | ...and Debian's boot trimmed (linux/README.md) | 505 MIPS | 505 MIPS | 284 MIPS, 43 s |
+| ...and the JIT | 1305 MIPS | 1340 MIPS | 436 MIPS, 28 s |
 
 Measured on an Apple Silicon Mac with Node 26. Earlier, when the core also
 did RV32 (see the git history), the TypeScript CPU it replaced ran the

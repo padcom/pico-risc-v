@@ -1,6 +1,6 @@
 import type { BlockStorage } from './block-storage.js'
 import { Clint } from './clint.js'
-import { CPU } from './cpu.js'
+import { CPU, type CPUOptions } from './cpu.js'
 import { encodeFdt, type FdtNode } from './fdt.js'
 import { GoldfishRtc } from './goldfish-rtc.js'
 import { Plic } from './plic.js'
@@ -78,6 +78,8 @@ export interface MachineOptions {
   rngSeed?: Uint8Array
   /** Kernel command line placed in the device tree's /chosen node. */
   bootargs?: string
+  /** The CPU's JIT (see CPUOptions); on by default. */
+  jit?: CPUOptions['jit']
 }
 
 export interface BootOptions {
@@ -147,6 +149,7 @@ export class Machine {
     disk,
     network,
     mac = Uint8Array.of(0x52, 0x54, 0x00, 0x12, 0x34, 0x56),
+    jit,
   }: MachineOptions = {}) {
     this.bootargs = bootargs
     this.virtual = clock === 'virtual'
@@ -161,6 +164,7 @@ export class Machine {
       resetVector: MemoryMap.RAM,
       readTime: () => this.clint.mtime,
       ram: { base: MemoryMap.RAM, size: ramSize },
+      jit,
     })
     this.ram = this.cpu.ram!
     this.clint = new Clint(

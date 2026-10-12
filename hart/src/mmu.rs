@@ -75,7 +75,14 @@ impl Hart {
 
     pub(crate) fn flush_tlb(&mut self) {
         self.tlb_vpn.fill(TLB_EMPTY);
-        self.fetch_vpage = TLB_EMPTY;
+        // A new epoch for the fetch cache (bits 2..11 of its tags); cleared
+        // when they wrap.
+        let epoch = ((self.fetch_ctx >> 2) + 1) & 0x3ff;
+        if epoch == 0 {
+            self.fetch_tags.fill(TLB_EMPTY);
+        }
+        self.fetch_ctx = self.fetch_ctx & 3 | epoch << 2;
+        self.flush_jit_tlb();
     }
 
     /// Translate `vaddr` for an access by `priv_` (the effective privilege: for

@@ -15,6 +15,7 @@ mod blocks;
 mod csr;
 mod fpu;
 mod hart;
+mod jit;
 mod memory;
 mod mmu;
 mod rvc;
@@ -63,7 +64,32 @@ pub extern "C" fn ram_alloc(base: u32, size: u32) -> *mut u8 {
     h.ops = vec![blocks::NO_OP; blocks::OPS];
     h.code_lines = vec![0; pages];
     h.page_versions = vec![0; pages];
+    h.jit.allocate(pages);
     h.ram
+}
+
+/// How many function table slots the JIT needs (one per page of RAM).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_slots() -> u32 {
+    hart().code_lines.len() as u32
+}
+
+/// Turn the JIT on: its slots start at `table_base` in the function table;
+/// a block is compiled after running `threshold` times, `batch` of them at
+/// pages at a time.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_init(table_base: u32, threshold: u32, batch: u32) {
+    let h = hart();
+    h.jit.table_base = table_base;
+    h.jit.threshold = threshold.max(1);
+    h.jit.batch = (batch as usize).max(1);
+    h.jit.enabled = !h.blocks.is_empty();
+}
+
+/// Compiled code's way into the interpreter (jit.rs: `Hart::jit_op`).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_op(index: u32, pc: u64) -> u32 {
+    hart().jit_op(index, pc)
 }
 
 /// Where x0..x31 live in linear memory (32 × 64 bits).

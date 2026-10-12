@@ -164,7 +164,10 @@ describe('Machine.run with the virtual clock', () => {
   })
 })
 
-describe('decoded-instruction cache', () => {
+describe.each([
+  ['interpreter', false],
+  ['JIT', { threshold: 1, batch: 1 }],
+] as const)('decoded-instruction cache (%s)', (_, jit) => {
   // A function at RAM + 0x40 returning a constant (addi a0, zero, n; ret),
   // called, patched by the program itself (a plain store, no FENCE.I) and
   // called again: the second call must run the new instruction.
@@ -179,7 +182,7 @@ describe('decoded-instruction cache', () => {
     a.lui(5, MemoryMap.SYSCON), a.lui(6, 0x5000), a.addi(6, 6, 0x555), a.sw(6, 5, 0), // 0x18: power off
   ]
   const boot = () => {
-    const m = new Machine({ ramSize: 1024 * 1024, clock: 'virtual' })
+    const m = new Machine({ ramSize: 1024 * 1024, clock: 'virtual', jit })
     const image = new Uint8Array(0x84)
     image.set(toBytes(program))
     image.set(toBytes([RETURN(1), a.jalr(0, 1, 0)]), 0x40)

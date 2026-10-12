@@ -21,47 +21,60 @@
 //! last few steps of a budget).
 
 use crate::csr::ILLEGAL_INSTRUCTION;
-use crate::hart::{Hart, Result, STOPPED_AT_BREAKPOINT, STOP_AT_BREAKPOINT, illegal, imm_i, imm_s};
+use crate::hart::{Hart, Result, STOPPED_AT_BREAKPOINT, STOP_AT_BREAKPOINT, Trap, illegal, imm_i, imm_s};
+use crate::jit::COMPILED;
 use crate::memory::Access;
 use crate::rvc;
 
-/// Blocks in the cache (direct mapped by address); a power of two.
-pub const BLOCKS: usize = 1 << 16;
+/// Translations for fetches cached for blocks (direct mapped by virtual
+/// page, tagged with the privilege), so jumps between pages mostly needn't
+/// translate.
+pub const FETCH_CACHE: usize = 256;
+
+/// Blocks in the cache: sets of `WAYS` blocks, a set chosen by a hash of the
+/// address.
+pub const BLOCKS: usize = 1 << 20;
+const WAYS: usize = 4;
+const SET_BITS: u32 = (BLOCKS / WAYS).trailing_zeros();
 /// Room for decoded instructions; when it's used up, the cache starts over.
-pub const OPS: usize = 1 << 19;
+pub const OPS: usize = 1 << 22;
 /// The longest block.
 const MAX_BLOCK: usize = 64;
 
 #[derive(Clone, Copy)]
 pub struct Block {
     /// Physical address of the first instruction (0: empty; RAM isn't at 0).
-    pa: u64,
+    pub(crate) pa: u64,
     /// The version of its page it was decoded from.
-    version: u32,
+    pub(crate) version: u32,
     /// Its instructions: ops[start..start + count].
-    start: u32,
-    count: u32,
+    pub(crate) start: u32,
+    pub(crate) count: u32,
+    /// How often it ran (up to 65535), or jit::COMPILED: then it's case
+    /// `entry` of its page's function.
+    pub(crate) jit: u32,
+    pub(crate) entry: u32,
 }
 
-pub const EMPTY_BLOCK: Block = Block { pa: 0, version: 0, start: 0, count: 0 };
+pub const EMPTY_BLOCK: Block = Block { pa: 0, version: 0, start: 0, count: 0, jit: 0, entry: 0 };
 
 /// A decoded instruction.
 #[derive(Clone, Copy)]
 pub struct Op {
-    kind: Kind,
+    pub(crate) kind: Kind,
     /// The destination register; for x0, `SINK` (fast kinds only).
-    rd: u8,
-    rs1: u8,
-    rs2: u8,
+    pub(crate) rd: u8,
+    pub(crate) rs1: u8,
+    pub(crate) rs2: u8,
     /// 2 (compressed) or 4.
-    len: u8,
+    pub(crate) len: u8,
     /// Loads, stores and `Execute*`: they may reach devices (which can read
     /// the instruction count and stop the CPU) or read the counters.
-    sync: bool,
+    pub(crate) sync: bool,
     /// The immediate, sign-extended from 32 bits when used (shift amounts for
     /// shifts). For `Execute` / `ExecuteEnd`: a compressed instruction's own
     /// 16 bits (an illegal-instruction trap reports those).
-    imm: i32,
+    pub(crate) imm: i32,
     /// The 32-bit instruction (expanded, if compressed), for `Execute`.
     inst: u32,
 }
@@ -74,7 +87,7 @@ pub const SINK: u8 = 32;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-enum Kind {
+pub(crate) enum Kind {
     Addi, Slti, Sltiu, Xori, Ori, Andi, Slli, Srli, Srai,
     Lui, Auipc,
     Add, Sub, Sll, Slt, Sltu, Xor, Srl, Sra, Or, And,
@@ -99,6 +112,14 @@ enum Kind {
 impl Kind {
     fn ends_block(self) -> bool {
         self as u8 >= Kind::Jal as u8 && self != Kind::Execute
+    }
+
+    pub(crate) fn is_load(self) -> bool {
+        (Kind::Lb as u8..=Kind::Lwu as u8).contains(&(self as u8))
+    }
+
+    pub(crate) fn is_store(self) -> bool {
+        (Kind::Sb as u8..=Kind::Sd as u8).contains(&(self as u8))
     }
 
     fn sync(self) -> bool {
@@ -238,6 +259,7 @@ impl Hart {
             if self.code_lines[page] & (1 << (line & 63)) != 0 {
                 self.page_versions[page] = self.page_versions[page].wrapping_add(1);
                 self.code_lines[page] = 0;
+                self.code_changed = true;
             }
         }
     }
@@ -253,38 +275,75 @@ impl Hart {
         let pc = self.pc;
         let pa = if !self.translate_fetch {
             pc
-        } else if pc >> 12 == self.fetch_vpage {
-            self.fetch_ppage << 12 | (pc & 0xfff)
         } else {
-            match self.translate(pc, Access::Fetch, self.priv_) {
-                Ok(pa) => {
-                    self.fetch_vpage = pc >> 12;
-                    self.fetch_ppage = pa >> 12;
-                    pa
+            let i = (pc >> 12) as usize & (FETCH_CACHE - 1);
+            let tag = pc & !0xfff | self.fetch_ctx;
+            if self.fetch_tags[i] == tag {
+                (self.fetch_pages[i] as u64) << 12 | (pc & 0xfff)
+            } else {
+                match self.translate(pc, Access::Fetch, self.priv_) {
+                    Ok(pa) => {
+                        self.fetch_tags[i] = tag;
+                        self.fetch_pages[i] = (pa >> 12) as u32;
+                        pa
+                    }
+                    Err(_) => return 0, // the regular path raises the fault
                 }
-                Err(_) => return 0, // the regular path raises the fault
             }
         };
         let offset = pa.wrapping_sub(self.ram_base);
         if offset >= self.ram_size {
             return 0;
         }
-        let index = (pa >> 1) as usize & (BLOCKS - 1);
         let page = (offset >> 12) as usize;
-        let mut block = self.blocks[index];
-        if block.pa != pa || block.version != self.page_versions[page] {
+        let version = self.page_versions[page];
+        let set = Self::block_set(pa);
+        let mut index = set;
+        while index < set + WAYS && self.blocks[index].pa != pa {
+            index += 1;
+        }
+        if index == set + WAYS || self.blocks[index].version != version {
+            if index == set + WAYS {
+                index = self.victim(set);
+            }
             match self.decode_block(pa, offset) {
-                Some(b) => {
-                    block = b;
-                    self.blocks[index] = b;
-                }
+                Some(b) => self.blocks[index] = b,
                 None => return 0,
             }
         }
+        let block = self.blocks[index];
         if block.count > budget {
             return 0;
         }
-        self.execute_block(block)
+        if block.jit == COMPILED {
+            return self.run_compiled(page, block.entry, pc, budget);
+        }
+        // (How often it ran: which block of a set to replace, see victim().)
+        self.blocks[index].jit = (block.jit + 1).min(u16::MAX as u32);
+        let n = self.execute_block(block);
+        if self.jit.enabled {
+            self.jit_account(page, n);
+        }
+        n
+    }
+
+    /// The first of the blocks (`WAYS` of them) where the block at `pa` may be.
+    #[inline(always)]
+    fn block_set(pa: u64) -> usize {
+        (((pa >> 1) as u32).wrapping_mul(0x9e37_79b1) >> (32 - SET_BITS)) as usize * WAYS
+    }
+
+    /// Where the block at `pa` is in the cache, if it is.
+    pub(crate) fn find_block(&self, pa: u64) -> Option<usize> {
+        let set = Self::block_set(pa);
+        (set..set + WAYS).find(|&i| self.blocks[i].pa == pa)
+    }
+
+    /// The block in the set from `set` to replace: the one that has run the
+    /// least (an empty one, or one not run since decoded; compiled ones last).
+    #[inline(always)]
+    fn victim(&self, set: usize) -> usize {
+        (set..set + WAYS).min_by_key(|&i| self.blocks[i].jit).unwrap_or(set)
     }
 
     /// Decode the block at physical `pa` (`offset` into RAM).
@@ -314,8 +373,12 @@ impl Hart {
             };
             self.ops[self.ops_used] = op;
             self.ops_used += 1;
-            // Mark the lines it occupies as holding code.
+            // Mark the lines it occupies as holding code. (The JIT's fast
+            // stores only go to pages without any: see jit_fill.)
             let page = (at >> 12) as usize;
+            if self.code_lines[page] == 0 {
+                self.flush_jit_tlb();
+            }
             self.code_lines[page] |= 1 << ((at >> 6) & 63) | 1 << (((at + op.len as u64 - 1) >> 6) & 63);
             at += op.len as u64;
             if op.kind.ends_block() {
@@ -326,7 +389,7 @@ impl Hart {
         if count == 0 {
             return None;
         }
-        Some(Block { pa, version: self.page_versions[(offset >> 12) as usize], start: start as u32, count: count as u32 })
+        Some(Block { pa, version: self.page_versions[(offset >> 12) as usize], start: start as u32, count: count as u32, jit: 0, entry: 0 })
     }
 
     /// Run a block: like `step()` for each instruction, minus fetching,
@@ -359,13 +422,7 @@ impl Hart {
                 Err(trap) => {
                     self.retired = retired + k as u64;
                     self.pc = pc;
-                    if trap.cause == STOP_AT_BREAKPOINT {
-                        self.stop_reason = STOPPED_AT_BREAKPOINT;
-                    } else {
-                        // An illegal compressed instruction reports its own 16 bits.
-                        let tval = if trap.cause == ILLEGAL_INSTRUCTION && op.len == 2 { op.imm as u32 as u64 } else { trap.tval };
-                        self.enter_trap(trap.cause, false, pc, tval);
-                    }
+                    self.block_trap(&op, pc, trap);
                     return k + 1;
                 }
             }
@@ -375,9 +432,21 @@ impl Hart {
         block.count
     }
 
+    /// Instruction `op` at `pc` of a block trapped (pc and retired are as before it).
+    #[inline(always)]
+    pub(crate) fn block_trap(&mut self, op: &Op, pc: u64, trap: Trap) {
+        if trap.cause == STOP_AT_BREAKPOINT {
+            self.stop_reason = STOPPED_AT_BREAKPOINT;
+        } else {
+            // An illegal compressed instruction reports its own 16 bits.
+            let tval = if trap.cause == ILLEGAL_INSTRUCTION && op.len == 2 { op.imm as u32 as u64 } else { trap.tval };
+            self.enter_trap(trap.cause, false, pc, tval);
+        }
+    }
+
     /// One decoded instruction; returns the next pc (as `execute`).
     #[inline(always)]
-    fn execute_op(&mut self, op: &Op, pc: u64, next: u64) -> Result<u64> {
+    pub(crate) fn execute_op(&mut self, op: &Op, pc: u64, next: u64) -> Result<u64> {
         use Kind::*;
         let a = self.x[op.rs1 as usize];
         let b = self.x[op.rs2 as usize];

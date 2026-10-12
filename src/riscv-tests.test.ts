@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { parseElf } from '../test/elf.js'
-import { Machine, MemoryMap } from './machine.js'
+import { Machine, type MachineOptions, MemoryMap } from './machine.js'
 
 /**
  * The official RISC-V ISA tests (github.com/riscv-software-src/riscv-tests,
@@ -16,6 +16,9 @@ import { Machine, MemoryMap } from './machine.js'
  * U-mode, under virtual memory: Sv39 page tables set up by the test
  * environment). A program reports by writing to its `tohost` word: 1 means
  * passed, any other odd value (n << 1) | 1 that test case n failed.
+ *
+ * Each runs twice: on the interpreter, and with the JIT compiling all code
+ * right away (after its first block).
  */
 const DIR = new URL('../build/riscv-tests/64/', import.meta.url)
 
@@ -25,9 +28,14 @@ const UNSUPPORTED: Record<string, string> = {
   'rv64mi-p-pmpaddr': NO_PMP,
 }
 
-function runTest(file: URL): number {
+const MODES: [string, MachineOptions['jit']][] = [
+  ['interpreter', false],
+  ['JIT', { threshold: 1, batch: 1 }],
+]
+
+function runTest(file: URL, jit: MachineOptions['jit']): number {
   const elf = parseElf(readFileSync(file))
-  const m = new Machine({ ramSize: 16 * 1024 * 1024, clock: 'virtual' })
+  const m = new Machine({ ramSize: 16 * 1024 * 1024, clock: 'virtual', jit })
   const end = Math.max(...elf.segments.map(s => s.addr + s.memSize))
   const image = new Uint8Array(end - MemoryMap.RAM)
   for (const s of elf.segments) image.set(s.data, s.addr - MemoryMap.RAM)
@@ -43,9 +51,9 @@ function runTest(file: URL): number {
 }
 
 const tests = existsSync(DIR) ? readdirSync(DIR).filter(f => !f.endsWith('.dump')).sort() : []
-describe.skipIf(!tests.length)('riscv-tests RV64', () => {
+describe.skipIf(!tests.length).each(MODES)('riscv-tests RV64 (%s)', (_, jit) => {
   it.each(tests.filter(name => !UNSUPPORTED[name]))('%s', name => {
-    const result = runTest(new URL(name, DIR))
+    const result = runTest(new URL(name, DIR), jit)
     expect(result === 1 ? 'pass' : `failed test case ${result >>> 1} (tohost=0x${result.toString(16)})`).toBe('pass')
   })
 })

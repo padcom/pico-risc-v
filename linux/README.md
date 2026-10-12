@@ -43,7 +43,7 @@ The disk is Debian 13 (trixie)'s "nocloud" cloud image for riscv64. The
 machine has an RV64GC CPU with Sv39 virtual memory, what Debian's riscv64
 port requires, and 1 GiB of RAM.
 
-Debian reaches the login prompt in about 45 seconds. Log in as `root`, no
+Debian reaches the login prompt in about 30 seconds. Log in as `root`, no
 password. `poweroff` shuts it down, and `npm start` exits with it; Ctrl-A
 then X quits the emulator at any time.
 

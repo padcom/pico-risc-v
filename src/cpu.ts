@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { setFlagsFromString } from 'node:v8'
 import { type Bus, BusError } from './bus.js'
 import type { Priv } from './csr.js'
 import { RAM } from './ram.js'
@@ -31,7 +32,15 @@ export interface CPUOptions {
    * faster. Available as `cpu.ram`; map it on the bus as well, for devices.
    */
   ram?: { base: number; size: number }
+  /**
+   * The JIT (hart/src/jit.rs; needs `ram`): pages of code that have run
+   * `threshold` instructions are compiled to WebAssembly, `batch` of them
+   * at a time. On by default; false turns it off.
+   */
+  jit?: false | { threshold?: number; batch?: number }
 }
+
+const JIT_DEFAULTS = { threshold: 2000, batch: 32 }
 
 /** CPU state readable and writable as properties, in the core's field order (hart/src/lib.rs). */
 const FIELDS = [
@@ -57,6 +66,10 @@ interface Core {
   stop(): void
   set_interrupt_pending(bit: number, pending: number): void
   instret(): number
+  jit_slots(): number
+  jit_init(tableBase: number, threshold: number, batch: number): void
+  jit_op(index: number, pc: bigint): number
+  __indirect_function_table: WebAssembly.Table
   get(field: number): bigint
   set(field: number, value: bigint): void
 }
@@ -97,7 +110,7 @@ export class CPU {
 
   constructor(
     readonly bus: Bus,
-    { resetVector = 0, readTime, breakOnEbreak = false, ram }: CPUOptions = {},
+    { resetVector = 0, readTime, breakOnEbreak = false, ram, jit = {} }: CPUOptions = {},
   ) {
     const access = <T>(op: () => T, fault: T): T => {
       try {
@@ -123,6 +136,16 @@ export class CPU {
           return 0
         }, 1),
       read_time: () => readTime?.() ?? 0,
+      // Compiled blocks: a module of functions "0", "1", ... (`count` of
+      // them), for the function table at `slots` (the core's jit.rs).
+      jit_install: (code: number, length: number, slots: number, count: number) => {
+        const { memory, jit_op, __indirect_function_table: table } = this.core
+        const module = new WebAssembly.Module(new Uint8Array(memory.buffer, code, length))
+        const { exports } = new WebAssembly.Instance(module, { env: { memory, op: jit_op } })
+        const at = new Uint32Array(memory.buffer, slots, count)
+        for (let i = 0; i < count; i++) table.set(at[i]!, exports[i] as () => void)
+        return 1
+      },
     }
     const instance = new WebAssembly.Instance(coreModule(), { env })
     this.core = instance.exports as unknown as Core
@@ -132,6 +155,15 @@ export class CPU {
     if (ram) {
       const offset = this.core.ram_alloc(ram.base >>> 0, ram.size)
       this.ram = new RAM(new Uint8Array(this.core.memory.buffer, offset, ram.size))
+      if (jit) {
+        // V8 first compiles WebAssembly quickly, then optimizes a function
+        // once it has run "13 MB" of code; the JIT makes thousands of small
+        // functions, which run hot right away: optimize them much sooner.
+        setFlagsFromString('--wasm-tiering-budget=20000')
+        const { threshold, batch } = { ...JIT_DEFAULTS, ...jit }
+        const base = this.core.__indirect_function_table.grow(this.core.jit_slots())
+        this.core.jit_init(base, threshold, batch)
+      }
     }
     this.x64 = new BigInt64Array(this.core.memory.buffer, this.core.registers(), 32)
     this.f = new BigUint64Array(this.core.memory.buffer, this.core.fp_registers(), 32)
