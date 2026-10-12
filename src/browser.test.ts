@@ -114,5 +114,40 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
         await browser.close()
       }
     })
+
+    it('keeps the disk across reloads (in IndexedDB), until asked to start over', { timeout: 180_000 }, async () => {
+      const browser = await chromium.launch()
+      try {
+        const page = await browser.newPage()
+        page.on('dialog', dialog => void dialog.accept()) // "Start over …?"
+        const output = () => page.evaluate(() => (window as unknown as { emulatorOutput?: string }).emulatorOutput ?? '').catch(() => '')
+        const until = async (text: string) => {
+          const deadline = Date.now() + 90_000
+          while (!(await output()).includes(text) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 200))
+          expect(await output()).toContain(text)
+        }
+        const disk = () => page.evaluate(() => document.getElementById('disk')!.textContent)
+        await page.goto(url)
+        await until('alpine:~# ')
+        expect(await disk()).toBe('disk: changes kept in this browser · start over')
+        await page.keyboard.type('echo "kept-$((6*7))" > /root/note.txt; sync; echo synced-1\n')
+        await until('synced-1\r\n')
+        await new Promise(resolve => setTimeout(resolve, 3000)) // (saved within 2 s)
+
+        await page.reload()
+        await until('alpine:~# ')
+        await page.keyboard.type('cat /root/note.txt\n')
+        await until('kept-42\r\n')
+
+        // Start over: confirmed, it reloads.
+        await Promise.all([page.waitForEvent('framenavigated'), page.click('#disk a')])
+        await until('alpine:~# ')
+        await page.keyboard.type('ls /root/note.txt; echo listed-1\n')
+        await until('listed-1\r\n')
+        expect(await output()).toContain('No such file')
+      } finally {
+        await browser.close()
+      }
+    })
   },
 )

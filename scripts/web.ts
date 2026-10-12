@@ -79,9 +79,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   if (!file || (request.method !== 'GET' && request.method !== 'HEAD')) {
     return void response.writeHead(404, ISOLATED).end()
   }
-  const size = statSync(file).size
+  const { size, mtime } = statSync(file)
   const headers = {
     ...ISOLATED,
+    'last-modified': mtime.toUTCString(),
     'content-type': TYPES[extname(file)] ?? 'application/octet-stream',
     'accept-ranges': 'bytes',
     'cache-control': 'no-cache',

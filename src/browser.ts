@@ -11,8 +11,10 @@
  *     memory
  * The disk is read from the server as Linux needs it: an image file by Range
  * requests (HttpStorage), or, if it's a manifest (.json), in chunks
- * (ChunkedStorage). What Linux writes stays in this page (a SnapshotStorage),
- * lost when it's closed. With data-network on the page (npm run web), the
+ * (ChunkedStorage). What Linux writes goes to a SnapshotStorage, which this
+ * browser keeps (IndexedDbStore: per distribution, for that image), so the
+ * disk is as it was left the next time; one page at a time, and a link in
+ * the status bar starts over. With data-network on the page (npm run web), the
  * network card reaches the server's user-mode NAT over a WebSocket; with
  * ?relay=, that of a relay (npm run relay, on this machine, say).
  *
@@ -28,6 +30,7 @@
  *   image=<url>          boot this bare-metal program instead (no disk,
  *                        network), e.g. examples/build/hello.bin
  *   harts=<n>            default 4
+ *   persist=0            don't keep the disk's changes (a throwaway session)
  *   memory=<MiB>         default 1024 for Debian, boot.json's, 64 for an image
  *
  * How the machine stopped ends up in the page's `data-result` attribute,
@@ -39,6 +42,7 @@ import { type BlockStorage, SnapshotStorage } from './block-storage.js'
 import { ChunkedStorage, gunzip } from './chunked-storage.js'
 import { setCoreModule } from './cpu.js'
 import { HttpStorage } from './http-storage.js'
+import { IndexedDbStore } from './indexeddb-store.js'
 import { Machine, type RunResult } from './machine.js'
 import { WebSocketNetwork } from './websocket-network.js'
 
@@ -67,6 +71,9 @@ const image = params.get('image')
 const distribution = params.get('distribution') ?? page.distribution ?? 'debian'
 const harts = Number(params.get('harts') ?? 4)
 const relay = params.get('relay')
+const persist = params.get('persist') !== '0'
+/** How often the disk's changes are saved, besides when the guest flushes it (ms). */
+const SAVE_INTERVAL = 2000
 /** Where npm run relay is, by default. */
 const LOCAL_RELAY = 'ws://localhost:8081'
 /** How long to wait for the network's WebSocket to connect (ms). */
@@ -85,6 +92,7 @@ terminal.focus()
 
 const log = (message: string) => (status.textContent = message)
 const networkStatus = document.getElementById('network')!
+const diskStatus = document.getElementById('disk')!
 const fetchBytes = async (url: string | URL) => {
   const response = await fetch(url)
   if (!response.ok) throw new Error(`${url}: ${response.status} ${response.statusText}`)
@@ -125,7 +133,7 @@ try {
       config.initrd ? fetchBytes(file(config.initrd)) : undefined, // (Linux unpacks it)
       config.disk.endsWith('.json') ? ChunkedStorage.open(file(config.disk)) : HttpStorage.open(file(config.disk).href),
     ])
-    const storage: BlockStorage = new SnapshotStorage(disk)
+    const storage: BlockStorage = await keep(disk)
     const network = await connect()
     machine = new Machine({
       ramSize: Number(params.get('memory') ?? config.memory ?? 1024) << 20,
@@ -156,6 +164,49 @@ try {
   document.body.dataset.result = 'error'
   log(String(error))
   throw error
+}
+
+/**
+ * The disk's changes, over `base`: kept in this browser (unless the page says
+ * not to, or another page of the same distribution keeps them already), or
+ * only in this page. Says which in the status bar.
+ */
+async function keep(base: BlockStorage): Promise<SnapshotStorage> {
+  const show = (...parts: (string | Node)[]) => diskStatus.replaceChildren(...parts)
+  const throwaway = (why: string) => (show(`disk: changes not kept (${why})`), new SnapshotStorage(base))
+  if (!persist) return throwaway('persist=0')
+  if (!base.id || typeof indexedDB === 'undefined') return throwaway("can't tell this image from others")
+  if (!(await lock(`risc-emulator-disk-${distribution}`))) return throwaway("it's open in another page")
+
+  const store = await IndexedDbStore.open(distribution, base.id)
+  const storage = new SnapshotStorage(base, store)
+  storage.onsaveerror = error => show(`disk: changes not kept (${error})`)
+  const reset = Object.assign(document.createElement('a'), { href: '#', textContent: 'start over' })
+  reset.onclick = async event => {
+    event.preventDefault()
+    if (!confirm('Start over with the disk as it was at first? What changed on it is lost.')) return
+    await store.clear()
+    location.reload()
+  }
+  show(store.discarded ? 'disk: a new image (changes to the old one dropped); kept · ' : 'disk: changes kept in this browser · ', reset)
+  // Besides when the guest flushes it: every so often, and when the page goes.
+  setInterval(() => void storage.flush(), SAVE_INTERVAL)
+  addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && void storage.flush())
+  addEventListener('pagehide', () => void storage.flush())
+  // (Ask the browser not to clear it when short of space; it may say no.)
+  void navigator.storage?.persist?.()
+  return storage
+}
+
+/** Hold a lock named `name` for as long as the page is open; false if another page has it. */
+function lock(name: string): Promise<boolean> {
+  if (!navigator.locks) return Promise.resolve(true)
+  return new Promise(resolve => {
+    void navigator.locks.request(name, { ifAvailable: true }, held => {
+      resolve(held !== null)
+      return held ? new Promise<never>(() => {}) : undefined
+    })
+  })
 }
 
 /**

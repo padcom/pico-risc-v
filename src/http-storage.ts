@@ -24,6 +24,8 @@ export class HttpStorage implements BlockStorage {
   private constructor(
     readonly url: string,
     readonly size: number,
+    /** What the image holds, as far as the server says (its size, and ETag or Last-Modified). */
+    readonly id: string | undefined,
     { cache = 256 * 1024 * 1024 }: HttpStorageOptions,
   ) {
     this.maxChunks = Math.max(1, Math.floor(cache / CHUNK))
@@ -34,7 +36,8 @@ export class HttpStorage implements BlockStorage {
     const response = await fetch(url, { method: 'HEAD' })
     const size = Number(response.headers.get('content-length'))
     if (!response.ok || !Number.isSafeInteger(size)) throw new Error(`${url}: ${response.status} ${response.statusText}`)
-    return new HttpStorage(url, size, options)
+    const version = response.headers.get('etag') ?? response.headers.get('last-modified')
+    return new HttpStorage(url, size, version ? `${size} ${version}` : undefined, options)
   }
 
   read(offset: number, dest: Uint8Array): void | Promise<void> {

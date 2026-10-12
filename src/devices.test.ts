@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { type BlockStorage, MemoryStorage, SnapshotStorage } from './block-storage.js'
+import { type BlockStorage, type ChunkStore, MemoryStorage, SnapshotStorage } from './block-storage.js'
 import { MIP_MEIP, MIP_SEIP } from './csr.js'
 import { FileStorage } from './file-storage.js'
 import { GoldfishRtc } from './goldfish-rtc.js'
@@ -96,7 +96,9 @@ function virtioHarness(storage: BlockStorage) {
     readOnly: storage.readOnly,
     read: (offset, dest) => storage.read(offset, dest),
     write: (offset, src) => storage.write(offset, src),
-    flush: () => flushed++,
+    flush: () => {
+      flushed++
+    },
   }
   const dev = new VirtioBlock(
     counting,
@@ -419,6 +421,64 @@ describe('storage', () => {
     expect([...back]).toEqual([7, 7, 7, 7, 7, 9, 9, 9, 9, 8, 8, 9, 9, 9, 9, 9, 9, 7, 7, 7])
     expect(base.reads).toBe(2) // each chunk copied once
     expect(snap.read(4085, back)).toBeUndefined() // now all in the overlay: right away
+  })
+
+  /** A ChunkStore in memory, as IndexedDB keeps one; `batches`: the chunks of each save. */
+  function memoryStore(failing = false) {
+    const chunks = new Map<number, Uint8Array>()
+    const batches: number[][] = []
+    const store: ChunkStore = {
+      get saved() {
+        return new Set(chunks.keys())
+      },
+      load: async index => chunks.get(index)!.slice(),
+      save: async batch => {
+        if (failing) throw new Error('quota exceeded')
+        batches.push([...batch.keys()])
+        for (const [index, chunk] of batch) chunks.set(index, chunk.slice())
+      },
+    }
+    return { store, batches }
+  }
+
+  it('a snapshot overlay with a store: changes saved on flush, all at once; a new overlay has them again', async () => {
+    const base = new MemoryStorage(new Uint8Array(10000).fill(7))
+    const { store, batches } = memoryStore()
+    const snap = new SnapshotStorage(base, store)
+    snap.write(4090, new Uint8Array(12).fill(9)) // chunks 0 and 1
+    expect(batches).toEqual([])
+    await snap.flush()
+    expect(batches).toEqual([[0, 1]])
+    await snap.flush() // nothing changed since
+    snap.write(100, Uint8Array.of(5))
+    await snap.flush()
+    expect(batches).toEqual([[0, 1], [0]])
+
+    // Next time (a page reloaded): the store's chunks instead of the base's.
+    const again = new SnapshotStorage(base, store)
+    const back = new Uint8Array(20)
+    await again.read(4085, back)
+    expect([...back]).toEqual([7, 7, 7, 7, 7, ...Array(12).fill(9), 7, 7, 7])
+    const byte = new Uint8Array(1)
+    await again.read(100, byte)
+    expect(byte[0]).toBe(5)
+    expect(base.bytes.every(b => b === 7)).toBe(true)
+    await again.write(8192, Uint8Array.of(1)) // chunk 2: from the base, as before
+    await again.flush()
+    expect(batches.at(-1)).toEqual([2])
+  })
+
+  it('a snapshot overlay whose store fails to save says so, and goes on', async () => {
+    const { store } = memoryStore(true)
+    const snap = new SnapshotStorage(new MemoryStorage(8192), store)
+    const errors: unknown[] = []
+    snap.onsaveerror = error => errors.push(error)
+    snap.write(0, Uint8Array.of(1))
+    await snap.flush()
+    expect(String(errors[0])).toMatch(/quota/)
+    const byte = new Uint8Array(1)
+    snap.read(0, byte)
+    expect(byte[0]).toBe(1)
   })
 
   it('a snapshot overlay reads through to its base but never writes to it', () => {

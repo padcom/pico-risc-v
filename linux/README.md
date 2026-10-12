@@ -183,8 +183,13 @@ clock.
 terminal. Debian must have been set up once (`npm start` does it).
 
 - **The disk** is `pristine.raw`, read from the server a piece at a time as
-  Debian needs it. What Debian writes stays in the page, like `--snapshot`:
-  closing or reloading the page throws it away.
+  Debian needs it. What Debian writes, the browser keeps (in IndexedDB,
+  saved whenever Linux flushes the disk, every 2 seconds, and when the page
+  closes): the next time, the disk is as you left it. The status bar says
+  so, and its "start over" link goes back to the disk as built. Only one
+  page at a time keeps a distribution's disk (another one's changes are lost
+  when it closes); changes kept over an image that has since been rebuilt
+  are dropped, as they don't fit it. `?persist=0` keeps nothing.
 - **The network** goes through the server: the page sends the network
   card's frames over a WebSocket (browsers can't open sockets themselves)
   to a user-mode NAT in `npm run web`, the same as `npm start`'s, so
@@ -226,7 +231,8 @@ the disk). The console logs in as root by itself.
 `npm run site` puts the whole of it in `site/`, about 60 MB, for any plain
 web server, GitHub Pages say: the page, the emulator, and Alpine, its disk in
 gzipped 1 MiB chunks (all-zero ones left out), which the page fetches only as
-Alpine reads them. A plain web server doesn't send the headers that let the
+Alpine reads them. What Alpine writes, the browser keeps, as with `npm run
+web`. A plain web server doesn't send the headers that let the
 page use threads (cross-origin isolation), so the page registers a service
 worker (`web/isolate.js`) that adds them, and reloads once. There's no
 network there of its own (`apk add` can't fetch anything, which is why the

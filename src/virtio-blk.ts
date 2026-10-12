@@ -129,7 +129,7 @@ export class VirtioBlock extends VirtioMmioDevice {
         break
       }
       case VIRTIO_BLK_T_FLUSH:
-        this.storage.flush()
+        storage = this.storage.flush()
         break
       case VIRTIO_BLK_T_GET_ID: {
         const id = new TextEncoder().encode(DEVICE_ID).subarray(0, 20) // up to 20 bytes, NUL padded

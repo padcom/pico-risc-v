@@ -21,6 +21,7 @@ import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, openSync, readd
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
+import { createHash } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
 import { buildWasm } from './build-wasm.ts'
 
@@ -82,17 +83,20 @@ writeFileSync(join(images, `${boot.kernel}.gz`), gzipSync(readFileSync(join(ALPI
 const disk = join(ALPINE, boot.disk)
 const size = statSync(disk).size
 const chunks: number[] = []
+// (What it holds, for pages that saved changes over another one.)
+const hash = createHash('sha256')
 const buffer = Buffer.alloc(CHUNK)
 const fd = openSync(disk, 'r')
 for (let index = 0; index * CHUNK < size; index++) {
   const length = readSync(fd, buffer, 0, Math.min(CHUNK, size - index * CHUNK), index * CHUNK)
   const chunk = buffer.subarray(0, length)
   if (chunk.every(byte => byte === 0)) continue
+  hash.update(`${index}:`).update(chunk)
   writeFileSync(join(images, 'disk', `${index}.gz`), gzipSync(chunk, { level: 9 }))
   chunks.push(index)
 }
 closeSync(fd)
-writeFileSync(join(images, 'disk/manifest.json'), JSON.stringify({ size, chunk: CHUNK, chunks }))
+writeFileSync(join(images, 'disk/manifest.json'), JSON.stringify({ size, chunk: CHUNK, chunks, id: hash.digest('hex') }))
 writeFileSync(join(images, 'boot.json'), JSON.stringify({ ...boot, kernel: `${boot.kernel}.gz`, disk: 'disk/manifest.json' }, null, 2))
 
 const used = (dir: string): number =>

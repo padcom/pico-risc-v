@@ -21,6 +21,8 @@ export interface ChunkManifest {
   size: number
   chunk: number
   chunks: number[]
+  /** What the image holds (a hash of it): for changes saved over it. */
+  id?: string
 }
 
 export interface ChunkedStorageOptions {
@@ -38,6 +40,7 @@ export interface ChunkedStorageOptions {
 export class ChunkedStorage implements BlockStorage {
   readonly readOnly = true
   readonly size: number
+  readonly id: string | undefined
   private readonly chunk: number
   private readonly present: Set<number>
   /** Chunks, least recently used first. */
@@ -52,6 +55,7 @@ export class ChunkedStorage implements BlockStorage {
     { cache = 256 * 1024 * 1024 }: ChunkedStorageOptions,
   ) {
     this.size = manifest.size
+    this.id = manifest.id
     this.chunk = manifest.chunk
     this.present = new Set(manifest.chunks)
     this.maxChunks = Math.max(1, Math.floor(cache / this.chunk))
