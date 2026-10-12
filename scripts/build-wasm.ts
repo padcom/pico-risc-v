@@ -37,6 +37,7 @@ function cargo(...args: string[]): void {
   const options = ['--quiet', '--manifest-path', join(root, 'hart', 'Cargo.toml')]
   execFileSync(cargo, [...args.slice(0, split), ...options, ...args.slice(split)], {
     stdio: 'inherit',
+    cwd: join(root, 'hart'), // (for hart/.cargo/config.toml)
     env: { ...process.env, PATH },
   })
 }

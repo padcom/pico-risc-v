@@ -1,0 +1,5 @@
+# Atomic instructions (and the shared memory they need: build.rs), so AMOs
+# and LR/SC are atomic across harts running on threads of their own. Stable
+# Rust warns that the target feature is unstable; it works.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+atomics,+bulk-memory,+mutable-globals"]

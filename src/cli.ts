@@ -8,7 +8,8 @@
  *                    [--virtual-clock] <image>
  *
  * The machine has RV64GC CPUs: one, or --harts of them (up to 8; each takes
- * about 115 MB for its caches).
+ * about 115 MB for its caches), each running on a thread of its own (with
+ * --virtual-clock they take turns on one).
  *
  * With --kernel, <image> is firmware (OpenSBI's fw_dynamic.bin), and <file>
  * the next boot stage: a bootloader (U-Boot) or a Linux kernel. It is loaded
@@ -74,6 +75,7 @@ const ramSize = Number(values.memory) * 1024 * 1024
 if (!Number.isInteger(ramSize) || ramSize <= 0) usage()
 const harts = Number(values.harts)
 if (!Number.isInteger(harts) || harts < 1 || harts > 8) usage()
+const threaded = harts > 1 && !values['virtual-clock']
 
 let pending: number[] = []
 const flush = () => {
@@ -107,7 +109,10 @@ const machine = new Machine({
   network,
   bootargs: values.bootargs,
   clock: values['virtual-clock'] ? 'virtual' : 'realtime',
-  output: byte => pending.push(byte),
+  output: byte => {
+    // (Threads run on their own: flush soon, rather than after a slice.)
+    if (pending.push(byte) === 1 && threaded) setImmediate(flush)
+  },
 })
 machine.boot(
   readFileSync(positionals[0]!),
@@ -151,7 +156,7 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 const yieldToEvents = () => new Promise(resolve => setImmediate(resolve))
 
 for (;;) {
-  const result = machine.run(SLICE)
+  const result = threaded ? await machine.runThreaded() : machine.run(SLICE)
   flush()
   switch (result) {
     case 'poweroff':

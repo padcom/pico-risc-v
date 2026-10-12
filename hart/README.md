@@ -11,10 +11,14 @@ Compressed (16-bit) instructions are expanded into the 32-bit instructions
 they stand for (a table lookup), then executed like those.
 
 An instance of the core holds one or more **harts**, which share its RAM
-(`CPU.harts()` in `src/cpu.ts`; the machine runs them in turn). Each has its
-own caches and JIT. AMOs and SC are atomic operations on RAM, and an SC
-succeeds only if memory still holds what its LR read, so they work across
-harts.
+(`CPU.harts()` in `src/cpu.ts`). Each has its own caches and JIT. The
+memory is a shared WebAssembly memory, so other instances of the core, on
+other threads, can run the harts too: the machine runs each hart on a
+thread of its own (`src/hart-worker.ts`), or, with the virtual clock, in
+turn on one. AMOs and SC are atomic operations on RAM (the core is built
+with WebAssembly's atomic instructions), an SC succeeds only if memory
+still holds what its LR read, and FENCE is a memory fence, so they work
+across harts on threads.
 
 `run()` executes code from a **decoded-instruction cache** (`blocks.rs`):
 blocks (the instructions up to the next jump or system instruction, within a
@@ -87,7 +91,10 @@ rustup target add wasm32-unknown-unknown
 ```
 
 Homebrew's `rustup` isn't put on `PATH`; the build finds it anyway. To use
-`cargo` yourself, add `/opt/homebrew/opt/rustup/bin` to `PATH`.
+`cargo` yourself, add `/opt/homebrew/opt/rustup/bin` to `PATH`, and run it in
+`hart/`, where `.cargo/config.toml` turns on WebAssembly's atomic
+instructions (stable Rust warns that this target feature is unstable; it
+works). `build.rs` has the linker make the memory shared and imported.
 
 ## Conformance
 

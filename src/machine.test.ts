@@ -333,6 +333,17 @@ describe('C programs compiled with GNU toolchain', () => {
     expect(screen).toBe('harts 4\namoadd 80000\nlr/sc 80000\nlocked 80000\n')
   })
 
+  it('smp.c: the same on 4 threads (runThreaded), every time', { timeout: 60_000 }, async () => {
+    // The harts really run at the same time now, differently each time.
+    for (let i = 0; i < 5; i++) {
+      let screen = ''
+      const machine = new Machine({ harts: 4, output: byte => (screen += String.fromCharCode(byte)) })
+      machine.boot(readFileSync(new URL('../examples/build/smp.bin', import.meta.url)))
+      expect(await machine.runThreaded()).toBe('poweroff')
+      expect(screen).toBe('harts 4\namoadd 80000\nlr/sc 80000\nlocked 80000\n')
+    }
+  })
+
   it('hello.c prints its greeting, returns 0 from main and powers off', () => {
     const { machine, result, screen } = boot('hello')
     expect(screen()).toBe('Hello, world! from RISC-V emulator\n')

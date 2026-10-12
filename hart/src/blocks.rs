@@ -314,7 +314,7 @@ impl Hart {
     /// (then the caller steps one instruction the regular way).
     #[inline(always)]
     pub(crate) fn run_block(&mut self, budget: u32) -> u32 {
-        if self.blocks.is_empty() || self.waiting || self.mip & self.mie != 0 {
+        if self.blocks.is_empty() || self.waiting || self.pending() != 0 {
             return 0; // no cache, or an interrupt to look at first
         }
         let pc = self.pc;

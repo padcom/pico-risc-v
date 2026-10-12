@@ -11,6 +11,7 @@ use crate::csr::*;
 use crate::memory::Access;
 use crate::mmu::{DATA_LOAD_OK, DATA_STORE_OK, Paging, TLB_EMPTY, TLB_SIZE};
 use crate::rvc;
+use core::sync::atomic::{AtomicU64, Ordering::{Relaxed, SeqCst}, fence};
 
 /// A synchronous exception: aborts the instruction, then the hart enters the
 /// trap handler. `tval` is the value the spec puts in mtval/stval.
@@ -107,8 +108,9 @@ pub struct Hart {
     // Machine-mode CSR state (sstatus, sie and sip are views of these)
     pub mstatus: u64,
     pub mie: u64,
-    /// Pending interrupts. Machine bits are driven by devices.
-    pub mip: u64,
+    /// Pending interrupts. Machine bits are driven by devices, which may run
+    /// on another thread: always accessed atomically.
+    pub mip: AtomicU64,
     pub mtvec: u64,
     pub mscratch: u64,
     pub mepc: u64,
@@ -208,7 +210,7 @@ impl Hart {
             frm: 0,
             mstatus: 0,
             mie: 0,
-            mip: 0,
+            mip: AtomicU64::new(0),
             mtvec: 0,
             mscratch: 0,
             mepc: 0,
@@ -263,6 +265,19 @@ impl Hart {
         }
     }
 
+    /// Enabled interrupts that are pending.
+    #[inline(always)]
+    pub(crate) fn pending(&self) -> u64 {
+        self.mip.load(Relaxed) & self.mie
+    }
+
+    /// Set the `mask` bits of mip to `value`'s, leaving the others (which
+    /// devices may be changing meanwhile) alone.
+    fn write_mip(&mut self, mask: u64, value: u64) {
+        self.mip.fetch_or(value & mask, Relaxed);
+        self.mip.fetch_and(value | !mask, Relaxed);
+    }
+
     /// Return to the power-on state and start executing at `pc`.
     pub fn reset(&mut self, pc: u64) {
         self.x = [0; 33];
@@ -273,7 +288,7 @@ impl Hart {
         self.priv_ = PRIV_M;
         self.mstatus = MSTATUS_UXL_SXL_64;
         self.mie = 0;
-        self.mip = 0;
+        self.mip.store(0, Relaxed);
         self.mtvec = 0;
         self.mscratch = 0;
         self.mepc = 0;
@@ -306,7 +321,7 @@ impl Hart {
         self.stop_reason = 0;
         let mut remaining = max_steps;
         while remaining > 0 {
-            if self.waiting && self.mip & self.mie == 0 {
+            if self.waiting && self.pending() == 0 {
                 return WFI_STALL;
             }
             match self.run_block(remaining) {
@@ -325,7 +340,7 @@ impl Hart {
 
     /// Take a pending interrupt, or fetch, decode and execute one instruction.
     pub fn step(&mut self) {
-        let pending = self.mip & self.mie;
+        let pending = self.pending();
         if self.waiting {
             if pending == 0 {
                 return;
@@ -616,6 +631,9 @@ impl Hart {
                 if funct3 > 0b001 {
                     return Err(illegal(inst));
                 }
+                // FENCE (and FENCE.I): order this hart's memory accesses as
+                // other harts (threads) see them.
+                fence(SeqCst);
             }
 
             LOAD_FP | STORE_FP | FMADD | FMSUB | FNMSUB | FNMADD | OP_FP => self.execute_fp(inst)?,
@@ -688,7 +706,7 @@ impl Hart {
                 }
                 // Resumes once an interrupt is pending and enabled in mie, even if
                 // it is globally disabled (then execution simply continues past WFI).
-                if self.mip & self.mie == 0 {
+                if self.pending() == 0 {
                     self.waiting = true;
                 }
                 Ok(next_pc)
@@ -736,13 +754,13 @@ impl Hart {
             MEPC => self.mepc,
             MCAUSE => self.mcause,
             MTVAL => self.mtval,
-            MIP => self.mip,
+            MIP => self.mip.load(Relaxed),
             MHARTID => self.id,
             MCOUNTINHIBIT | MVENDORID | MARCHID | MIMPID | MCONFIGPTR => 0,
 
             SSTATUS => self.mstatus & SSTATUS_VISIBLE | self.state_dirty(),
             SIE => self.mie & self.mideleg,
-            SIP => self.mip & self.mideleg,
+            SIP => self.mip.load(Relaxed) & self.mideleg,
             STVEC => self.stvec,
             SCOUNTEREN => self.scounteren,
             SSCRATCH => self.sscratch,
@@ -811,7 +829,7 @@ impl Hart {
             MEDELEG => self.medeleg = value & MEDELEG_WRITABLE,
             MIDELEG => self.mideleg = value & MIDELEG_WRITABLE,
             MIE => self.mie = value & MIE_WRITABLE,
-            MIP => self.mip = (self.mip & !MIP_WRITABLE) | (value & MIP_WRITABLE),
+            MIP => self.write_mip(MIP_WRITABLE, value),
             MTVEC => self.mtvec = tvec(value),
             MCOUNTEREN => self.mcounteren = value & COUNTEREN_WRITABLE,
             MSCRATCH => self.mscratch = value,
@@ -826,7 +844,7 @@ impl Hart {
             SIE => self.mie = (self.mie & !self.mideleg) | (value & self.mideleg),
             SIP => {
                 let writable = MIP_SSIP & self.mideleg;
-                self.mip = (self.mip & !writable) | (value & writable);
+                self.write_mip(writable, value);
             }
             STVEC => self.stvec = tvec(value),
             SCOUNTEREN => self.scounteren = value & COUNTEREN_WRITABLE,

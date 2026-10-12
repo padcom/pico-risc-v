@@ -56,10 +56,12 @@ const BREAK_ON_EBREAK = FIELDS.length + 1
  * pointer into its memory, from hart_new.
  */
 interface Core {
+  /** (Shared and imported: made by createHarts.) */
   memory: WebAssembly.Memory
   // (64-bit values arrive as signed bigints: WebAssembly's i64.)
   ram_alloc(base: number, size: number): number
   hart_new(id: number, resetVector: bigint, flags: number): number
+  stack_alloc(size: number): number
   registers(hart: number): number
   fp_registers(hart: number): number
   reset(hart: number, pc: bigint): void
@@ -73,6 +75,7 @@ interface Core {
   jit_init(hart: number, tableBase: number, threshold: number, batch: number): void
   jit_op(hart: number, index: number, pc: bigint): number
   __indirect_function_table: WebAssembly.Table
+  __stack_pointer: WebAssembly.Global
   get(hart: number, field: number): bigint
   set(hart: number, field: number, value: bigint): void
 }
@@ -82,10 +85,27 @@ interface Hart {
   core: Core
   ptr: number
   ram: RAM | undefined
+  jit: false | { threshold: number; batch: number }
 }
+
+/** What a thread needs to run a hart in an instance of the core of its own (hart-worker.ts). */
+export interface HartThread {
+  module: WebAssembly.Module
+  memory: WebAssembly.Memory
+  hart: number
+  stackTop: number
+  jit: false | { threshold: number; batch: number }
+}
+
+/** A hart thread's stack. */
+const THREAD_STACK = 1 << 20
 
 /** A number or bigint as the 64-bit pattern the core takes (negative numbers two's complement). */
 const u64 = (value: number | bigint) => BigInt.asUintN(64, typeof value === 'bigint' ? value : BigInt(Math.trunc(value)))
+
+/** The core's memory, in 64 KiB pages: what it starts with (hart/build.rs), and at most. */
+const INITIAL_MEMORY = 256
+const MAX_MEMORY = 65536
 
 let compiled: WebAssembly.Module | undefined
 /** The core, compiled once (by npm run build:wasm, from hart/), instantiated per CPU. */
@@ -134,7 +154,10 @@ function createHarts(bus: Bus, count: number, { resetVector = 0, readTime, break
       return 1
     },
   }
-  const core = new WebAssembly.Instance(coreModule(), { env }).exports as unknown as Core
+  // Shared, so harts can also run on threads of their own (machine.ts).
+  const memory = new WebAssembly.Memory({ initial: INITIAL_MEMORY, maximum: MAX_MEMORY, shared: true })
+  const exports = new WebAssembly.Instance(coreModule(), { env: { ...env, memory } }).exports
+  const core = { ...exports, memory } as unknown as Core
   // RAM first (the harts' caches are sized for it), then the harts.
   // Allocating grows the core's memory, so views are made afterwards;
   // nothing allocates later, so they stay valid.
@@ -151,7 +174,8 @@ function createHarts(bus: Bus, count: number, { resetVector = 0, readTime, break
     for (const ptr of ptrs) core.jit_init(ptr, core.__indirect_function_table.grow(core.jit_slots()), threshold, batch)
   }
   const ramView = ram && new RAM(new Uint8Array(core.memory.buffer, offset, ram.size))
-  return ptrs.map(ptr => ({ core, ptr, ram: ramView }))
+  const jitOptions = ram && jit ? { ...JIT_DEFAULTS, ...jit } : false
+  return ptrs.map(ptr => ({ core, ptr, ram: ramView, jit: jitOptions }))
 }
 
 /**
@@ -182,6 +206,9 @@ export class CPU {
   readonly id: number
   private readonly core: Core
   private readonly hart: number
+  private readonly jit: Hart['jit']
+  /** The stack for threads running this hart (allocated the first time). */
+  private threadStack = 0
 
   /**
    * `count` harts (mhartid 0..count-1) sharing one core: its RAM, if
@@ -194,17 +221,29 @@ export class CPU {
   constructor(
     readonly bus: Bus,
     options: CPUOptions = {},
-    { core, ptr: hart, ram }: Hart = createHarts(bus, 1, options)[0]!,
+    { core, ptr: hart, ram, jit }: Hart = createHarts(bus, 1, options)[0]!,
     id = 0,
   ) {
     this.core = core
     this.hart = hart
+    this.jit = jit
     this.ram = ram
     this.id = id
     const registers = core.registers(hart)
     this.x64 = new BigInt64Array(core.memory.buffer, registers, 32)
     this.f = new BigUint64Array(core.memory.buffer, core.fp_registers(hart), 32)
     this.x = lowHalves(new Int32Array(core.memory.buffer, registers, 64))
+  }
+
+  /**
+   * What a thread needs to run this hart in an instance of the core of its
+   * own, on the same memory, with a stack of its own. Only one may run it,
+   * and nothing else meanwhile: not run(), step() or reset().
+   */
+  thread(): HartThread {
+    this.threadStack ||= this.core.stack_alloc(THREAD_STACK)
+    const stackTop = this.threadStack + THREAD_STACK
+    return { module: coreModule(), memory: this.core.memory, hart: this.hart, stackTop, jit: this.jit }
   }
 
   /**

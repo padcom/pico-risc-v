@@ -413,12 +413,14 @@ impl Hart {
         let op = self.ops[index as usize];
         let next = pc.wrapping_add(op.len as u64);
         let addr = self.x[op.rs1 as usize].wrapping_add(op.imm as i64 as u64);
-        let epoch = self.code.epoch.load(Relaxed);
         let result = self.execute_op(&op, pc, next);
-        let code_changed = self.code.epoch.load(Relaxed) != epoch;
+        // Code was written, by this instruction or another hart since this
+        // one last looked (run_block then forgets chains, which may lead to
+        // stale code; FENCE.I, after another hart wrote code, comes here).
+        let code_changed = self.code.epoch.load(Relaxed) != self.code_epoch;
         match result {
             Ok(target) => {
-                let leave = self.stop_reason != 0 || self.mip & self.mie != 0 || self.waiting || code_changed;
+                let leave = self.stop_reason != 0 || self.pending() != 0 || self.waiting || code_changed;
                 if target != next || leave {
                     self.retired += 1;
                     self.pc = target;
@@ -434,7 +436,7 @@ impl Hart {
             Err(trap) => {
                 self.pc = pc;
                 self.block_trap(&op, pc, trap);
-                if self.stop_reason != 0 || self.mip & self.mie != 0 || code_changed { 1 } else { 2 }
+                if self.stop_reason != 0 || self.pending() != 0 || code_changed { 1 } else { 2 }
             }
         }
     }
@@ -548,7 +550,8 @@ fn build_module(out: &mut Vec<u8>, bodies: &[u8], count: usize) {
     out.extend_from_slice(&[2, 0x60, 6, I32, I64, I32, I32, I32, I64, 1, I32, 0x60, 3, I32, I32, I64, 1, I32]);
     end_section(out, s);
     let s = begin_section(out, 2);
-    out.extend_from_slice(&[3, 3, b'e', b'n', b'v', 6, b'm', b'e', b'm', b'o', b'r', b'y', 2, 0, 0]);
+    // (The memory is shared: limits 0 to 4 GiB, 65536 pages.)
+    out.extend_from_slice(&[3, 3, b'e', b'n', b'v', 6, b'm', b'e', b'm', b'o', b'r', b'y', 2, 3, 0, 0x80, 0x80, 0x04]);
     out.extend_from_slice(&[3, b'e', b'n', b'v', 5, b't', b'a', b'b', b'l', b'e', 1, FUNCREF, 0, 0]);
     out.extend_from_slice(&[3, b'e', b'n', b'v', 2, b'o', b'p', 0, 1]);
     end_section(out, s);

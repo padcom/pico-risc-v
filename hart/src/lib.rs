@@ -25,6 +25,7 @@ mod testfloat;
 
 use blocks::{Code, NO_CODE};
 use core::cell::UnsafeCell;
+use core::sync::atomic::Ordering::Relaxed;
 use hart::Hart;
 
 /// RAM, and what's known about code in it: shared by the harts (set up once,
@@ -71,6 +72,14 @@ pub extern "C" fn ram_alloc(base: u32, size: u32) -> *mut u8 {
     ram.size = size as u64;
     ram.code = Box::leak(Box::new(Code::new((size as usize).div_ceil(4096))));
     ram.ptr
+}
+
+/// Room for a stack of `size` bytes (a multiple of 16), for another
+/// instance of this module (on the same memory) to run a hart on a thread of
+/// its own: its `__stack_pointer` goes to the end. Returns where it starts.
+#[unsafe(no_mangle)]
+pub extern "C" fn stack_alloc(size: u32) -> *mut u8 {
+    vec![0u128; size as usize / 16].leak().as_mut_ptr().cast()
 }
 
 /// A new hart, `id` (mhartid), reset to start at `reset_vector`. With RAM
@@ -166,7 +175,12 @@ pub extern "C" fn stop(h: *mut Hart) {
 #[unsafe(no_mangle)]
 pub extern "C" fn set_interrupt_pending(h: *mut Hart, bit: u32, pending: u32) {
     let h = hart(h);
-    h.mip = if pending != 0 { h.mip | bit as u64 } else { h.mip & !(bit as u64) };
+    // (Atomically: the hart may be running on another thread.)
+    if pending != 0 {
+        h.mip.fetch_or(bit as u64, Relaxed);
+    } else {
+        h.mip.fetch_and(!(bit as u64), Relaxed);
+    }
 }
 
 /// Instructions retired since reset (not what software set the counters to).
@@ -208,7 +222,7 @@ pub extern "C" fn get(h: *mut Hart, field: u32) -> u64 {
         PRIV => h.priv_ as u64,
         MSTATUS => h.mstatus,
         MIE => h.mie,
-        MIP => h.mip,
+        MIP => h.mip.load(Relaxed),
         MTVEC => h.mtvec,
         MSCRATCH => h.mscratch,
         MEPC => h.mepc,
@@ -240,7 +254,7 @@ pub extern "C" fn set(h: *mut Hart, field: u32, value: u64) {
         PRIV => h.priv_ = value as u32,
         MSTATUS => h.mstatus = value,
         MIE => h.mie = value,
-        MIP => h.mip = value,
+        MIP => h.mip.store(value, Relaxed),
         MTVEC => h.mtvec = value,
         MSCRATCH => h.mscratch = value,
         MEPC => h.mepc = value,

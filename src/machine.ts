@@ -1,4 +1,6 @@
+import { Worker } from 'node:worker_threads'
 import type { BlockStorage } from './block-storage.js'
+import { BusError } from './bus.js'
 import { Clint } from './clint.js'
 import { CPU, type CPUOptions } from './cpu.js'
 import { encodeFdt, type FdtNode } from './fdt.js'
@@ -117,6 +119,33 @@ export type RunResult = 'poweroff' | 'reboot' | 'breakpoint' | 'idle' | 'limit'
 /** How many instructions to run between timer updates (and each hart's turn). */
 const SLICE = 10_000
 
+/**
+ * runThreaded()'s threads (hart-worker.ts), and how they talk to this one:
+ * an Int32Array on shared memory, `Control`. Word 0 is the doorbell, which a
+ * thread bumps (and notifies) when it wants something; then come BOX words
+ * per hart: a mailbox for a device access (STATE: 1 when the thread has
+ * filled in OP, ADDR, WIDTH, VALUE; 2 when this thread has answered in
+ * RESULT and FAULT), WAKE, which this thread bumps (and notifies) to wake
+ * the hart from WFI, and EVENT, set when run() stopped otherwise (a
+ * breakpoint: run()'s code).
+ */
+const WORKER = new URL(import.meta.url.endsWith('.ts') ? './hart-worker.ts' : './hart-worker.js', import.meta.url)
+const DOORBELL = 0
+const BOX = 16
+const STATE = 0
+const OP = 1
+const ADDR = 2
+const WIDTH = 3
+const VALUE = 4
+const RESULT = 5
+const FAULT = 6
+const WAKE = 7
+const EVENT = 8
+/** run()'s code for a breakpoint (cpu.ts: STOP_REASONS). */
+const BREAKPOINT = 2
+/** How long runThreaded() waits for the harts at most before looking at the timers again (ms). */
+const MAX_WAIT = 10
+
 /** A complete computer: CPUs + RAM + terminal + timer + syscon on one bus. */
 export class Machine {
   readonly bus = new SystemBus()
@@ -148,13 +177,16 @@ export class Machine {
   private lastTicks = 0
   private running: CPU | undefined
   private runningFrom = 0
+  /** While runThreaded() runs: Control, and the clock the threads share (hart-worker.ts). */
+  private threads: { control: Int32Array; clock: Float64Array } | undefined
   private readonly startTime: number | undefined
   private readonly fixedRngSeed: Uint8Array | undefined
   /** This power-on's rng-seed. */
   private rngSeed: Uint8Array
   /** Time of day at power-on (ms since 1970), for the virtual clock. */
   private powerOnTime = 0
-  private readonly epoch = performance.now()
+  /** The realtime clock's start (ms, absolute: the same in every thread). */
+  private readonly epoch = performance.timeOrigin + performance.now()
   private exit: 'poweroff' | 'reboot' | undefined
   private images: { offset: number; data: Uint8Array }[] = []
   private next: BootOptions['next']
@@ -190,7 +222,16 @@ export class Machine {
     })
     this.cpu = this.cpus[0]!
     this.ram = this.cpu.ram!
-    const raise = (bit: number, pending: boolean, hart: number) => this.cpus[hart]!.setInterruptPending(bit, pending)
+    const raise = (bit: number, pending: boolean, hart: number) => {
+      const cpu = this.cpus[hart]!
+      const before = this.threads && cpu.mip
+      cpu.setInterruptPending(bit, pending)
+      if (pending && this.threads && cpu.mip !== before) {
+        // Wake it, in case it waits in WFI.
+        Atomics.add(this.threads.control, BOX * (hart + 1) + WAKE, 1)
+        Atomics.notify(this.threads.control, BOX * (hart + 1) + WAKE)
+      }
+    }
     this.clint = new Clint(() => this.now(), raise, harts)
     this.syscon = new Syscon(command => {
       this.exit = command
@@ -330,6 +371,78 @@ export class Machine {
     return 'limit'
   }
 
+  /**
+   * Run the harts in parallel, each on a thread of its own (with the
+   * realtime clock), until the program powers off or reboots, or a hart hits
+   * a breakpoint. The devices stay on this thread, which serves the harts'
+   * accesses to them and keeps the timers up to date, in between its other
+   * work (I/O): the returned promise settles when the harts have stopped.
+   */
+  async runThreaded(): Promise<RunResult> {
+    if (this.virtual) throw new Error('runThreaded() needs the realtime clock')
+    const control = new Int32Array(new SharedArrayBuffer(4 * BOX * (this.cpus.length + 1)))
+    const clock = new Float64Array(new SharedArrayBuffer(16))
+    clock[0] = this.epoch
+    clock[1] = this.clint.mtime - this.now()
+    this.threads = { control, clock }
+    let failure: unknown
+    const workers = this.cpus.map((cpu, index) => {
+      const worker = new Worker(WORKER, { workerData: { ...cpu.thread(), index, control: control.buffer, clock: clock.buffer } })
+      worker.on('error', error => {
+        failure ??= error
+        Atomics.add(control, DOORBELL, 1)
+        Atomics.notify(control, DOORBELL)
+      })
+      return worker
+    })
+    try {
+      for (;;) {
+        // (Read first: a request coming in while serving rings it again.)
+        const doorbell = Atomics.load(control, DOORBELL)
+        if (failure) throw failure
+        const result = this.serveHarts()
+        if (result) return result
+        this.clint.update()
+        const { async, value } = Atomics.waitAsync(control, DOORBELL, doorbell, Math.min(MAX_WAIT, this.microsUntilTimer() / 1000))
+        if (async) await value
+      }
+    } finally {
+      this.threads = undefined
+      await Promise.all(workers.map(worker => worker.terminate()))
+    }
+  }
+
+  /** Answer the threads' device accesses; returns why to stop, if it's time to. */
+  private serveHarts(): RunResult | undefined {
+    const { control, clock } = this.threads!
+    for (let hart = 0; hart < this.cpus.length; hart++) {
+      const box = BOX * (hart + 1)
+      if (control[box + EVENT] === BREAKPOINT) return 'breakpoint'
+      if (Atomics.load(control, box + STATE) !== 1) continue
+      const addr = control[box + ADDR]! >>> 0
+      const width = control[box + WIDTH]!
+      try {
+        if (control[box + OP] === 0) {
+          control[box + RESULT] = width === 4 ? this.bus.read32(addr) : width === 2 ? this.bus.read16(addr) : this.bus.read8(addr)
+        } else {
+          const value = control[box + VALUE]!
+          if (width === 4) this.bus.write32(addr, value >>> 0)
+          else if (width === 2) this.bus.write16(addr, value & 0xffff)
+          else this.bus.write8(addr, value & 0xff)
+          clock[1] = this.clint.mtime - this.now() // (in case mtime was set)
+        }
+        control[box + FAULT] = 0
+      } catch (e) {
+        if (!(e instanceof BusError)) throw e
+        control[box + FAULT] = 1
+      }
+      Atomics.store(control, box + STATE, 2)
+      Atomics.notify(control, box + STATE)
+      if (this.exit) return this.exit
+    }
+    return undefined
+  }
+
   /** Microseconds until the next timer interrupt fires (Infinity if none is armed). */
   microsUntilTimer(): number {
     const mtime = this.clint.mtime
@@ -351,7 +464,7 @@ export class Machine {
       this.lastTicks = Math.max(this.lastTicks, ticks)
       return Math.floor(this.lastTicks / this.ipu) + this.skippedMicros
     }
-    return Math.floor((performance.now() - this.epoch) * 1000)
+    return Math.floor((performance.timeOrigin + performance.now() - this.epoch) * 1000)
   }
 
   private newRngSeed(): Uint8Array {
