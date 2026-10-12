@@ -1,5 +1,7 @@
-import { readFileSync } from 'node:fs'
-import { setFlagsFromString } from 'node:v8'
+// Node's modules only in Node (this also runs in browsers).
+const node = typeof process !== 'undefined' && process.versions?.node !== undefined
+const fs = node ? await import('node:fs') : undefined
+const v8 = node ? await import('node:v8') : undefined
 import { type Bus, BusError } from './bus.js'
 import type { Priv } from './csr.js'
 import { RAM } from './ram.js'
@@ -110,7 +112,17 @@ const MAX_MEMORY = 65536
 let compiled: WebAssembly.Module | undefined
 /** The core, compiled once (by npm run build:wasm, from hart/), instantiated per CPU. */
 function coreModule(): WebAssembly.Module {
-  return (compiled ??= new WebAssembly.Module(readFileSync(new URL('../build/hart.wasm', import.meta.url))))
+  if (!compiled && !fs) throw new Error('No core: call setCoreModule() first')
+  return (compiled ??= new WebAssembly.Module(fs!.readFileSync(new URL('../build/hart.wasm', import.meta.url))))
+}
+
+/**
+ * The core to use, compiled (from build/hart.wasm). In a browser, where
+ * there's no file to read it from, the page fetches and compiles it; Node
+ * reads the file when it's first needed.
+ */
+export function setCoreModule(module: WebAssembly.Module): void {
+  compiled = module
 }
 
 /**
@@ -168,7 +180,7 @@ function createHarts(bus: Bus, count: number, { resetVector = 0, readTime, break
     // V8 first compiles WebAssembly quickly, then optimizes a function
     // once it has run "13 MB" of code; the JIT makes thousands of small
     // functions, which run hot right away: optimize them much sooner.
-    setFlagsFromString('--wasm-tiering-budget=20000')
+    v8?.setFlagsFromString('--wasm-tiering-budget=20000')
     const { threshold, batch } = { ...JIT_DEFAULTS, ...jit }
     // Each hart compiles on its own, into its own slots.
     for (const ptr of ptrs) core.jit_init(ptr, core.__indirect_function_table.grow(core.jit_slots()), threshold, batch)

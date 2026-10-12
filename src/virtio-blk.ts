@@ -23,10 +23,16 @@ const DEVICE_ID = 'risc-emulator disk'
 
 /**
  * virtio block device with a single request queue. Requests are carried out
- * synchronously when the driver notifies the queue.
+ * when the driver notifies the queue: right away, or, with a storage that
+ * reads asynchronously, when it has the data (requests may complete in any
+ * order).
  */
 export class VirtioBlock extends VirtioMmioDevice {
   protected readonly deviceId = 2
+  /** Requests still being carried out, by an asynchronous storage. */
+  private pending = 0
+  /** Bumped by reset: requests from before it don't complete after it. */
+  private generation = 0
 
   constructor(
     private readonly storage: BlockStorage,
@@ -34,6 +40,17 @@ export class VirtioBlock extends VirtioMmioDevice {
     irq: (high: boolean) => void,
   ) {
     super(memory, irq, [256])
+  }
+
+  /** True while the storage is still busy with requests. */
+  get busy(): boolean {
+    return this.pending > 0
+  }
+
+  override reset(): void {
+    super.reset()
+    this.generation++
+    this.pending = 0
   }
 
   get capacitySectors(): number {
@@ -59,8 +76,22 @@ export class VirtioBlock extends VirtioMmioDevice {
     const q = this.queues[0]!
     let handled = false
     for (let chain = q.pop(); chain; chain = q.pop()) {
-      q.push(chain.head, this.handleRequest(chain))
-      handled = true
+      const written = this.handleRequest(chain)
+      if (typeof written === 'number') {
+        q.push(chain.head, written)
+        handled = true
+        continue
+      }
+      const generation = this.generation
+      this.pending++
+      void written.then(written => {
+        if (generation !== this.generation) return
+        this.pending--
+        this.guarded(() => {
+          q.push(chain.head, written)
+          this.signalUsed()
+        })
+      })
     }
     if (handled) this.signalUsed()
   }
@@ -68,9 +99,9 @@ export class VirtioBlock extends VirtioMmioDevice {
   /**
    * Header (device-readable): type u32, reserved u32, sector u64. Status: the
    * last device-writable byte. Data: everything in between. Returns the bytes
-   * written to guest memory.
+   * written to guest memory (once the storage is done, if it's asynchronous).
    */
-  private handleRequest({ readable, writable }: Chain): number {
+  private handleRequest({ readable, writable }: Chain): number | Promise<number> {
     const q = this.queues[0]!
     const out = q.read(readable)
     const inLength = length(writable)
@@ -82,18 +113,19 @@ export class VirtioBlock extends VirtioMmioDevice {
 
     let status = VIRTIO_BLK_S_OK
     let dataWritten = 0
+    let storage: void | Promise<void> = undefined
     switch (type) {
       case VIRTIO_BLK_T_IN:
         if (offset + data.length > this.storage.size) status = VIRTIO_BLK_S_IOERR
         else {
-          this.storage.read(offset, data)
+          storage = this.storage.read(offset, data)
           dataWritten = data.length
         }
         break
       case VIRTIO_BLK_T_OUT: {
         const payload = out.subarray(16)
         if (this.storage.readOnly || offset + payload.length > this.storage.size) status = VIRTIO_BLK_S_IOERR
-        else this.storage.write(offset, payload)
+        else storage = this.storage.write(offset, payload)
         break
       }
       case VIRTIO_BLK_T_FLUSH:
@@ -109,8 +141,21 @@ export class VirtioBlock extends VirtioMmioDevice {
         status = VIRTIO_BLK_S_UNSUPP
     }
 
-    q.write(writable, data.subarray(0, dataWritten))
-    q.write(writable, Uint8Array.of(status), inLength - 1) // status: always the very last byte
-    return dataWritten + 1
+    const complete = () => {
+      q.write(writable, data.subarray(0, dataWritten))
+      q.write(writable, Uint8Array.of(status), inLength - 1) // status: always the very last byte
+      return dataWritten + 1
+    }
+    if (!storage) return complete()
+    // (After a reset, the guest's buffers may be in other use: hands off.)
+    const generation = this.generation
+    return storage.then(
+      () => (generation === this.generation ? complete() : 0),
+      () => {
+        status = VIRTIO_BLK_S_IOERR
+        dataWritten = 0
+        return generation === this.generation ? complete() : 0
+      },
+    )
   }
 }

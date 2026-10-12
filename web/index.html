@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>risc-emulator</title>
+    <link rel="stylesheet" href="xterm/css/xterm.css" />
+    <style>
+      html, body { height: 100%; margin: 0; background: #000; color: #ccc; font: 13px system-ui, sans-serif; }
+      body { display: flex; flex-direction: column; }
+      #terminal { flex: 1; min-height: 0; padding: 4px; }
+      #status { padding: 2px 8px; background: #222; }
+    </style>
+    <!-- The emulator's modules (dist/) import xterm.js by name. (Paths are
+         relative to the page, so it works from anywhere it's served.) -->
+    <script type="importmap">
+      {
+        "imports": {
+          "@xterm/xterm": "./xterm/lib/xterm.mjs",
+          "@xterm/addon-fit": "./xterm-fit/lib/addon-fit.mjs"
+        }
+      }
+    </script>
+    <script type="module" src="dist/browser.js"></script>
+  </head>
+  <body>
+    <div id="terminal"></div>
+    <div id="status">starting…</div>
+  </body>
+</html>

@@ -22,7 +22,9 @@ runs boot right away.
 `npm test` additionally needs a RISC-V bare-metal GCC for the test programs,
 installed as `riscv64-elf-gcc` (macOS: `brew install riscv64-elf-gcc`; Linux
 distributions name theirs differently, e.g. `riscv64-unknown-elf-gcc`), and
-the test suites' submodule (`git submodule update --init`).
+the test suites' submodule (`git submodule update --init`). The test of the
+web page runs in a headless Chromium, `npx playwright install chromium`
+(skipped without it).
 
 ## What runs
 
@@ -166,6 +168,29 @@ HTTPS works (`curl`, apt with https sources), though each new connection
 takes a moment: the TLS handshake's cryptography runs on the emulated CPU.
 The guest gets the date for certificate checks from the emulator's real-time
 clock.
+
+## In a web browser: `npm run web`
+
+`npm run web` serves the emulator as a web page: open
+<http://localhost:8080/> and the same Debian boots in the page, on 4 harts
+(Web Workers) with 1 GiB of RAM, in an [xterm.js](https://xtermjs.org/)
+terminal. Debian must have been set up once (`npm start` does it).
+
+- **The disk** is `pristine.raw`, read from the server a piece at a time as
+  Debian needs it. What Debian writes stays in the page, like `--snapshot`:
+  closing or reloading the page throws it away.
+- **The network** goes through the server: the page sends the network
+  card's frames over a WebSocket (browsers can't open sockets themselves)
+  to a user-mode NAT in `npm run web`, the same as `npm start`'s, so
+  `apt` and `curl` work. It forwards `localhost:2222` to Debian's port 22
+  too, unless that port is taken (by `npm start`, say).
+- `?harts=2`, `?memory=512` change the machine; `?image=examples/build/hello.bin`
+  boots a bare-metal program instead of Debian.
+
+The harts' threads share memory (`SharedArrayBuffer`), which browsers only
+allow on a cross-origin isolated page: the server sends the headers for
+that. `npm run web -- --port 9000` picks another port. Only this machine can
+connect.
 
 ## Where the setup runs
 

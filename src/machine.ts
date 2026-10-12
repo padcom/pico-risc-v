@@ -1,10 +1,10 @@
-import { Worker } from 'node:worker_threads'
 import type { BlockStorage } from './block-storage.js'
 import { BusError } from './bus.js'
 import { Clint } from './clint.js'
 import { CPU, type CPUOptions } from './cpu.js'
 import { encodeFdt, type FdtNode } from './fdt.js'
 import { GoldfishRtc } from './goldfish-rtc.js'
+import type { HartThreadData } from './hart-worker.js'
 import { Plic } from './plic.js'
 import type { RAM } from './ram.js'
 import { SystemBus } from './system-bus.js'
@@ -130,6 +130,13 @@ const SLICE = 10_000
  * breakpoint: run()'s code).
  */
 const WORKER = new URL(import.meta.url.endsWith('.ts') ? './hart-worker.ts' : './hart-worker.js', import.meta.url)
+// Threads are worker_threads Workers in Node, Web Workers in browsers.
+const threads = typeof process !== 'undefined' && process.versions?.node !== undefined ? await import('node:worker_threads') : undefined
+/**
+ * Without Atomics.waitAsync (some browsers), the threads also post a message
+ * when they ring the doorbell, which wakes this thread instead.
+ */
+const waitAsync = typeof Atomics.waitAsync === 'function'
 const DOORBELL = 0
 const BOX = 16
 const STATE = 0
@@ -386,15 +393,23 @@ export class Machine {
     clock[1] = this.clint.mtime - this.now()
     this.threads = { control, clock }
     let failure: unknown
-    const workers = this.cpus.map((cpu, index) => {
-      const worker = new Worker(WORKER, { workerData: { ...cpu.thread(), index, control: control.buffer, clock: clock.buffer } })
-      worker.on('error', error => {
-        failure ??= error
-        Atomics.add(control, DOORBELL, 1)
-        Atomics.notify(control, DOORBELL)
-      })
-      return worker
-    })
+    // Without waitAsync: woken by the threads' messages (or the timer).
+    let wakeUp = () => {}
+    const ring = () => {
+      Atomics.add(control, DOORBELL, 1)
+      Atomics.notify(control, DOORBELL)
+      wakeUp()
+    }
+    const workers = this.cpus.map((cpu, index) =>
+      startThread(
+        { ...cpu.thread(), index, control: control.buffer, clock: clock.buffer, ring: !waitAsync },
+        () => wakeUp(),
+        error => {
+          failure ??= error
+          ring()
+        },
+      ),
+    )
     try {
       for (;;) {
         // (Read first: a request coming in while serving rings it again.)
@@ -403,8 +418,21 @@ export class Machine {
         const result = this.serveHarts()
         if (result) return result
         this.clint.update()
-        const { async, value } = Atomics.waitAsync(control, DOORBELL, doorbell, Math.min(MAX_WAIT, this.microsUntilTimer() / 1000))
-        if (async) await value
+        const wait = Math.min(MAX_WAIT, this.microsUntilTimer() / 1000)
+        if (waitAsync) {
+          const { async, value } = Atomics.waitAsync(control, DOORBELL, doorbell, wait)
+          if (async) await value
+        } else if (Atomics.load(control, DOORBELL) === doorbell) {
+          // Until a thread's message, or the timeout.
+          await new Promise<void>(resolve => {
+            const timer = setTimeout(resolve, wait)
+            wakeUp = () => {
+              clearTimeout(timer)
+              resolve()
+            }
+          })
+          wakeUp = () => {}
+        }
       }
     } finally {
       this.threads = undefined
@@ -487,9 +515,10 @@ export class Machine {
     const interrupted = () => this.cpus.some(cpu => (cpu.mip & cpu.mie) !== 0)
     this.clint.update()
     if (interrupted()) return true
-    // While the guest waits on the real world (network), virtual time must not
-    // race ahead: its timeouts would expire before the host answers.
-    if (!this.virtual || this.network?.busy) return false
+    // While the guest waits on the real world (network, a disk that reads
+    // asynchronously), virtual time must not race ahead: its timeouts would
+    // expire before the host answers.
+    if (!this.virtual || this.network?.busy || this.disk?.busy) return false
     const wait = this.microsUntilTimer()
     if (wait === Infinity) return false
     this.skippedMicros += wait
@@ -655,3 +684,25 @@ const DISK_IRQ = 1
 const NET_IRQ = 2
 const RTC_IRQ = 3
 const TERMINAL_IRQ = 4
+
+/**
+ * Start a thread running a hart (hart-worker.ts): `message` hears from it
+ * (when it rings, see HartThreadData.ring), `error` of it failing.
+ */
+function startThread(
+  data: HartThreadData,
+  message: () => void,
+  error: (error: unknown) => void,
+): { terminate(): Promise<unknown> } {
+  if (threads) {
+    const worker = new threads.Worker(WORKER, { workerData: data })
+    worker.on('message', message)
+    worker.on('error', error)
+    return worker
+  }
+  const worker = new Worker(WORKER, { type: 'module' })
+  worker.onmessage = message
+  worker.onerror = event => error(new Error(event.message))
+  worker.postMessage(data)
+  return { terminate: async () => worker.terminate() }
+}

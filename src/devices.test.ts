@@ -163,10 +163,12 @@ function virtioHarness(storage: BlockStorage) {
       usedId: view.getUint32(slot, true),
       usedLen: view.getUint32(slot + 4, true),
       buffer: (i: number) => ram.subarray(chain[i + 1]!.addr, chain[i + 1]!.addr + chain[i + 1]!.length),
+      /** The status byte as it is now (an asynchronous storage completes later). */
+      statusNow: () => ram[status],
     }
   }
 
-  return { dev, request, irq: () => irq, flushed: () => flushed }
+  return { dev, request, irq: () => irq, flushed: () => flushed, usedIdx: () => view.getUint16(USED + 2, true) }
 }
 
 describe('virtio block device', () => {
@@ -240,6 +242,42 @@ describe('virtio block device', () => {
     expect(h.irq()).toBe(false)
   })
 
+  it('completes a request when an asynchronous storage has the data', async () => {
+    const storage = new MemoryStorage(new Uint8Array(4096).fill(5))
+    let release = () => {}
+    const slow: BlockStorage = {
+      size: storage.size,
+      readOnly: false,
+      read: (offset, dest) => new Promise<void>(resolve => (release = () => (storage.read(offset, dest), resolve()))),
+      write: (offset, src) => storage.write(offset, src),
+      flush: () => {},
+    }
+    const h = virtioHarness(slow)
+    const r = h.request(IN, 1, [{ length: 512, writable: true }])
+    expect([r.statusNow(), h.usedIdx(), h.irq(), h.dev.busy]).toEqual([0xff, 0, false, true])
+    release()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect([r.statusNow(), h.usedIdx(), h.irq(), h.dev.busy]).toEqual([0, 1, true, false])
+    expect(r.buffer(0).every(b => b === 5)).toBe(true)
+  })
+
+  it('drops a request still being read when reset meanwhile', async () => {
+    let release = () => {}
+    const slow: BlockStorage = {
+      size: 4096,
+      readOnly: false,
+      read: () => new Promise<void>(resolve => (release = resolve)),
+      write: () => {},
+      flush: () => {},
+    }
+    const h = virtioHarness(slow)
+    const r = h.request(IN, 0, [{ length: 512, writable: true }])
+    h.dev.write32(0x070, 0) // reset
+    release()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect([r.statusNow(), h.irq(), h.dev.busy]).toEqual([0xff, false, false])
+  })
+
   it('a status write of 0 resets the device', () => {
     const h = virtioHarness(new MemoryStorage(4096))
     h.request(FLUSH, 0, [])
@@ -272,6 +310,39 @@ describe('Goldfish RTC', () => {
 })
 
 describe('storage', () => {
+  /** A storage over `bytes` that answers each read on the next turn of the event loop. */
+  function asynchronous(bytes: Uint8Array): BlockStorage & { reads: number } {
+    const memory = new MemoryStorage(bytes)
+    return {
+      size: memory.size,
+      readOnly: true,
+      reads: 0,
+      read(offset, dest) {
+        this.reads++
+        return new Promise(resolve => setTimeout(() => resolve(memory.read(offset, dest)), 0))
+      },
+      write: () => {
+        throw new Error('read-only')
+      },
+      flush: () => {},
+    }
+  }
+
+  it('a snapshot overlay over an asynchronous base: writes to a chunk being copied wait, in order', async () => {
+    const base = asynchronous(new Uint8Array(10000).fill(7))
+    const snap = new SnapshotStorage(base)
+    const writes = [
+      snap.write(4090, new Uint8Array(12).fill(9)), // straddles two 4 KiB chunks: both copied first
+      snap.write(4094, new Uint8Array(2).fill(8)), // waits for the same copy, then goes on top
+    ]
+    expect(writes.every(w => w instanceof Promise)).toBe(true)
+    const back = new Uint8Array(20)
+    await Promise.all([...writes, snap.read(4085, back)])
+    expect([...back]).toEqual([7, 7, 7, 7, 7, 9, 9, 9, 9, 8, 8, 9, 9, 9, 9, 9, 9, 7, 7, 7])
+    expect(base.reads).toBe(2) // each chunk copied once
+    expect(snap.read(4085, back)).toBeUndefined() // now all in the overlay: right away
+  })
+
   it('a snapshot overlay reads through to its base but never writes to it', () => {
     const base = new MemoryStorage(new Uint8Array(10000).fill(7))
     const snap = new SnapshotStorage(base)

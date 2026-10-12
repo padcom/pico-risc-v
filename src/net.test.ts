@@ -1,4 +1,5 @@
 import { createSocket } from 'node:dgram'
+import { createServer as createHttpServer } from 'node:http'
 import { connect, createServer, type Server } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -28,7 +29,9 @@ import {
   udp,
 } from './net/packet.js'
 import { DNS_IP, GATEWAY_IP, GUEST_IP, UserNetwork } from './net/user-network.js'
+import { relay, WebSocketConnection } from './net/websocket.js'
 import { VirtioNet } from './virtio-net.js'
+import { WebSocketNetwork } from './websocket-network.js'
 
 const GUEST_MAC = Uint8Array.of(0x52, 0x54, 0x00, 0x12, 0x34, 0x56)
 const text = (b: Uint8Array) => new TextDecoder().decode(b)
@@ -383,5 +386,36 @@ describe('virtio network card', () => {
     expect(ram[0x20000 + 10]).toBe(1) // num_buffers
     expect(text(ram.subarray(0x20000 + 12, 0x20000 + 20))).toBe('incoming')
     expect(irq()).toBe(true)
+  })
+})
+
+describe('the network over a WebSocket (npm run web)', () => {
+  it('carries frames both ways: ARP to the user-mode NAT behind the server, and its reply', async () => {
+    const server = createHttpServer()
+    server.on('upgrade', (request, socket) => {
+      const ws = WebSocketConnection.accept(request, socket)
+      if (ws) relay(ws, new UserNetwork())
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const network = new WebSocketNetwork(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/net`)
+    try {
+      const reply = new Promise<Uint8Array>(resolve => network.attach(resolve))
+      const arp = new Uint8Array(28)
+      const v = new DataView(arp.buffer)
+      v.setUint16(0, 1)
+      v.setUint16(2, ETHERTYPE_IPV4)
+      arp[4] = 6
+      arp[5] = 4
+      v.setUint16(6, 1)
+      arp.set(GUEST_MAC, 8)
+      v.setUint32(14, GUEST_IP)
+      v.setUint32(24, GATEWAY_IP)
+      network.send(ethernet(BROADCAST_MAC, GUEST_MAC, ETHERTYPE_ARP, arp)) // (before the socket is open)
+      const answer = parseArp(parseEthernet(await reply)!.payload)!
+      expect([answer.op, answer.senderIp]).toEqual([2, GATEWAY_IP])
+    } finally {
+      network.close()
+      server.close()
+    }
   })
 })
