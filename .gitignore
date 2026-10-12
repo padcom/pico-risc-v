@@ -1,6 +1,7 @@
 node_modules/
 dist/
 examples/build/
+site/
 images/
 build/
 hart/target/

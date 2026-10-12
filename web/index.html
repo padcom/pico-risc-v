@@ -23,7 +23,8 @@
     </script>
     <script type="module" src="dist/browser.js"></script>
   </head>
-  <body>
+  <!-- What to boot (see src/browser.ts); npm run web gives it a network. -->
+  <body data-distribution="debian" data-network>
     <div id="terminal"></div>
     <div id="status">starting…</div>
   </body>

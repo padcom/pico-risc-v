@@ -1,25 +1,31 @@
 #!/usr/bin/env bash
 #
-# Runs linux/debian/build.sh inside a Podman container built from
-# linux/debian/Containerfile, so the build doesn't depend on the host's
-# distribution or tools:
+# Runs linux/<distribution>/build.sh inside a Podman container built from
+# linux/<distribution>/Containerfile, so the build doesn't depend on the
+# host's distribution or tools:
 #
-#   - the project directory is bind-mounted at /work: linux/debian/ goes in,
-#     images/debian/ comes out
+#   linux/podman.sh [<distribution>] [build.sh's arguments]   (debian, the default; alpine)
+#
+#   - the project directory is bind-mounted at /work: linux/<distribution>/
+#     goes in, images/<distribution>/ comes out
 #   - on macOS Podman runs containers in its own Linux VM ("podman machine");
 #     it is created and started here if needed
 #
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-IMAGE=localhost/risc-emulator-debian
-CONTEXT=$ROOT/linux/debian
-SCRIPT=linux/debian/build.sh
+case "${1:-}" in
+  debian | alpine) DISTRIBUTION=$1; shift ;;
+  *) DISTRIBUTION=debian ;;
+esac
+IMAGE=localhost/risc-emulator-$DISTRIBUTION
+CONTEXT=$ROOT/linux/$DISTRIBUTION
+SCRIPT=linux/$DISTRIBUTION/build.sh
 
 die() { echo "error: $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }
 
-command -v podman >/dev/null || die "the Debian build runs in a Podman container; install Podman first:
+command -v podman >/dev/null || die "the $DISTRIBUTION build runs in a Podman container; install Podman first:
   macOS:         brew install podman
   Debian/Ubuntu: sudo apt install podman
   Fedora:        sudo dnf install podman"

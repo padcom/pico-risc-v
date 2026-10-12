@@ -1,0 +1,36 @@
+#!/bin/busybox sh
+#
+# The initramfs's init (linux/alpine/build.sh puts it there, with a static
+# BusyBox and the modules listed in /modules): loads them, mounts the root
+# file system (root= on the kernel command line, read-only, as fsck wants
+# it), and starts Alpine's init on it.
+
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+for module in $(cat /modules); do
+  insmod "/lib/modules/$module.ko"
+done
+
+root=/dev/vda
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    root=*) root=${arg#root=} ;;
+  esac
+done
+# (The disk appears once its driver has probed it.)
+i=0
+while [ ! -b "$root" ] && [ $i -lt 100 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+
+if ! mount -o ro "$root" /newroot; then
+  echo "initramfs: can't mount $root; here's a shell"
+  exec sh
+fi
+umount /proc /sys
+mount --move /dev /newroot/dev
+exec switch_root /newroot /sbin/init

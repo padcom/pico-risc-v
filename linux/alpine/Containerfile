@@ -1,0 +1,10 @@
+# Build environment for linux/alpine/build.sh (used through linux/podman.sh):
+# downloading Alpine's minimal root file system and installing packages onto
+# it (curl, apk: this is Alpine), making the initramfs (cpio, gzip) and the
+# disk (e2fsprogs).
+FROM docker.io/library/alpine:3.24
+
+RUN apk add --no-cache bash curl tar coreutils findutils cpio gzip e2fsprogs
+
+# Tells linux/alpine/build.sh it is already inside the build container.
+ENV RISC_EMULATOR_BUILD_CONTAINER=1

@@ -1,0 +1,3 @@
+Welcome to Alpine Linux, on risc-emulator: a RISC-V machine emulated in
+JavaScript and WebAssembly. apk add needs a network; `poweroff` turns it off.
+

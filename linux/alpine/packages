@@ -1,0 +1,20 @@
+# What linux/alpine/build.sh installs onto Alpine's minimal root file system
+# (from Alpine's main and community repositories; one per line).
+
+# The system
+alpine-base           # OpenRC, BusyBox's services, apk, setup scripts
+busybox-static        # for the initramfs (made by build.sh)
+linux-lts             # the kernel and its modules
+linux-firmware-none   # no firmware: the machine has no hardware that needs any
+e2fsprogs             # checks the root file system at boot
+
+# To try things with (there may be no network to apk add more)
+htop
+mc
+nano
+vim
+less
+file
+tree
+curl
+ca-certificates

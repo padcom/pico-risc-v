@@ -192,11 +192,49 @@ allow on a cross-origin isolated page: the server sends the headers for
 that. `npm run web -- --port 9000` picks another port. Only this machine can
 connect.
 
+## Alpine Linux, and a static web site: `npm run site`
+
+Besides Debian there's [Alpine Linux](https://alpinelinux.org/), much
+smaller (a 110 MB disk) and quicker to boot (a shell in about 10 seconds),
+mainly for the emulator as a static web site, where there's no server to
+read a big disk from or to give the guest a network.
+
+`npm run alpine:build` (`linux/alpine/build.sh`, in a Podman container like
+Debian's) makes `images/alpine/` from what Alpine publishes: its minimal root
+file system for riscv64, with the packages in `linux/alpine/packages` on top
+(to change what's on the disk, edit that list), and Alpine's kernel and
+OpenSBI. There's no bootloader: the emulator starts the kernel itself, with a
+small initramfs made by the build (BusyBox and the modules it takes to mount
+the disk). The console logs in as root by itself.
+
+- In the page: `npm run web`, then <http://localhost:8080/?distribution=alpine>
+  (with the network, as Debian).
+- In a terminal:
+  ```sh
+  npm run emulator -- --memory 512 --harts 4 --kernel images/alpine/Image \
+    --initrd images/alpine/initramfs --disk images/alpine/pristine.raw --snapshot \
+    --bootargs 'console=ttyS0 root=/dev/vda quiet' --net images/alpine/fw_dynamic.bin
+  ```
+
+`npm run site` puts the whole of it in `site/`, about 60 MB, for any plain
+web server, GitHub Pages say: the page, the emulator, and Alpine, its disk in
+gzipped 1 MiB chunks (all-zero ones left out), which the page fetches only as
+Alpine reads them. A plain web server doesn't send the headers that let the
+page use threads (cross-origin isolation), so the page registers a service
+worker (`web/isolate.js`) that adds them, and reloads once. There's no
+network there: `apk add` can't fetch anything, which is why the image comes
+with a few tools already (htop, mc, nano, vim, ...).
+
+On GitHub, `.github/workflows/pages.yml` does all of it (the core, the
+emulator, Alpine's image, the site) and publishes the site on GitHub Pages
+on every push to `main`; in the repository's settings, Pages has to deploy
+from "GitHub Actions".
+
 ## Where the setup runs
 
 `linux/podman.sh` runs `linux/debian/build.sh` in a **Podman** container
-(`linux/debian/Containerfile`, Debian 13), so it doesn't depend on your
-system's tools:
+(`linux/debian/Containerfile`, Debian 13), and `linux/alpine/build.sh` in
+one of Alpine's, so they don't depend on your system's tools:
 
 - **Linux:** Podman runs rootless, with no daemon.
 - **macOS:** Podman runs containers in its own small Linux VM, which
@@ -216,6 +254,7 @@ preset. It boots exactly what you pass:
 | ------ | - |
 | `<image>` | loaded at the start of RAM and entered in M-mode (firmware or a bare-metal program) |
 | `--kernel <file>` | with firmware as `<image>`: the next stage (U-Boot, or a Linux kernel), loaded 2 MiB into RAM and entered in S-mode by OpenSBI |
+| `--initrd <file>` | with `--kernel` (a Linux kernel): its initramfs, which the device tree tells it about |
 | `--disk <file>` | a raw disk image as `/dev/vda`; add `--snapshot` to discard writes |
 | `--net` | the network card on the user-mode NAT |
 | `--forward <host port>:<guest port>` | with `--net`: connections to `localhost:<host port>` reach the guest's `<guest port>` (repeatable) |

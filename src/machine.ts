@@ -98,6 +98,12 @@ export interface BootOptions {
    * firmware needs no built-in load addresses and leaves the DTB where it is.
    */
   next?: { offset: number; mode?: 'S' | 'M' }
+  /**
+   * An initramfs for Linux: placed at the top of the free RAM (below the
+   * device tree and fw_dynamic_info), and passed in the device tree's
+   * /chosen (linux,initrd-start / -end).
+   */
+  initrd?: ArrayLike<number>
 }
 
 /** Room left after the DTB for firmware to add to it. */
@@ -197,6 +203,9 @@ export class Machine {
   private exit: 'poweroff' | 'reboot' | undefined
   private images: { offset: number; data: Uint8Array }[] = []
   private next: BootOptions['next']
+  private initrd: Uint8Array | undefined
+  /** Where the initrd goes in RAM (offset), worked out with the device tree. */
+  private initrdAt = 0
 
   constructor({
     ramSize = 64 * 1024 * 1024,
@@ -281,12 +290,13 @@ export class Machine {
    * OpenSBI's fw_dynamic.bin. Like a boot ROM, this places a device tree at the
    * top of RAM and enters the image in M-mode with a0 = hart id, a1 = DTB.
    */
-  boot(image: ArrayLike<number>, { load = [], next }: BootOptions = {}): void {
+  boot(image: ArrayLike<number>, { load = [], next, initrd }: BootOptions = {}): void {
     this.images = [{ offset: 0, data: image }, ...load].map(({ offset, data }) => ({
       offset,
       data: Uint8Array.from(data),
     }))
     this.next = next
+    this.initrd = initrd && Uint8Array.from(initrd)
     this.reboot()
   }
 
@@ -296,9 +306,10 @@ export class Machine {
     this.rngSeed = this.newRngSeed()
     const dtb = this.deviceTree()
     const dtbOffset = this.dtbOffset(dtb.length)
-    // OpenSBI's fw_dynamic_info, if any, goes right below the device tree.
+    // OpenSBI's fw_dynamic_info, if any, goes right below the device tree,
+    // the initrd, if any, below that (deviceTree() worked out where).
     const infoOffset = dtbOffset - FW_DYNAMIC_INFO_SIZE
-    const freeEnd = this.next ? infoOffset : dtbOffset
+    const freeEnd = this.initrd ? this.initrdAt : this.next ? infoOffset : dtbOffset
     for (const { offset, data } of this.images) {
       if (offset + data.length > freeEnd) {
         throw new Error(`Image at offset 0x${offset.toString(16)} (${data.length} bytes) does not fit in RAM below the device tree`)
@@ -307,6 +318,7 @@ export class Machine {
 
     this.ram.bytes.fill(0)
     for (const { offset, data } of this.images) this.ram.load(offset, data)
+    if (this.initrd) this.ram.load(this.initrdAt, this.initrd)
     this.ram.load(dtbOffset, dtb)
 
     this.exit = undefined
@@ -482,8 +494,15 @@ export class Machine {
   deviceTree(): Uint8Array {
     // The memory node excludes the DTB itself; its size doesn't depend on the
     // value, so encode once to learn the size, then again with the real one.
+    // (The same goes for where the initrd is, which depends on where it goes.)
     const build = (memSize: number) => encodeFdt(this.describe(memSize))
-    return build(this.dtbOffset(build(0).length))
+    const dtbOffset = this.dtbOffset(build(0).length)
+    if (this.initrd) {
+      const below = this.next ? dtbOffset - FW_DYNAMIC_INFO_SIZE : dtbOffset
+      this.initrdAt = (below - this.initrd.length) & ~0xfff
+      if (this.initrdAt < 0) throw new Error(`The initrd (${this.initrd.length} bytes) does not fit in RAM`)
+    }
+    return build(dtbOffset)
   }
 
   private now(): number {
@@ -557,6 +576,10 @@ export class Machine {
             bootargs: this.bootargs,
             'stdout-path': `/soc/uart@${hex(MemoryMap.TERMINAL)}`,
             'rng-seed': this.rngSeed,
+            ...(this.initrd && {
+              'linux,initrd-start': MemoryMap.RAM + this.initrdAt,
+              'linux,initrd-end': MemoryMap.RAM + this.initrdAt + this.initrd.length,
+            }),
           },
         },
         [`memory@${hex(MemoryMap.RAM)}`]: {

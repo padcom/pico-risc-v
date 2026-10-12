@@ -1,0 +1,3 @@
+#!/bin/sh
+# The console logs in as root by itself (/etc/inittab).
+exec /bin/login -f root

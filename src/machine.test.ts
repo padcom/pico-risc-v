@@ -312,6 +312,20 @@ describe('Device tree', () => {
     }
   })
 
+  it('places an initrd below itself, and says where in /chosen', () => {
+    const m = new Machine({ ramSize: 4 * 1024 * 1024 })
+    const initrd = Uint8Array.from({ length: 10000 }, (_, i) => i % 253)
+    m.boot([0x73, 0x00, 0x10, 0x00], { initrd }) // ebreak
+    const dtb = m.ram.bytes.subarray((m.cpu.x[11]! >>> 0) - MemoryMap.RAM)
+    const chosen = fdtProperties(dtb, 'chosen')
+    const start = chosen.get('linux,initrd-start')!.getUint32(0)
+    const end = chosen.get('linux,initrd-end')!.getUint32(0)
+    expect(end - start).toBe(initrd.length)
+    expect(start % 4096).toBe(0)
+    expect(end).toBeLessThanOrEqual(m.cpu.x[11]! >>> 0)
+    expect(m.ram.bytes.subarray(start - MemoryMap.RAM, end - MemoryMap.RAM)).toEqual(initrd)
+  })
+
   it('is passed to the program in a1, with the hart id in a0', () => {
     const m = new Machine({ ramSize: 1024 * 1024 })
     m.boot([0x73, 0x00, 0x10, 0x00]) // ebreak
@@ -409,3 +423,35 @@ describe('C programs compiled with GNU toolchain', () => {
     expect(screen).toBe(expected)
   })
 })
+
+/** The properties of a top-level node of a flattened device tree (big-endian values). */
+function fdtProperties(dtb: Uint8Array, node: string): Map<string, DataView> {
+  const view = new DataView(dtb.buffer, dtb.byteOffset)
+  const structs = view.getUint32(8)
+  const strings = view.getUint32(12)
+  const text = (at: number) => new TextDecoder().decode(dtb.subarray(at, dtb.indexOf(0, at)))
+  const props = new Map<string, DataView>()
+  let depth = 0
+  let inside = false
+  for (let at = structs; ; ) {
+    const token = view.getUint32(at)
+    at += 4
+    if (token === 1) {
+      // BEGIN_NODE: a name, NUL-terminated, padded to 4 bytes
+      const name = text(at)
+      at += (name.length + 4) & ~3
+      depth++
+      inside = depth === 2 && name === node
+    } else if (token === 2) {
+      depth--
+      inside = false
+    } else if (token === 3) {
+      const length = view.getUint32(at)
+      const name = text(strings + view.getUint32(at + 4))
+      if (inside) props.set(name, new DataView(dtb.buffer, dtb.byteOffset + at + 8, length))
+      at += 8 + ((length + 3) & ~3)
+    } else if (token === 9) {
+      return props
+    }
+  }
+}

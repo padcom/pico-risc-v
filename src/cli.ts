@@ -3,7 +3,7 @@
  * Interactive runner: boots a flat binary image (Linux `Image` or a bare-metal
  * program) and connects the emulated terminal to this process's stdin/stdout.
  *
- *   node dist/cli.js [--memory <MiB>] [--harts <n>] [--kernel <file>] [--disk <file> [--snapshot]]
+ *   node dist/cli.js [--memory <MiB>] [--harts <n>] [--kernel <file> [--initrd <file>]] [--disk <file> [--snapshot]]
  *                    [--net [--forward <host port>:<guest port>]...] [--bootargs <string>]
  *                    [--virtual-clock] <image>
  *
@@ -14,7 +14,7 @@
  * With --kernel, <image> is firmware (OpenSBI's fw_dynamic.bin), and <file>
  * the next boot stage: a bootloader (U-Boot) or a Linux kernel. It is loaded
  * 2 MiB into RAM, as on QEMU's virt machine, and the firmware told to enter
- * it there in S-mode.
+ * it there in S-mode. --initrd adds an initramfs for that kernel.
  *
  * --disk attaches a raw disk image file as a virtio block device (/dev/vda);
  * the guest's writes go to the file. With --snapshot they are kept in memory
@@ -43,7 +43,7 @@ const KERNEL_OFFSET = 0x200000
 
 function usage(): never {
   console.error(
-    'usage: risc-emulator [--memory <MiB>] [--harts <n>] [--kernel <file>] [--disk <file> [--snapshot]] [--net [--forward <host port>:<guest port>]...] [--bootargs <string>] [--virtual-clock] <image>',
+    'usage: risc-emulator [--memory <MiB>] [--harts <n>] [--kernel <file> [--initrd <file>]] [--disk <file> [--snapshot]] [--net [--forward <host port>:<guest port>]...] [--bootargs <string>] [--virtual-clock] <image>',
   )
   process.exit(2)
 }
@@ -56,6 +56,7 @@ const { values, positionals } = (() => {
         memory: { type: 'string', default: '64' },
         harts: { type: 'string', default: '1' },
         kernel: { type: 'string' },
+        initrd: { type: 'string' },
         disk: { type: 'string' },
         snapshot: { type: 'boolean', default: false },
         net: { type: 'boolean', default: false },
@@ -92,6 +93,7 @@ const forwards = values.forward.map(spec => {
   return port(host) && port(guest) && extra === undefined ? { host: host!, guest: guest! } : usage()
 })
 if (forwards.length && !values.net) usage()
+if (values.initrd && !values.kernel) usage()
 
 const network = values.net ? new UserNetwork() : undefined
 for (const { host, guest } of forwards) {
@@ -117,7 +119,11 @@ const machine = new Machine({
 machine.boot(
   readFileSync(positionals[0]!),
   values.kernel
-    ? { load: [{ offset: KERNEL_OFFSET, data: readFileSync(values.kernel) }], next: { offset: KERNEL_OFFSET } }
+    ? {
+        load: [{ offset: KERNEL_OFFSET, data: readFileSync(values.kernel) }],
+        next: { offset: KERNEL_OFFSET },
+        initrd: values.initrd ? readFileSync(values.initrd) : undefined,
+      }
     : {},
 )
 

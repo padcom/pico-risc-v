@@ -1,0 +1,5 @@
+auto lo
+iface lo inet loopback
+
+# Brought up by /etc/local.d/eth0.start, if there's a network card.
+iface eth0 inet dhcp
