@@ -81,10 +81,13 @@ async function debian(harts = 1): Promise<Result | undefined> {
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     result = { instructions: instructions(), seconds: (performance.now() - start) / 1000 }
-    // Log in and power off, to end the threads.
-    machine.terminal.type('root\n')
+    // Log in and power off, to end the threads. (On the virtio console:
+    // its login asks the terminal for the cursor position first, which, with
+    // no terminal to answer, takes a moment.)
+    while (!screen.includes('hvc0\r\n\r\ndebian login: ')) await new Promise(resolve => setTimeout(resolve, 10))
+    machine.type('root\n')
     while (!screen.includes('# ')) await new Promise(resolve => setTimeout(resolve, 10))
-    machine.terminal.type('poweroff\n')
+    machine.type('poweroff\n')
     await run
   } else {
     while (!screen.includes('login: ')) {

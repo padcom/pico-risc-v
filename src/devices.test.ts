@@ -8,6 +8,7 @@ import { FileStorage } from './file-storage.js'
 import { GoldfishRtc } from './goldfish-rtc.js'
 import { Plic } from './plic.js'
 import { VirtioBlock } from './virtio-blk.js'
+import { VirtioConsole } from './virtio-console.js'
 
 describe('PLIC', () => {
   function plic() {
@@ -283,6 +284,83 @@ describe('virtio block device', () => {
     h.request(FLUSH, 0, [])
     h.dev.write32(0x070, 0)
     expect([h.dev.read32(0x070), h.dev.read32(0x044), h.irq()]).toEqual([0, 0, false])
+  })
+})
+
+describe('virtio console', () => {
+  /** A driver for queues 0 (receive) and 1 (transmit), 4 descriptors each. */
+  function consoleHarness() {
+    const ram = new Uint8Array(1 << 16)
+    const view = new DataView(ram.buffer)
+    let irq = false
+    const out: number[] = []
+    const dev = new VirtioConsole(
+      (addr, length) => ram.subarray(addr, addr + length),
+      high => (irq = high),
+      byte => out.push(byte),
+    )
+    const queue = (index: number) => ({ desc: 0x1000 + 0x1000 * index * 3, avail: 0x2000 + 0x1000 * index * 3, used: 0x3000 + 0x1000 * index * 3 })
+    dev.write32(0x070, 1 | 2)
+    dev.write32(0x024, 1)
+    dev.write32(0x020, 1) // VIRTIO_F_VERSION_1
+    dev.write32(0x024, 0)
+    dev.write32(0x020, 1) // VIRTIO_CONSOLE_F_SIZE
+    dev.write32(0x070, 1 | 2 | 8)
+    for (const index of [0, 1]) {
+      const q = queue(index)
+      dev.write32(0x030, index)
+      dev.write32(0x038, 4)
+      dev.write32(0x080, q.desc)
+      dev.write32(0x090, q.avail)
+      dev.write32(0x0a0, q.used)
+      dev.write32(0x044, 1)
+    }
+    const avail = [0, 0]
+    /** Make a buffer available in a queue. */
+    const offer = (index: number, addr: number, length: number, writable: boolean) => {
+      const q = queue(index)
+      view.setUint32(q.desc, addr, true)
+      view.setUint32(q.desc + 8, length, true)
+      view.setUint16(q.desc + 12, writable ? 2 : 0, true)
+      view.setUint16(q.avail + 4 + 2 * (avail[index]! % 4), 0, true)
+      view.setUint16(q.avail + 2, ++avail[index]!, true)
+      dev.write32(0x050, index) // QueueNotify
+    }
+    const used = (index: number) => ({ idx: view.getUint16(queue(index).used + 2, true), length: view.getUint32(queue(index).used + 8, true) })
+    return { dev, ram, out, offer, used, irq: () => irq, driverOk: () => dev.write32(0x070, 1 | 2 | 8 | 4) }
+  }
+
+  it('reports the terminal size, and tells the driver when it is ready and when the size changes', () => {
+    const h = consoleHarness()
+    expect(h.dev.read32(0x008)).toBe(3) // device ID: console
+    h.dev.resize(120, 40)
+    expect([h.dev.read16(0x100), h.dev.read16(0x102)]).toEqual([120, 40]) // cols, rows
+    expect(h.irq()).toBe(false) // (no driver yet)
+    h.driverOk()
+    expect(h.dev.read32(0x060)).toBe(2) // configuration change
+    const generation = h.dev.read32(0x0fc)
+    h.dev.write32(0x064, 2)
+    expect(h.irq()).toBe(false)
+    h.dev.resize(100, 30)
+    expect([h.irq(), h.dev.read32(0x060), h.dev.read32(0x0fc)]).toEqual([true, 2, generation + 1])
+    h.dev.write32(0x064, 2)
+    h.dev.resize(100, 30) // the same: nothing to tell
+    expect(h.irq()).toBe(false)
+  })
+
+  it('passes what the guest writes to the output, and typed input into its receive buffers', () => {
+    const h = consoleHarness()
+    h.driverOk()
+    expect(h.dev.inUse).toBe(false)
+    h.dev.type('hi')
+    h.ram.set(new TextEncoder().encode('ok\r\n'), 0x8000)
+    h.offer(1, 0x8000, 4, false) // transmit
+    expect(String.fromCharCode(...h.out)).toBe('ok\r\n')
+    expect(h.dev.inUse).toBe(true)
+    expect(h.used(1).idx).toBe(1)
+    h.offer(0, 0x9000, 16, true) // a receive buffer: the input waiting goes there
+    expect([h.used(0).idx, h.used(0).length]).toEqual([1, 2])
+    expect(new TextDecoder().decode(h.ram.subarray(0x9000, 0x9002))).toBe('hi')
   })
 })
 

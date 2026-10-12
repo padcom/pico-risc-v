@@ -93,10 +93,12 @@ echo "    ${#packages[@]} packages, $(apk --root root info 2>/dev/null | wc -l) 
 step "Setting the system up"
 # What mkinitfs's install script does (so mkinitfs works in the guest too).
 grep -qw /sbin/nlplug-findfs root/etc/mkinitfs/features.d/base.files || echo /sbin/nlplug-findfs >>root/etc/mkinitfs/features.d/base.files
-# root logs in without a password; the console (the serial port) logs in by itself.
+# root logs in without a password, on the virtio console (hvc0, which knows
+# the terminal's size, unlike the serial port), by itself. (Its module is
+# loaded at boot, by hwdrivers: getty is started again until it's there.)
 sed -i 's/^root:[^:]*:/root::/' root/etc/shadow
 sed -i 's/^tty[0-9]::/#&/' root/etc/inittab
-echo 'ttyS0::respawn:/sbin/getty -n -l /usr/local/sbin/autologin 0 ttyS0 vt100' >>root/etc/inittab
+echo 'hvc0::respawn:/sbin/getty -n -l /usr/local/sbin/autologin 0 hvc0 vt100' >>root/etc/inittab
 for runlevel in "${RUNLEVELS[@]}"; do
   level=${runlevel%%:*}
   for service in ${runlevel#*:}; do

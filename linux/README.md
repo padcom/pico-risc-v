@@ -51,6 +51,12 @@ Debian reaches the login prompt in about 30 seconds. Log in as `root`, no
 password. `poweroff` shuts it down, and `npm start` exits with it; Ctrl-A
 then X quits the emulator at any time.
 
+The login is on a virtio console (`hvc0`), which, unlike the serial port,
+tells Linux your terminal's size, and when it changes: full-screen programs
+(htop, mc, vim) use the whole window and follow it. (Debian also keeps a
+login on the serial port, `ttyS0`, where the boot messages are: its prompt
+shows up once among them.)
+
 Options after `--` go to the emulator: `npm start -- --snapshot` (see
 [The disk](#the-disk)), `npm start -- --memory 2048`.
 

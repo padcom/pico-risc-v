@@ -47,7 +47,7 @@ export class LinuxSession {
   }
 
   type(text: string): void {
-    this.machine.terminal.type(text)
+    this.machine.type(text)
   }
 
   /** Run until the machine powers off (or the budget runs out); returns why it stopped. */

@@ -136,6 +136,13 @@ function quit(code: number, message?: string): never {
   process.exit(code)
 }
 
+// The terminal's size, and changes to it (for the guest's console).
+if (process.stdout.isTTY) {
+  const resize = () => machine.resize(process.stdout.columns, process.stdout.rows)
+  resize()
+  process.stdout.on('resize', resize)
+}
+
 // Keyboard → terminal, with a QEMU-style Ctrl-A escape.
 let escaped = false
 if (process.stdin.isTTY) {
@@ -155,7 +162,7 @@ process.stdin.on('data', (chunk: Buffer) => {
       bytes.push(b)
     }
   }
-  machine.terminal.type(bytes)
+  machine.type(bytes)
 })
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))

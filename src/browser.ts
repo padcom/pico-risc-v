@@ -128,7 +128,10 @@ try {
     })
     machine.boot(firmware, { load: [{ offset: KERNEL_OFFSET, data: kernel }], next: { offset: KERNEL_OFFSET }, initrd })
   }
-  terminal.onData(data => machine.terminal.type(data))
+  terminal.onData(data => machine.type(data))
+  // The terminal's size, and changes to it (fit() follows the window).
+  machine.resize(terminal.cols, terminal.rows)
+  terminal.onResize(({ cols, rows }) => machine.resize(cols, rows))
 
   log(`running on ${harts} hart${harts > 1 ? 's' : ''}`)
   for (;;) {

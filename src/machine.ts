@@ -11,6 +11,7 @@ import { SystemBus } from './system-bus.js'
 import { Syscon } from './syscon.js'
 import { Terminal } from './terminal.js'
 import { VirtioBlock } from './virtio-blk.js'
+import { VirtioConsole } from './virtio-console.js'
 import { type NetworkBackend, VirtioNet } from './virtio-net.js'
 
 /**
@@ -21,6 +22,7 @@ import { type NetworkBackend, VirtioNet } from './virtio-net.js'
  *   0x1000_0000 - 0x1000_00ff   Terminal (16550-style UART)
  *   0x1000_1000 - 0x1000_1fff   virtio block device (if a disk is attached), PLIC source 1
  *   0x1000_2000 - 0x1000_2fff   virtio network card (if a network is attached), PLIC source 2
+ *   0x1000_3000 - 0x1000_3fff   virtio console (unless turned off), PLIC source 5
  *   0x1100_0000 - 0x1100_ffff   CLINT (timer + software interrupt)
  *   0x1110_0000 - 0x1110_0fff   Syscon (power-off / reboot)
  *   0x8000_0000 - ...           RAM; execution starts at its first byte,
@@ -32,6 +34,7 @@ export const MemoryMap = {
   TERMINAL: 0x1000_0000,
   VIRTIO_DISK: 0x1000_1000,
   VIRTIO_NET: 0x1000_2000,
+  VIRTIO_CONSOLE: 0x1000_3000,
   CLINT: 0x1100_0000,
   SYSCON: 0x1110_0000,
   RAM: 0x8000_0000,
@@ -51,8 +54,13 @@ export interface MachineOptions {
   network?: NetworkBackend
   /** The card's MAC address (default 52:54:00:12:34:56). */
   mac?: Uint8Array
-  /** Called with every byte the program writes to the terminal. */
+  /** Called with every byte the program writes to the terminal (the serial port or the console). */
   output?: (byte: number) => void
+  /**
+   * A virtio console (default true): a second terminal (hvc0 in Linux),
+   * which, unlike the serial port, can tell the guest its size (resize()).
+   */
+  console?: boolean
   /**
    * Where mtime comes from:
    *  - 'realtime': wall-clock microseconds (interactive use)
@@ -169,6 +177,7 @@ export class Machine {
   readonly plic: Plic
   readonly rtc = new GoldfishRtc(() => this.timeOfDay())
   readonly disk: VirtioBlock | undefined
+  readonly console: VirtioConsole | undefined
   readonly nic: VirtioNet | undefined
   private readonly network: NetworkBackend | undefined
   /** The harts, by mhartid. */
@@ -220,6 +229,7 @@ export class Machine {
     mac = Uint8Array.of(0x52, 0x54, 0x00, 0x12, 0x34, 0x56),
     jit,
     harts = 1,
+    console = true,
   }: MachineOptions = {}) {
     this.bootargs = bootargs
     this.virtual = clock === 'virtual'
@@ -258,6 +268,7 @@ export class Machine {
     this.disk = disk && new VirtioBlock(disk, dma, high => this.plic.setLevel(DISK_IRQ, high))
     this.network = network
     this.nic = network && new VirtioNet(network, mac, dma, high => this.plic.setLevel(NET_IRQ, high))
+    this.console = console ? new VirtioConsole(dma, high => this.plic.setLevel(CONSOLE_IRQ, high), output ?? (() => {})) : undefined
 
     this.bus
       .map(MemoryMap.RAM, ramSize, this.ram)
@@ -268,6 +279,21 @@ export class Machine {
       .map(MemoryMap.SYSCON, Syscon.SIZE, this.syscon)
     if (this.disk) this.bus.map(MemoryMap.VIRTIO_DISK, VirtioBlock.SIZE, this.disk)
     if (this.nic) this.bus.map(MemoryMap.VIRTIO_NET, VirtioNet.SIZE, this.nic)
+    if (this.console) this.bus.map(MemoryMap.VIRTIO_CONSOLE, VirtioConsole.SIZE, this.console)
+  }
+
+  /**
+   * Keyboard input: to the console once the guest uses it (a login is
+   * there), before that to the serial port (firmware, bootloaders).
+   */
+  type(data: string | ArrayLike<number>): void {
+    if (this.console?.inUse) this.console.type(data)
+    else this.terminal.type(data)
+  }
+
+  /** The terminal is `cols` × `rows` characters (now): the console tells the guest. */
+  resize(cols: number, rows: number): void {
+    this.console?.resize(cols, rows)
   }
 
   /**
@@ -331,6 +357,7 @@ export class Machine {
     this.plic.reset()
     this.disk?.reset()
     this.nic?.reset()
+    this.console?.reset()
     // All harts start at the start of RAM (firmware picks one to boot).
     for (const cpu of this.cpus) {
       cpu.setRegister(10, cpu.id) // a0: hart id
@@ -683,6 +710,16 @@ export class Machine {
                 },
               },
             }),
+            ...(this.console && {
+              [`virtio_mmio@${hex(MemoryMap.VIRTIO_CONSOLE)}`]: {
+                props: {
+                  compatible: 'virtio,mmio',
+                  reg: reg(MemoryMap.VIRTIO_CONSOLE, VirtioConsole.SIZE),
+                  'interrupt-parent': PLIC_PHANDLE,
+                  interrupts: CONSOLE_IRQ,
+                },
+              },
+            }),
             ...(this.disk && {
               [`virtio_mmio@${hex(MemoryMap.VIRTIO_DISK)}`]: {
                 props: {
@@ -705,6 +742,7 @@ const hex = (n: number) => n.toString(16)
 /** PLIC interrupt sources of the devices. */
 const DISK_IRQ = 1
 const NET_IRQ = 2
+const CONSOLE_IRQ = 5
 const RTC_IRQ = 3
 const TERMINAL_IRQ = 4
 

@@ -54,7 +54,10 @@ describe.skipIf(![FIRMWARE, UBOOT, DISK].every(existsSync))('Debian 13 riscv64 c
           },
         )
         const login = async () => {
-          await s.waitForAsync('login: ', 60_000_000_000, 900_000)
+          // The login on the virtio console (hvc0), the one typing goes to.
+          // (Not the serial port's: the console's asks the terminal for its
+          // cursor position first, and there's none here to answer.)
+          await s.waitForAsync('debian hvc0\r\n\r\ndebian login: ', 60_000_000_000, 900_000)
           expect(s.screen).toContain('Debian GNU/Linux 13')
           s.type('root\n')
           await s.waitForAsync('# ', BUDGET, 600_000)

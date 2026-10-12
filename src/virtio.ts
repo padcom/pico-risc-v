@@ -50,6 +50,7 @@ const enum Reg {
 const VIRTIO_F_VERSION_1 = 1 << 0 // feature bit 32: bit 0 of the high word
 const VIRTQ_DESC_F_NEXT = 1
 const VIRTQ_DESC_F_WRITE = 2
+const STATUS_DRIVER_OK = 0x04
 const STATUS_DEVICE_NEEDS_RESET = 0x40
 
 /**
@@ -173,6 +174,8 @@ export abstract class VirtioMmioDevice extends WordDevice {
   private driverFeatures = [0, 0]
   private interruptStatus = 0
   private queueSel = 0
+  /** Bumped whenever the config space changes (the driver checks it around reading it). */
+  private configGeneration = 0
 
   constructor(
     protected readonly memory: GuestMemory,
@@ -198,6 +201,20 @@ export abstract class VirtioMmioDevice extends WordDevice {
   /** Tell the driver it has used buffers to look at ("used buffer notification"). */
   protected signalUsed(): void {
     this.setInterrupt(this.interruptStatus | 1)
+  }
+
+  /** Tell the driver the config space changed ("configuration change notification"). */
+  protected configChanged(): void {
+    this.configGeneration = (this.configGeneration + 1) >>> 0
+    this.setInterrupt(this.interruptStatus | 2)
+  }
+
+  /** The driver is set up (DRIVER_OK). */
+  protected driverReady(): void {}
+
+  /** Whether the driver is set up (DRIVER_OK). */
+  protected get ready(): boolean {
+    return (this.status & STATUS_DRIVER_OK) !== 0
   }
 
   /** Run `fn` for queue work; a malformed queue puts the device into DEVICE_NEEDS_RESET. */
@@ -237,7 +254,7 @@ export abstract class VirtioMmioDevice extends WordDevice {
       case Reg.QueueReady: return this.queue?.ready ?? 0
       case Reg.InterruptStatus: return this.interruptStatus
       case Reg.Status: return this.status
-      case Reg.ConfigGeneration: return 0
+      case Reg.ConfigGeneration: return this.configGeneration
       default: return 0
     }
   }
@@ -257,7 +274,11 @@ export abstract class VirtioMmioDevice extends WordDevice {
       case Reg.InterruptAck: this.setInterrupt(this.interruptStatus & ~value); break
       case Reg.Status:
         if (value === 0) this.reset()
-        else this.status = value
+        else {
+          const wasReady = this.ready
+          this.status = value
+          if (!wasReady && this.ready) this.driverReady()
+        }
         break
       // The rest configures the selected queue.
       case Reg.QueueNum: if (q) q.num = Math.min(value, q.maxSize); break
