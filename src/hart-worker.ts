@@ -3,7 +3,10 @@
  * core on the machine's shared memory, with a stack of its own, and runs
  * the hart: its RAM accesses happen right here; device accesses go to the
  * main thread, where the devices are, through a mailbox in `control` (the
- * layout is machine.ts's, see Control there).
+ * layout is machine.ts's, see Control there). All but the CLINT's, which
+ * OpenSBI uses all the time (timers, inter-processor interrupts): its state
+ * is shared too (clint.ts), and the thread handles those itself, keeping
+ * its hart's timer interrupt up to date.
  *
  * The main thread wakes it from WFI by bumping its wake counter, and stops
  * it by terminating it.
@@ -28,6 +31,8 @@ export interface HartThreadData {
   clock: SharedArrayBuffer
   /** Also post a message when ringing the doorbell (for a main thread without Atomics.waitAsync). */
   ring: boolean
+  /** The CLINT: where it is, its state (Clint.state), and every hart (as hart_new returned them). */
+  clint: { base: number; state: SharedArrayBuffer; harts: number[] }
 }
 
 // Control (machine.ts): the doorbell, then a box of BOX words per hart.
@@ -50,9 +55,17 @@ const LIMIT = 0
 const WFI = 1
 /** At most this long in WFI without looking again (ms). */
 const WFI_WAIT = 50
+// The CLINT (clint.ts): its registers, the interrupts it raises.
+const CLINT_SIZE = 0x10000
+const MTIMECMP = 0x4000
+const MTIME = 0xbff8
+const MIP_MSIP = 1 << 3
+const MIP_MTIP = 1 << 7
+const TWO_32 = 0x1_0000_0000
 
 interface Core {
   run(hart: number, maxSteps: number): number
+  set_interrupt_pending(hart: number, bit: number, pending: number): void
   jit_slots(): number
   jit_init(hart: number, tableBase: number, threshold: number, batch: number): void
   jit_op(hart: number, index: number, pc: bigint): number
@@ -81,6 +94,58 @@ function start(data: HartThreadData, post: (message: unknown) => void): never {
     if (data.ring) post(0)
   }
 
+  // The CLINT: msip of each hart, then mtimecmp of each (low, high).
+  const clint = new Uint32Array(data.clint.state)
+  const harts = data.clint.harts
+  const mtime = () => Math.floor((performance.timeOrigin + performance.now() - clock[0]!) * 1000) + clock[1]!
+  const timecmp = (hart: number) => clint[harts.length + 2 * hart + 1]! * TWO_32 + clint[harts.length + 2 * hart]!
+  /** Wake a hart's thread, in case it waits in WFI. */
+  const wake = (hart: number) => {
+    Atomics.add(control, BOX * (hart + 1) + WAKE, 1)
+    Atomics.notify(control, BOX * (hart + 1) + WAKE)
+  }
+  /** This hart's timer interrupt, as it is now (unknown at first). */
+  let timerPending: boolean | undefined
+  const updateTimer = () => {
+    const due = mtime() >= timecmp(data.index)
+    if (due !== timerPending) core.set_interrupt_pending(data.hart, MIP_MTIP, due ? 1 : 0)
+    timerPending = due
+  }
+
+  /** A 32-bit read of the CLINT, at `offset`. */
+  function clintRead(offset: number): number {
+    if (offset < 4 * harts.length) return clint[offset >>> 2]!
+    const cmp = offset - MTIMECMP
+    if (cmp >= 0 && cmp < 8 * harts.length) return clint[harts.length + (cmp >>> 2)]!
+    if (offset === MTIME) return mtime() % TWO_32
+    if (offset === MTIME + 4) return Math.floor(mtime() / TWO_32)
+    return 0
+  }
+
+  /** A 32-bit write to the CLINT, at `offset`. */
+  function clintWrite(offset: number, value: number): void {
+    value >>>= 0
+    if (offset < 4 * harts.length) {
+      const hart = offset >>> 2
+      clint[hart] = value & 1
+      core.set_interrupt_pending(harts[hart]!, MIP_MSIP, value & 1)
+      if (value & 1) wake(hart)
+      return
+    }
+    const cmp = offset - MTIMECMP
+    if (cmp >= 0 && cmp < 8 * harts.length) {
+      clint[harts.length + (cmp >>> 2)] = value
+      const hart = cmp >>> 3
+      if (hart === data.index) updateTimer()
+      else wake(hart) // (its thread looks at its timer)
+    } else if (offset === MTIME) {
+      clock[1] = clock[1]! + Math.floor(mtime() / TWO_32) * TWO_32 + value - mtime()
+    } else if (offset === MTIME + 4) {
+      clock[1] = clock[1]! + value * TWO_32 + (mtime() % TWO_32) - mtime()
+    }
+  }
+  const inClint = (addr: number, width: number) => width === 4 && addr - data.clint.base >= 0 && addr - data.clint.base < CLINT_SIZE
+
   /** A device access, by the main thread; the value read, or -1 on a bus error. */
   function device(op: number, addr: number, width: number, value: number): number {
     control[box + OP] = op
@@ -98,10 +163,15 @@ function start(data: HartThreadData, post: (message: unknown) => void): never {
   const { memory } = data
   const env = {
     memory,
-    bus_read: (_hart: number, addr: number, width: number) => device(0, addr >>> 0, width, 0),
-    bus_write: (_hart: number, addr: number, width: number, value: number) => (device(1, addr >>> 0, width, value) < 0 ? 1 : 0),
+    bus_read: (_hart: number, addr: number, width: number) =>
+      inClint(addr >>> 0, width) ? clintRead((addr >>> 0) - data.clint.base) : device(0, addr >>> 0, width, 0),
+    bus_write: (_hart: number, addr: number, width: number, value: number) => {
+      if (!inClint(addr >>> 0, width)) return device(1, addr >>> 0, width, value) < 0 ? 1 : 0
+      clintWrite((addr >>> 0) - data.clint.base, value)
+      return 0
+    },
     // mtime, as the main thread's CLINT has it (machine.ts: now()).
-    read_time: () => Math.floor((performance.timeOrigin + performance.now() - clock[0]!) * 1000) + clock[1]!,
+    read_time: mtime,
     // As in cpu.ts: compiled pages, into this instance's function table.
     jit_install: (code: number, length: number, slots: number, count: number) => {
       const module = new WebAssembly.Module(new Uint8Array(memory.buffer, code, length))
@@ -118,11 +188,13 @@ function start(data: HartThreadData, post: (message: unknown) => void): never {
 
   for (;;) {
     // (Read before running: a wake-up while it runs isn't missed.)
-    const wake = Atomics.load(control, box + WAKE)
+    const woken = Atomics.load(control, box + WAKE)
+    updateTimer()
     const reason = core.run(data.hart, BUDGET)
     if (reason === LIMIT) continue
     if (reason === WFI) {
-      Atomics.wait(control, box + WAKE, wake, WFI_WAIT)
+      // Until woken, or the timer is due.
+      Atomics.wait(control, box + WAKE, woken, Math.max(0, Math.min(WFI_WAIT, (timecmp(data.index) - mtime()) / 1000)))
       continue
     }
     // A breakpoint, or stopped: tell the main thread, and wait to be terminated.

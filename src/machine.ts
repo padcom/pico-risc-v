@@ -164,7 +164,7 @@ const WAKE = 7
 const EVENT = 8
 /** run()'s code for a breakpoint (cpu.ts: STOP_REASONS). */
 const BREAKPOINT = 2
-/** How long runThreaded() waits for the harts at most before looking at the timers again (ms). */
+/** How long runThreaded() waits for the harts at most before looking again (ms). */
 const MAX_WAIT = 10
 
 /** A complete computer: CPUs + RAM + terminal + timer + syscon on one bus. */
@@ -439,9 +439,13 @@ export class Machine {
       Atomics.notify(control, DOORBELL)
       wakeUp()
     }
-    const workers = this.cpus.map((cpu, index) =>
+    // The threads handle the CLINT themselves (its state is shared), and their
+    // harts' timers: not this thread.
+    const harts = this.cpus.map(cpu => cpu.thread())
+    const clint = { base: MemoryMap.CLINT, state: this.clint.state.buffer as SharedArrayBuffer, harts: harts.map(hart => hart.hart) }
+    const workers = harts.map((hart, index) =>
       startThread(
-        { ...cpu.thread(), index, control: control.buffer, clock: clock.buffer, ring: !waitAsync },
+        { ...hart, index, control: control.buffer, clock: clock.buffer, ring: !waitAsync, clint },
         () => wakeUp(),
         error => {
           failure ??= error
@@ -456,8 +460,7 @@ export class Machine {
         if (failure) throw failure
         const result = this.serveHarts()
         if (result) return result
-        this.clint.update()
-        const wait = Math.min(MAX_WAIT, this.microsUntilTimer() / 1000)
+        const wait = MAX_WAIT
         if (waitAsync) {
           const { async, value } = Atomics.waitAsync(control, DOORBELL, doorbell, wait)
           if (async) await value
@@ -496,7 +499,6 @@ export class Machine {
           if (width === 4) this.bus.write32(addr, value >>> 0)
           else if (width === 2) this.bus.write16(addr, value & 0xffff)
           else this.bus.write8(addr, value & 0xff)
-          clock[1] = this.clint.mtime - this.now() // (in case mtime was set)
         }
         control[box + FAULT] = 0
       } catch (e) {
