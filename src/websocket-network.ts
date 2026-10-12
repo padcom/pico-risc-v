@@ -9,18 +9,32 @@ import type { NetworkBackend } from './virtio-net.js'
 export class WebSocketNetwork implements NetworkBackend {
   private readonly socket: WebSocket
   private receive: (frame: Uint8Array) => void = () => {}
+  /** The connection is up; it went down (or never came up). */
+  onopen: () => void = () => {}
+  onclose: () => void = () => {}
+  /** Whether the connection came up (false: it closed before). */
+  readonly opened: Promise<boolean>
   /** Frames sent before the socket opened. */
   private waiting: Uint8Array<ArrayBuffer>[] = []
 
   constructor(url: string | URL) {
     this.socket = new WebSocket(url)
     this.socket.binaryType = 'arraybuffer'
+    this.opened = new Promise(resolve => {
+      this.socket.addEventListener('open', () => resolve(true))
+      this.socket.addEventListener('close', () => resolve(false))
+    })
     this.socket.onmessage = ({ data }) => {
       if (data instanceof ArrayBuffer) this.receive(new Uint8Array(data))
     }
     this.socket.onopen = () => {
       for (const frame of this.waiting) this.socket.send(frame)
       this.waiting = []
+      this.onopen()
+    }
+    this.socket.onclose = () => {
+      this.waiting = []
+      this.onclose()
     }
   }
 

@@ -9,7 +9,8 @@
       html, body { height: 100%; margin: 0; background: #000; color: #ccc; font: 13px system-ui, sans-serif; }
       body { display: flex; flex-direction: column; }
       #terminal { flex: 1; min-height: 0; padding: 4px; }
-      #status { padding: 2px 8px; background: #222; }
+      #bar { display: flex; justify-content: space-between; gap: 16px; padding: 2px 8px; background: #222; }
+      #bar a { color: #8cf; }
     </style>
     <!-- The emulator's modules (dist/) import xterm.js by name. (Paths are
          relative to the page, so it works from anywhere it's served.) -->
@@ -26,6 +27,6 @@
   <!-- What to boot (see src/browser.ts); npm run web gives it a network. -->
   <body data-distribution="debian" data-network>
     <div id="terminal"></div>
-    <div id="status">starting…</div>
+    <div id="bar"><span id="status">starting…</span><span id="network"></span></div>
   </body>
 </html>

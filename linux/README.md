@@ -189,7 +189,8 @@ terminal. Debian must have been set up once (`npm start` does it).
   card's frames over a WebSocket (browsers can't open sockets themselves)
   to a user-mode NAT in `npm run web`, the same as `npm start`'s, so
   `apt` and `curl` work. It forwards `localhost:2222` to Debian's port 22
-  too, unless that port is taken (by `npm start`, say).
+  too, unless that port is taken (by `npm start`, say). Only pages from this
+  machine get a network (not other web sites open in the browser).
 - `?harts=2`, `?memory=512` change the machine; `?image=examples/build/hello.bin`
   boots a bare-metal program instead of Debian.
 
@@ -228,8 +229,16 @@ gzipped 1 MiB chunks (all-zero ones left out), which the page fetches only as
 Alpine reads them. A plain web server doesn't send the headers that let the
 page use threads (cross-origin isolation), so the page registers a service
 worker (`web/isolate.js`) that adds them, and reloads once. There's no
-network there: `apk add` can't fetch anything, which is why the image comes
-with a few tools already (htop, mc, nano, vim, ...).
+network there of its own (`apk add` can't fetch anything, which is why the
+image comes with a few tools already: htop, mc, nano, vim, ...), but it can
+use one through your machine: run `npm run relay`, and open the page with
+`?relay=ws://localhost:8081` (the page's status bar has a link for that).
+The relay runs the same user-mode NAT as `npm start` (with `localhost:2222`
+to the guest's ssh), for that page. As the NAT reaches what your machine
+does, its own services included, the relay only serves pages from
+`localhost` and this project's GitHub Pages (from the git remote), not any
+web site open in the browser; `--origin <url>` allows another. (Newer
+Chrome may ask whether the page may access your local network.)
 
 On GitHub, `.github/workflows/pages.yml` does all of it (the core, the
 emulator, Alpine's image, the site) and publishes the site on GitHub Pages

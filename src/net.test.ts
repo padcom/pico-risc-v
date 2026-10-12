@@ -1,5 +1,5 @@
 import { createSocket } from 'node:dgram'
-import { createServer as createHttpServer } from 'node:http'
+import { createServer as createHttpServer, request as httpRequest } from 'node:http'
 import { connect, createServer, type Server } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -29,7 +29,7 @@ import {
   udp,
 } from './net/packet.js'
 import { DNS_IP, GATEWAY_IP, GUEST_IP, UserNetwork } from './net/user-network.js'
-import { relay, WebSocketConnection } from './net/websocket.js'
+import { isLocalOrigin, serveNetworks } from './net/relay.js'
 import { VirtioNet } from './virtio-net.js'
 import { WebSocketNetwork } from './websocket-network.js'
 
@@ -389,13 +389,38 @@ describe('virtio network card', () => {
   })
 })
 
-describe('the network over a WebSocket (npm run web)', () => {
+describe('the network over a WebSocket (npm run web, npm run relay)', () => {
+  it('only for pages from allowed origins (npm run relay: localhost and the GitHub Pages site)', async () => {
+    const server = createHttpServer()
+    serveNetworks(server, { allowed: origin => origin === undefined || isLocalOrigin(origin) || origin === 'https://example.github.io' })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    /** The status an upgrade request from a page from `origin` gets. */
+    const upgrade = (origin?: string) =>
+      new Promise<number>((resolve, reject) => {
+        const headers: Record<string, string> = { connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' }
+        if (origin) headers.origin = origin
+        const request = httpRequest({ host: '127.0.0.1', port, headers })
+        request.on('upgrade', (response, socket) => (socket.destroy(), resolve(response.statusCode!)))
+        request.on('response', response => resolve(response.statusCode!))
+        request.on('error', reject)
+        request.end()
+      })
+    try {
+      expect(await upgrade('http://localhost:8080')).toBe(101)
+      expect(await upgrade('http://127.0.0.1:5173')).toBe(101)
+      expect(await upgrade('https://example.github.io')).toBe(101)
+      expect(await upgrade()).toBe(101) // not a browser
+      expect(await upgrade('https://some-other-site.example')).toBe(403)
+      expect(await upgrade('https://example.github.io.evil.example')).toBe(403)
+    } finally {
+      server.close()
+    }
+  })
+
   it('carries frames both ways: ARP to the user-mode NAT behind the server, and its reply', async () => {
     const server = createHttpServer()
-    server.on('upgrade', (request, socket) => {
-      const ws = WebSocketConnection.accept(request, socket)
-      if (ws) relay(ws, new UserNetwork())
-    })
+    serveNetworks(server, { path: '/net', allowed: () => true })
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     const network = new WebSocketNetwork(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/net`)
     try {

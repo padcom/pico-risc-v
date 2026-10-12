@@ -11,8 +11,9 @@
  * - Files are served with Range requests: the page reads Debian's disk a
  *   piece at a time (src/http-storage.ts).
  * - /net is a WebSocket per page carrying the network card's Ethernet frames
- *   to a user-mode NAT here (src/net/websocket.ts), which also forwards
- *   localhost:2222 to the guest's port 22, as npm start does.
+ *   to a user-mode NAT here (src/net/relay.ts), which also forwards
+ *   localhost:2222 to the guest's port 22, as npm start does. Only pages
+ *   from this machine may connect.
  *
  * Only what the page needs is served, and only to this machine (localhost).
  */
@@ -60,21 +61,14 @@ if (emulatorStale()) {
   execFileSync(process.execPath, ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.build.json'], { cwd: root, stdio: 'inherit' })
 }
 // (Once compiled.)
-const { UserNetwork } = await import('../dist/net/user-network.js')
-const { relay, WebSocketConnection } = await import('../dist/net/websocket.js')
+const { isLocalOrigin, serveNetworks } = await import('../dist/net/relay.js')
 if (!existsSync(join(root, 'images/debian/pristine.raw'))) {
   console.log('[web] Debian is not set up (npm start does it); bare-metal images still work: /?image=examples/build/hello.bin')
 }
 
 const server = createServer(serve)
-server.on('upgrade', (request, socket) => {
-  const ws = request.url === '/net' ? WebSocketConnection.accept(request, socket) : undefined
-  if (!ws) return void socket.destroy()
-  const network = new UserNetwork()
-  // A port in use (say, by npm start, or another page) is no reason not to run.
-  network.forward(2222, 22).catch(() => {})
-  relay(ws, network)
-})
+// (Only for pages from here: not for other sites open in the browser.)
+serveNetworks(server, { path: '/net', allowed: origin => origin === undefined || isLocalOrigin(origin), forwards: [[2222, 22]] })
 server.listen(Number(values.port), '127.0.0.1', () => {
   console.log(`[web] http://localhost:${(server.address() as AddressInfo).port}/`)
 })

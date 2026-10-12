@@ -13,7 +13,8 @@
  * requests (HttpStorage), or, if it's a manifest (.json), in chunks
  * (ChunkedStorage). What Linux writes stays in this page (a SnapshotStorage),
  * lost when it's closed. With data-network on the page (npm run web), the
- * network card reaches the server's user-mode NAT over a WebSocket.
+ * network card reaches the server's user-mode NAT over a WebSocket; with
+ * ?relay=, that of a relay (npm run relay, on this machine, say).
  *
  * Threads need a cross-origin isolated page. Where the server doesn't make
  * it one (GitHub Pages, say), data-service-worker on the page names a service
@@ -22,6 +23,8 @@
  *
  * Query parameters:
  *   distribution=<name>  boot that one instead
+ *   relay=<ws url>       the network through this relay (npm run relay:
+ *                        ws://localhost:8081)
  *   image=<url>          boot this bare-metal program instead (no disk,
  *                        network), e.g. examples/build/hello.bin
  *   harts=<n>            default 4
@@ -63,6 +66,11 @@ const page = document.body.dataset
 const image = params.get('image')
 const distribution = params.get('distribution') ?? page.distribution ?? 'debian'
 const harts = Number(params.get('harts') ?? 4)
+const relay = params.get('relay')
+/** Where npm run relay is, by default. */
+const LOCAL_RELAY = 'ws://localhost:8081'
+/** How long to wait for the network's WebSocket to connect (ms). */
+const RELAY_TIMEOUT = 5000
 
 const status = document.getElementById('status')!
 // Black as a console's: GRUB sets white on black (ANSI color 0, which
@@ -76,6 +84,7 @@ addEventListener('resize', () => fit.fit())
 terminal.focus()
 
 const log = (message: string) => (status.textContent = message)
+const networkStatus = document.getElementById('network')!
 const fetchBytes = async (url: string | URL) => {
   const response = await fetch(url)
   if (!response.ok) throw new Error(`${url}: ${response.status} ${response.statusText}`)
@@ -117,7 +126,7 @@ try {
       config.disk.endsWith('.json') ? ChunkedStorage.open(file(config.disk)) : HttpStorage.open(file(config.disk).href),
     ])
     const storage: BlockStorage = new SnapshotStorage(disk)
-    const network = page.network !== undefined ? new WebSocketNetwork(new URL('net', location.href.replace(/^http/, 'ws'))) : undefined
+    const network = await connect()
     machine = new Machine({
       ramSize: Number(params.get('memory') ?? config.memory ?? 1024) << 20,
       harts,
@@ -147,6 +156,38 @@ try {
   document.body.dataset.result = 'error'
   log(String(error))
   throw error
+}
+
+/**
+ * The network card's way out: the relay asked for, or the server's (npm run
+ * web), if any; says how it goes in the page's status bar. Undefined if
+ * there's none, or it isn't there: then the machine has no network card
+ * (rather than one whose DHCP waits in vain, holding up the boot).
+ */
+async function connect(): Promise<WebSocketNetwork | undefined> {
+  const url = relay ?? (page.network !== undefined ? new URL('net', location.href.replace(/^http/, 'ws')).href : undefined)
+  if (!url) {
+    // Where to get one.
+    const link = new URL(location.href)
+    link.searchParams.set('relay', LOCAL_RELAY)
+    const a = Object.assign(document.createElement('a'), { href: link.href, textContent: 'through npm run relay on this machine' })
+    networkStatus.replaceChildren('no network: ', a)
+    return undefined
+  }
+  const network = new WebSocketNetwork(url)
+  let open = false
+  networkStatus.textContent = `network: connecting to ${url}…`
+  network.onopen = () => {
+    open = true
+    networkStatus.textContent = relay ? `network: through ${url}` : 'network'
+  }
+  network.onclose = () => {
+    networkStatus.textContent = open ? `network: lost (${url})` : `no network: nothing at ${url}${relay ? ' (is npm run relay running?)' : ''}`
+  }
+  const timeout = new Promise<false>(resolve => setTimeout(() => resolve(false), RELAY_TIMEOUT))
+  if (await Promise.race([network.opened, timeout])) return network
+  network.close()
+  return undefined
 }
 
 /**
