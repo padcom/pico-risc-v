@@ -11,9 +11,9 @@
 //!
 //! The cache is coherent with memory, so correct software never sees stale
 //! code, with or without FENCE.I: every page has a bit per 64-byte line that
-//! holds cached code, and a write to such a line (by the hart, or by a device
+//! holds cached code, and a write to such a line (by any hart, or by a device
 //! through `code_written`) bumps the page's version, which retires all of its
-//! blocks.
+//! blocks. Those are shared by all harts (`Code`); each has its own cache.
 //!
 //! `step()` doesn't use the cache: it's the reference interpreter, and `run()`
 //! falls back to it for whatever a block can't do (a pending interrupt, a
@@ -25,6 +25,7 @@ use crate::hart::{Hart, Result, STOPPED_AT_BREAKPOINT, STOP_AT_BREAKPOINT, Trap,
 use crate::jit::COMPILED;
 use crate::memory::Access;
 use crate::rvc;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
 /// Translations for fetches cached for blocks (direct mapped by virtual
 /// page, tagged with the privilege), so jumps between pages mostly needn't
@@ -54,6 +55,60 @@ pub struct Block {
     /// `entry` of its page's function.
     pub(crate) jit: u32,
     pub(crate) entry: u32,
+}
+
+/// What's known about code in RAM, shared by all harts: per page, which of
+/// its 64-byte lines hold code that some hart decoded (a bit each), and a
+/// version, bumped when one of those is written (then the bits start over);
+/// and an epoch, bumped with any version.
+pub struct Code {
+    pub(crate) lines: Vec<AtomicU64>,
+    pub(crate) versions: Vec<AtomicU32>,
+    pub(crate) epoch: AtomicU32,
+}
+
+/// For harts without RAM of their own (no cache).
+pub static NO_CODE: Code = Code { lines: Vec::new(), versions: Vec::new(), epoch: AtomicU32::new(0) };
+
+impl Code {
+    pub fn new(pages: usize) -> Code {
+        Code {
+            lines: (0..pages).map(|_| AtomicU64::new(0)).collect(),
+            versions: (0..pages).map(|_| AtomicU32::new(0)).collect(),
+            epoch: AtomicU32::new(0),
+        }
+    }
+
+    /// RAM at `offset..offset + len` (offsets into RAM) has been written:
+    /// retire the blocks of every page where that hits a line with code.
+    #[inline(always)]
+    pub fn written(&self, offset: u64, len: u64) {
+        if self.lines.is_empty() || len == 0 {
+            return;
+        }
+        let (first, last) = (offset >> 6, (offset + len - 1) >> 6);
+        for line in first..=last {
+            let page = (line >> 6) as usize;
+            if self.lines[page].load(Relaxed) & (1 << (line & 63)) != 0 {
+                self.retire(page);
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn retire(&self, page: usize) {
+        self.versions[page].fetch_add(1, Relaxed);
+        self.lines[page].store(0, Relaxed);
+        self.epoch.fetch_add(1, Relaxed);
+    }
+
+    /// Forget all code (RAM was reloaded).
+    pub fn clear(&self) {
+        for line in &self.lines {
+            line.store(0, Relaxed);
+        }
+        self.epoch.fetch_add(1, Relaxed);
+    }
 }
 
 pub const EMPTY_BLOCK: Block = Block { pa: 0, version: 0, start: 0, count: 0, jit: 0, entry: 0 };
@@ -251,19 +306,7 @@ impl Hart {
     /// the blocks of every page where that hits a line with cached code.
     #[inline(always)]
     pub(crate) fn code_written(&mut self, offset: u64, len: u64) {
-        if self.code_lines.is_empty() || len == 0 {
-            return;
-        }
-        let (first, last) = (offset >> 6, (offset + len - 1) >> 6);
-        for line in first..=last {
-            let page = (line >> 6) as usize;
-            if self.code_lines[page] & (1 << (line & 63)) != 0 {
-                self.page_versions[page] = self.page_versions[page].wrapping_add(1);
-                self.code_lines[page] = 0;
-                self.code_changed = true;
-                self.forget_chains();
-            }
-        }
+        self.code.written(offset, len);
     }
 
     /// Run instructions from the decoded block at pc, if there's one to run
@@ -298,7 +341,13 @@ impl Hart {
             return 0;
         }
         let page = (offset >> 12) as usize;
-        let version = self.page_versions[page];
+        let epoch = self.code.epoch.load(Relaxed);
+        if epoch != self.code_epoch {
+            // Code changed somewhere: compiled code may have gone stale.
+            self.code_epoch = epoch;
+            self.forget_chains();
+        }
+        let version = self.code.versions[page].load(Relaxed);
         let set = Self::block_set(pa);
         let mut index = set;
         while index < set + WAYS && self.blocks[index].pa != pa {
@@ -356,9 +405,16 @@ impl Hart {
             self.flush_blocks();
         }
         let start = self.ops_used;
+        let page = (offset >> 12) as usize;
         let page_end = (offset | 0xfff) + 1;
+        // The version first, then each instruction's lines marked before
+        // reading it: a write by another hart either comes before the read,
+        // or sees the mark and retires the block.
+        let version = self.code.versions[page].load(Relaxed);
         let mut at = offset;
         while at + 2 <= page_end && self.ops_used - start < MAX_BLOCK {
+            let last = (at + 3).min(page_end - 1);
+            self.code.lines[page].fetch_or(1 << ((at >> 6) & 63) | 1 << ((last >> 6) & 63), Relaxed);
             // SAFETY: at + 2 <= page_end <= ram_size (RAM is whole pages).
             let low = unsafe { self.ram.add(at as usize).cast::<u16>().read_unaligned() } as u32;
             let op = if low & 3 == 3 {
@@ -376,13 +432,6 @@ impl Hart {
             };
             self.ops[self.ops_used] = op;
             self.ops_used += 1;
-            // Mark the lines it occupies as holding code. (The JIT's fast
-            // stores only go to pages without any: see jit_fill.)
-            let page = (at >> 12) as usize;
-            if self.code_lines[page] == 0 {
-                self.flush_jit_tlb();
-            }
-            self.code_lines[page] |= 1 << ((at >> 6) & 63) | 1 << (((at + op.len as u64 - 1) >> 6) & 63);
             at += op.len as u64;
             if op.kind.ends_block() {
                 break;
@@ -392,7 +441,7 @@ impl Hart {
         if count == 0 {
             return None;
         }
-        Some(Block { pa, version: self.page_versions[(offset >> 12) as usize], start: start as u32, count: count as u32, jit: 0, entry: 0 })
+        Some(Block { pa, version, start: start as u32, count: count as u32, jit: 0, entry: 0 })
     }
 
     /// Run a block: like `step()` for each instruction, minus fetching,

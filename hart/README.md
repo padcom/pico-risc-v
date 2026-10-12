@@ -10,15 +10,21 @@ supervisor and user modes with trap delegation, and Sv39 paging with a TLB.
 Compressed (16-bit) instructions are expanded into the 32-bit instructions
 they stand for (a table lookup), then executed like those.
 
+An instance of the core holds one or more **harts**, which share its RAM
+(`CPU.harts()` in `src/cpu.ts`; the machine runs them in turn). Each has its
+own caches and JIT. AMOs and SC are atomic operations on RAM, and an SC
+succeeds only if memory still holds what its LR read, so they work across
+harts.
+
 `run()` executes code from a **decoded-instruction cache** (`blocks.rs`):
 blocks (the instructions up to the next jump or system instruction, within a
 page; a conditional branch leaves the block when taken) are decoded once,
 keyed by physical address, and then run as a tight loop, with one interrupt
 check per block and, for pages run recently, no address translation. Loads and stores check permissions once per TLB entry
 and privilege context, not on every access. The cache is coherent with memory: a write to a 64-byte line
-holding cached code, by the CPU or by a device (DMA, which the machine
-reports through `codeWritten`), retires the blocks of that page, so software
-never runs stale instructions, FENCE.I or not. `step()` is the plain
+holding cached code, by any hart or by a device (DMA, which the machine
+reports through `codeWritten`), retires the blocks of that page in every
+hart's cache, so software never runs stale instructions, FENCE.I or not. `step()` is the plain
 interpreter: fetch, decode, execute one instruction; `run()` falls back to it
 for whatever a block can't do. (Earlier versions
 also did RV32; the code and the riscv-tests for it are in the git history.)

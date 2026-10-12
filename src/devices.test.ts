@@ -35,6 +35,22 @@ describe('PLIC', () => {
     expect(mip()).toBe(0)
   })
 
+  it('has an M-mode and an S-mode context per hart; a source claimed by one is not offered to another', () => {
+    const mip = [0, 0]
+    const p = new Plic((bit, on, hart) => (mip[hart] = on ? mip[hart]! | bit : mip[hart]! & ~bit), 2)
+    p.reset()
+    p.write32(4 * 1, 1) // priority of source 1
+    p.write32(0x2000 + 0x80 * 1, 1 << 1) // enabled for context 1: hart 0, S-mode
+    p.write32(0x2000 + 0x80 * 3, 1 << 1) // context 3: hart 1, S-mode
+    p.setLevel(1, true)
+    expect(mip).toEqual([MIP_SEIP, MIP_SEIP])
+    expect(p.read32(0x200004 + 0x1000 * 3)).toBe(1) // hart 1 claims it
+    expect(mip).toEqual([0, 0])
+    expect(p.read32(0x200004 + 0x1000 * 1)).toBe(0) // nothing left for hart 0
+    p.write32(0x200004 + 0x1000 * 3, 1) // complete
+    expect(mip).toEqual([MIP_SEIP, MIP_SEIP]) // still high: pending again
+  })
+
   it('priority 0 never interrupts, and only priorities above the threshold do', () => {
     const { p, mip, enable, threshold, priority } = plic()
     enable(0, 1 << 3)

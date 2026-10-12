@@ -5,7 +5,7 @@
 //! (mepc/mcause/mtval, mtvec), or into S-mode when delegated through
 //! medeleg/mideleg (sepc/scause/stval, stvec).
 
-use crate::blocks::{Block, FETCH_CACHE, Op};
+use crate::blocks::{Block, Code, FETCH_CACHE, NO_CODE, Op};
 use crate::jit::{ChainEntry, JIT_TLB_EMPTY, Jit, JitTlbEntry};
 use crate::csr::*;
 use crate::memory::Access;
@@ -97,6 +97,8 @@ pub struct Hart {
     pub x: [u64; 33],
     pub pc: u64,
     pub priv_: u32,
+    /// mhartid.
+    pub id: u64,
     /// f0..f31 (single-precision values NaN-boxed), and fcsr's two fields.
     pub f: [u64; 32],
     pub fflags: u32,
@@ -144,8 +146,10 @@ pub struct Hart {
     pub(crate) translate_data: bool,
     pub(crate) data_priv: u32,
     pub(crate) paging: Paging,
-    /// Physical address reserved by LR.
+    /// Physical address reserved by LR, and the value it read (SC succeeds
+    /// if memory still holds it).
     reservation: u64,
+    reserved_value: u64,
 
     /// RAM: `ram_size` bytes at `ram`, at physical address `ram_base`.
     pub(crate) ram: *mut u8,
@@ -186,12 +190,10 @@ pub struct Hart {
     pub(crate) fetch_tags: [u64; FETCH_CACHE],
     pub(crate) fetch_pages: [u32; FETCH_CACHE],
     pub(crate) fetch_ctx: u64,
-    /// Per RAM page: which of its 64-byte lines hold cached code (a bit each)...
-    pub(crate) code_lines: Vec<u64>,
-    /// ...and a version, bumped when one of those is written.
-    pub(crate) page_versions: Vec<u32>,
-    /// Set when that happens (for the JIT: see jit_op).
-    pub(crate) code_changed: bool,
+    /// What's known about code in RAM (shared by all harts), and its epoch
+    /// when this hart last looked.
+    pub(crate) code: &'static Code,
+    pub(crate) code_epoch: u32,
 }
 
 impl Hart {
@@ -200,6 +202,7 @@ impl Hart {
             x: [0; 33],
             pc: 0,
             priv_: PRIV_M,
+            id: 0,
             f: [0; 32],
             fflags: 0,
             frm: 0,
@@ -233,6 +236,7 @@ impl Hart {
             data_priv: PRIV_M,
             paging: Paging::Bare,
             reservation: NO_RESERVATION,
+            reserved_value: 0,
             ram: core::ptr::null_mut(),
             ram_base: 0,
             ram_size: 0,
@@ -254,9 +258,8 @@ impl Hart {
             fetch_tags: [TLB_EMPTY; FETCH_CACHE],
             fetch_pages: [0; FETCH_CACHE],
             fetch_ctx: 0,
-            code_lines: Vec::new(),
-            page_versions: Vec::new(),
-            code_changed: false,
+            code: &NO_CODE,
+            code_epoch: 0,
         }
     }
 
@@ -293,7 +296,7 @@ impl Hart {
         self.reservation = NO_RESERVATION;
         self.flush_tlb();
         self.flush_blocks(); // RAM was (re)loaded without the hart seeing it
-        self.code_lines.fill(0);
+        self.code.clear();
         self.update_translation();
     }
 
@@ -734,7 +737,8 @@ impl Hart {
             MCAUSE => self.mcause,
             MTVAL => self.mtval,
             MIP => self.mip,
-            MCOUNTINHIBIT | MVENDORID | MARCHID | MIMPID | MHARTID | MCONFIGPTR => 0,
+            MHARTID => self.id,
+            MCOUNTINHIBIT | MVENDORID | MARCHID | MIMPID | MCONFIGPTR => 0,
 
             SSTATUS => self.mstatus & SSTATUS_VISIBLE | self.state_dirty(),
             SIE => self.mie & self.mideleg,
@@ -873,16 +877,34 @@ impl Hart {
             let value = self.phys_read(pa, width).ok_or(fault)?;
             self.x[rd] = extend(value);
             self.reservation = pa;
+            self.reserved_value = value;
             return Ok(());
         }
         if op == 0b00011 {
-            // SC
-            let ok = self.reservation == pa;
+            // SC: in RAM, only if memory still holds what LR read (another
+            // hart may have written it since; writing the same value back
+            // goes unnoticed, which software can't tell from an SC that
+            // came first).
+            let reserved = self.reservation == pa;
             self.reservation = NO_RESERVATION;
-            if ok && !self.phys_write(pa, width, src) {
-                return Err(fault);
-            }
+            let ok = match self.ram_offset(pa, width) {
+                Some(offset) if reserved => {
+                    let done = self.ram_compare_exchange(offset, width, self.reserved_value, src);
+                    if done {
+                        self.code_written(offset as u64, width as u64);
+                    }
+                    done
+                }
+                _ if reserved => self.phys_write(pa, width, src) || return Err(fault),
+                _ => false,
+            };
             self.x[rd] = !ok as u64;
+            return Ok(());
+        }
+        if let Some(offset) = self.ram_offset(pa, width) {
+            let old = self.ram_amo(offset, width, op, src).ok_or_else(|| illegal(inst))?;
+            self.code_written(offset as u64, width as u64);
+            self.x[rd] = extend(old);
             return Ok(());
         }
 

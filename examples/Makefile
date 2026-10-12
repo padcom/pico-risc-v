@@ -23,7 +23,8 @@ LIBGCC   = $(shell $(CC) -march=rv64imac -mabi=lp64 -print-libgcc-file-name)
 # bench: CPU benchmark (npm run bench), also RV64IM; bench-c the same with
 # compressed instructions (RV64IMC).
 # fbench: floating-point test program (RV64GC).
-PROGRAMS := hello matmul matmul-m bench bench-c fbench
+# smp: 4 harts updating shared counters with atomics (RV64IMA).
+PROGRAMS := hello matmul matmul-m bench bench-c fbench smp
 
 all: $(PROGRAMS:%=build/%.bin)
 
@@ -37,6 +38,8 @@ build/%.elf: %/*.c $(COMMON) | build
 build/matmul-m.elf build/bench.elf: MARCH := rv64im
 build/matmul-m.elf: matmul/*.c $(COMMON) | build
 	$(link)
+
+build/smp.elf: MARCH := rv64ima
 
 build/bench-c.elf: MARCH := rv64imc
 build/bench-c.elf: bench/*.c $(COMMON) | build

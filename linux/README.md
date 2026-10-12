@@ -40,10 +40,11 @@ All of it is Debian's, booted the way a RISC-V board boots it:
    are built in or come from the initrd), then **systemd**.
 
 The disk is Debian 13 (trixie)'s "nocloud" cloud image for riscv64. The
-machine has an RV64GC CPU with Sv39 virtual memory, what Debian's riscv64
-port requires, and 1 GiB of RAM.
+machine has 4 RV64GC harts (CPU cores) with Sv39 virtual memory, what
+Debian's riscv64 port requires, and 1 GiB of RAM. The harts take turns on
+one thread of your machine, so for now they're no faster than one.
 
-Debian reaches the login prompt in about 30 seconds. Log in as `root`, no
+Debian reaches the login prompt in about 40 seconds. Log in as `root`, no
 password. `poweroff` shuts it down, and `npm start` exits with it; Ctrl-A
 then X quits the emulator at any time.
 
@@ -193,6 +194,7 @@ preset. It boots exactly what you pass:
 | `--net` | the network card on the user-mode NAT |
 | `--forward <host port>:<guest port>` | with `--net`: connections to `localhost:<host port>` reach the guest's `<guest port>` (repeatable) |
 | `--memory <MiB>` | RAM size (default 64) |
+| `--harts <n>` | number of harts, 1 to 8 (default 1) |
 | `--bootargs <string>` | the kernel command line (for a kernel booted directly) |
 
 For example, `npm run emulator -- examples/build/hello.bin` runs a

@@ -11,7 +11,7 @@
  *    pristine.raw, the disk as built; the disk you use, disk.raw, starts as a
  *    copy of it. A rebuild replaces disk.raw too, keeping the old one as
  *    disk.raw.bak.
- * 3. Boot: OpenSBI at the start of RAM, U-Boot 2 MiB later; U-Boot starts
+ * 3. Boot, on 4 harts: OpenSBI at the start of RAM, U-Boot 2 MiB later; U-Boot starts
  *    GRUB from the disk, GRUB Debian's kernel. eth0 on the user-mode network,
  *    with localhost:2222 forwarded to Debian's port 22 (ssh).
  */
@@ -25,6 +25,7 @@ const FILES = ['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw']
 // once openssh-server is installed in Debian (and you can log in: see linux/README.md).
 const ARGS = [
   '--memory', '1024',
+  '--harts', '4',
   '--kernel', `${DIR}/u-boot.bin`,
   '--disk', `${DIR}/disk.raw`,
   '--net', '--forward', '2222:22',

@@ -2,8 +2,9 @@ import { WordDevice } from './bus.js'
 import { MIP_MEIP, MIP_SEIP } from './csr.js'
 
 /**
- * Platform-Level Interrupt Controller (SiFive / RISC-V PLIC layout) for one
- * hart with two contexts: 0 = M-mode (drives mip.MEIP), 1 = S-mode (mip.SEIP).
+ * Platform-Level Interrupt Controller (SiFive / RISC-V PLIC layout) for
+ * `harts` harts, with two contexts each: 2·hart = its M-mode (drives its
+ * mip.MEIP), 2·hart + 1 = its S-mode (mip.SEIP).
  *
  *   0x000000 + 4·id        priority of source id (0 = never interrupts)
  *   0x001000 + 4·word      pending bits (read-only)
@@ -21,16 +22,21 @@ export class Plic extends WordDevice {
   static readonly SOURCES = 32
 
   private readonly priority = new Uint32Array(Plic.SOURCES)
-  private readonly enable = [0, 0]
-  private readonly threshold = [0, 0]
+  private readonly enable: number[]
+  private readonly threshold: number[]
   /** Line levels and in-service sources, as bit masks indexed by source id. */
   private level = 0
   private inService = 0
 
   private static readonly CONTEXT_BITS = [MIP_MEIP, MIP_SEIP]
 
-  constructor(private readonly raise: (bit: number, pending: boolean) => void) {
+  constructor(
+    private readonly raise: (bit: number, pending: boolean, hart: number) => void,
+    readonly harts = 1,
+  ) {
     super()
+    this.enable = Array<number>(2 * harts).fill(0)
+    this.threshold = Array<number>(2 * harts).fill(0)
   }
 
   /** Called by devices: drive interrupt line `source` high or low. */
@@ -67,7 +73,7 @@ export class Plic extends WordDevice {
   }
 
   private update(): void {
-    for (let ctx = 0; ctx < 2; ctx++) this.raise(Plic.CONTEXT_BITS[ctx]!, this.best(ctx) !== 0)
+    for (let ctx = 0; ctx < 2 * this.harts; ctx++) this.raise(Plic.CONTEXT_BITS[ctx & 1]!, this.best(ctx) !== 0, ctx >>> 1)
   }
 
   protected readWord(offset: number): number {
@@ -114,6 +120,6 @@ export class Plic extends WordDevice {
     if (offset >= 0x2000 && offset < 0x200000) ctx = (offset - 0x2000) >>> 7
     else if (offset >= 0x200000) ctx = (offset - 0x200000) >>> 12
     else return undefined
-    return ctx < 2 ? ctx : undefined
+    return ctx < 2 * this.harts ? ctx : undefined
   }
 }

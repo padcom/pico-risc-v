@@ -80,6 +80,11 @@ export interface MachineOptions {
   bootargs?: string
   /** The CPU's JIT (see CPUOptions); on by default. */
   jit?: CPUOptions['jit']
+  /**
+   * How many harts (CPU cores) the machine has (default 1). They take turns,
+   * `SLICE` steps each.
+   */
+  harts?: number
 }
 
 export interface BootOptions {
@@ -92,6 +97,9 @@ export interface BootOptions {
    */
   next?: { offset: number; mode?: 'S' | 'M' }
 }
+
+/** Room left after the DTB for firmware to add to it. */
+const FDT_ROOM = 4096
 
 /** sizeof(struct fw_dynamic_info): six `unsigned long`s (rounded up to keep the DTB 8-byte aligned). */
 const FW_DYNAMIC_INFO_SIZE = 48
@@ -106,10 +114,10 @@ const FW_DYNAMIC_INFO_SIZE = 48
  */
 export type RunResult = 'poweroff' | 'reboot' | 'breakpoint' | 'idle' | 'limit'
 
-/** How many instructions to run between timer updates. */
+/** How many instructions to run between timer updates (and each hart's turn). */
 const SLICE = 10_000
 
-/** A complete computer: CPU + RAM + terminal + timer + syscon on one bus. */
+/** A complete computer: CPUs + RAM + terminal + timer + syscon on one bus. */
 export class Machine {
   readonly bus = new SystemBus()
   readonly ram: RAM
@@ -121,12 +129,25 @@ export class Machine {
   readonly disk: VirtioBlock | undefined
   readonly nic: VirtioNet | undefined
   private readonly network: NetworkBackend | undefined
+  /** The harts, by mhartid. */
+  readonly cpus: CPU[]
+  /** Hart 0. */
   readonly cpu: CPU
 
   private readonly bootargs: string
   private readonly virtual: boolean
   private readonly ipu: number
   private skippedMicros = 0
+  /**
+   * The virtual clock's instruction count: how far the harts got, together
+   * (each round adds the most any hart retired; with one hart, its count).
+   * The hart running now adds its progress in this round; what the clock
+   * returned last keeps it from going back for the next hart.
+   */
+  private ticks = 0
+  private lastTicks = 0
+  private running: CPU | undefined
+  private runningFrom = 0
   private readonly startTime: number | undefined
   private readonly fixedRngSeed: Uint8Array | undefined
   /** This power-on's rng-seed. */
@@ -150,6 +171,7 @@ export class Machine {
     network,
     mac = Uint8Array.of(0x52, 0x54, 0x00, 0x12, 0x34, 0x56),
     jit,
+    harts = 1,
   }: MachineOptions = {}) {
     this.bootargs = bootargs
     this.virtual = clock === 'virtual'
@@ -160,22 +182,21 @@ export class Machine {
 
     this.terminal = new Terminal(output, high => this.plic.setLevel(TERMINAL_IRQ, high))
     // RAM lives inside the CPU core (fast); devices reach it through the bus.
-    this.cpu = new CPU(this.bus, {
+    this.cpus = CPU.harts(this.bus, harts, {
       resetVector: MemoryMap.RAM,
       readTime: () => this.clint.mtime,
       ram: { base: MemoryMap.RAM, size: ramSize },
       jit,
     })
+    this.cpu = this.cpus[0]!
     this.ram = this.cpu.ram!
-    this.clint = new Clint(
-      () => this.now(),
-      (bit, pending) => this.cpu.setInterruptPending(bit, pending),
-    )
+    const raise = (bit: number, pending: boolean, hart: number) => this.cpus[hart]!.setInterruptPending(bit, pending)
+    this.clint = new Clint(() => this.now(), raise, harts)
     this.syscon = new Syscon(command => {
       this.exit = command
-      this.cpu.stop()
+      for (const cpu of this.cpus) cpu.stop()
     })
-    this.plic = new Plic((bit, pending) => this.cpu.setInterruptPending(bit, pending))
+    this.plic = new Plic(raise, harts)
     const dma = (addr: number, length: number) => this.guestMemory(addr, length)
     this.disk = disk && new VirtioBlock(disk, dma, high => this.plic.setLevel(DISK_IRQ, high))
     this.network = network
@@ -242,15 +263,19 @@ export class Machine {
 
     this.exit = undefined
     this.skippedMicros = 0
+    this.ticks = this.lastTicks = 0
     this.powerOnTime = this.startTime ?? Date.now()
-    this.cpu.reset(MemoryMap.RAM)
+    for (const cpu of this.cpus) cpu.reset(MemoryMap.RAM)
     this.clint.reset()
     this.terminal.reset()
     this.plic.reset()
     this.disk?.reset()
     this.nic?.reset()
-    this.cpu.setRegister(10, 0) // a0: hart id
-    this.cpu.setRegister(11, MemoryMap.RAM + dtbOffset) // a1: device tree
+    // All harts start at the start of RAM (firmware picks one to boot).
+    for (const cpu of this.cpus) {
+      cpu.setRegister(10, cpu.id) // a0: hart id
+      cpu.setRegister(11, MemoryMap.RAM + dtbOffset) // a1: device tree
+    }
     if (this.next) {
       // struct fw_dynamic_info (OpenSBI include/sbi/fw_dynamic.h), passed in
       // a2: `unsigned long` fields, 64 bits each (little-endian, < 2^32 here).
@@ -263,41 +288,52 @@ export class Machine {
         0, // boot_hart
       ]
       info.forEach((value, i) => this.ram.write32(infoOffset + i * 8, value))
-      this.cpu.setRegister(12, MemoryMap.RAM + infoOffset)
+      for (const cpu of this.cpus) cpu.setRegister(12, MemoryMap.RAM + infoOffset)
     }
   }
 
   /**
-   * Execute up to `maxSteps` steps; see RunResult for why it stopped. A step
-   * is an instruction or a trap entry (which retires nothing), and every round
-   * uses up at least one, so neither a guest stuck in a trap loop nor one
-   * idling in WFI (with the virtual clock skipping ahead) keeps us here forever.
+   * Execute up to `maxSteps` steps (of each hart; they take turns); see
+   * RunResult for why it stopped. A step is an instruction or a trap entry
+   * (which retires nothing), and every round uses up at least one, so neither
+   * a guest stuck in a trap loop nor one idling in WFI (with the virtual clock
+   * skipping ahead) keeps us here forever.
    */
   run(maxSteps = Infinity): RunResult {
     let remaining = maxSteps
     while (remaining > 0) {
       this.clint.update()
       const slice = Math.min(SLICE, remaining)
-      const before = this.cpu.instret
-      const result = this.cpu.run(slice)
-      remaining -= result === 'limit' ? slice : Math.max(1, this.cpu.instret - before)
-      switch (result) {
-        case 'stopped':
-          if (this.exit) return this.exit
-          break
-        case 'breakpoint':
-          return 'breakpoint'
-        case 'wfi':
-          if (!this.wake()) return 'idle'
-          break
+      // Steps used and instructions retired in this round: the most any hart did.
+      let used = 0
+      let retired = 0
+      let waiting = 0
+      for (const cpu of this.cpus) {
+        this.running = cpu
+        this.runningFrom = cpu.instret
+        const result = cpu.run(slice)
+        this.running = undefined
+        const done = cpu.instret - this.runningFrom
+        retired = Math.max(retired, done)
+        used = Math.max(used, result === 'limit' ? slice : done)
+        if (result === 'wfi') {
+          waiting++
+        } else if ((result === 'stopped' && this.exit) || result === 'breakpoint') {
+          this.ticks += retired
+          return this.exit ?? 'breakpoint'
+        }
       }
+      this.ticks += retired
+      remaining -= Math.max(1, used)
+      if (waiting === this.cpus.length && !this.wake()) return 'idle'
     }
     return 'limit'
   }
 
-  /** Microseconds until the timer interrupt fires (Infinity if never armed). */
+  /** Microseconds until the next timer interrupt fires (Infinity if none is armed). */
   microsUntilTimer(): number {
-    const delta = this.clint.mtimecmp - this.clint.mtime
+    const mtime = this.clint.mtime
+    const delta = Math.min(...this.cpus.map(cpu => this.clint.timecmp(cpu.id) - mtime))
     return delta >= 2 ** 53 ? Infinity : Math.max(0, delta)
   }
 
@@ -310,7 +346,11 @@ export class Machine {
   }
 
   private now(): number {
-    if (this.virtual) return Math.floor(this.cpu.instret / this.ipu) + this.skippedMicros
+    if (this.virtual) {
+      const ticks = this.ticks + (this.running ? this.running.instret - this.runningFrom : 0)
+      this.lastTicks = Math.max(this.lastTicks, ticks)
+      return Math.floor(this.lastTicks / this.ipu) + this.skippedMicros
+    }
     return Math.floor((performance.now() - this.epoch) * 1000)
   }
 
@@ -324,15 +364,16 @@ export class Machine {
   }
 
   /**
-   * The CPU sleeps in WFI: see whether it can be woken without waiting in the
-   * real world. The timer line is only re-evaluated between slices, so a
-   * deadline may have passed since; with the virtual clock, idle time up to the
-   * next deadline is skipped (unless the network is busy). Returns false if the
-   * CPU stays asleep.
+   * The CPUs sleep in WFI: see whether one can be woken without waiting in
+   * the real world. The timer lines are only re-evaluated between rounds, so
+   * a deadline may have passed since; with the virtual clock, idle time up to
+   * the next deadline is skipped (unless the network is busy). Returns false
+   * if they all stay asleep.
    */
   private wake(): boolean {
+    const interrupted = () => this.cpus.some(cpu => (cpu.mip & cpu.mie) !== 0)
     this.clint.update()
-    if (this.cpu.mip & this.cpu.mie) return true
+    if (interrupted()) return true
     // While the guest waits on the real world (network), virtual time must not
     // race ahead: its timeouts would expire before the host answers.
     if (!this.virtual || this.network?.busy) return false
@@ -340,20 +381,26 @@ export class Machine {
     if (wait === Infinity) return false
     this.skippedMicros += wait
     this.clint.update()
-    return (this.cpu.mip & this.cpu.mie) !== 0
+    return interrupted()
   }
 
-  /** The DTB goes into the last page-aligned chunk of RAM that fits it. */
+  /**
+   * The DTB goes into the last page-aligned chunk of RAM that fits it, with
+   * FDT_ROOM to spare after it: firmware (OpenSBI) grows it in place.
+   */
   private dtbOffset(dtbSize: number): number {
-    return (this.ram.size - dtbSize) & ~0xfff
+    return (this.ram.size - dtbSize - FDT_ROOM) & ~0xfff
   }
 
   private describe(memSize: number): FdtNode {
     const reg = (addr: number, size: number) => [0, addr, 0, size] // 2 address + 2 size cells
-    const CPU_PHANDLE = 1
-    const INTC_PHANDLE = 2
+    // Hart 0's are 1 and 2, the others' from 5 on.
+    const cpuPhandle = (hart: number) => (hart ? 3 + 2 * hart : 1)
+    const intcPhandle = (hart: number) => cpuPhandle(hart) + 1
     const SYSCON_PHANDLE = 3
     const PLIC_PHANDLE = 4
+    // An interrupt of each hart's local interrupt controller per hart.
+    const ofEachHart = (...causes: number[]) => this.cpus.flatMap(({ id }) => causes.flatMap(cause => [intcPhandle(id), cause]))
     return {
       props: {
         '#address-cells': 2,
@@ -376,11 +423,11 @@ export class Machine {
         cpus: {
           props: { '#address-cells': 1, '#size-cells': 0, 'timebase-frequency': TIMEBASE_HZ },
           children: {
-            'cpu@0': {
+            ...Object.fromEntries(this.cpus.map(({ id }) => [`cpu@${id}`, {
               props: {
-                phandle: CPU_PHANDLE,
+                phandle: cpuPhandle(id),
                 device_type: 'cpu',
-                reg: 0,
+                reg: id,
                 status: 'okay',
                 compatible: 'riscv',
                 // Old-style ISA string, plus the newer binding that kernels
@@ -396,12 +443,18 @@ export class Machine {
                     '#interrupt-cells': 1,
                     'interrupt-controller': true,
                     compatible: 'riscv,cpu-intc',
-                    phandle: INTC_PHANDLE,
+                    phandle: intcPhandle(id),
                   },
                 },
               },
+            }])),
+            'cpu-map': {
+              children: {
+                cluster0: {
+                  children: Object.fromEntries(this.cpus.map(({ id }) => [`core${id}`, { props: { cpu: cpuPhandle(id) } }])),
+                },
+              },
             },
-            'cpu-map': { children: { cluster0: { children: { core0: { props: { cpu: CPU_PHANDLE } } } } } },
           },
         },
         soc: {
@@ -427,8 +480,8 @@ export class Machine {
             },
             [`clint@${hex(MemoryMap.CLINT)}`]: {
               props: {
-                // machine software (3) and machine timer (7) interrupts of hart 0
-                'interrupts-extended': [INTC_PHANDLE, 3, INTC_PHANDLE, 7],
+                // machine software (3) and machine timer (7) interrupts of each hart
+                'interrupts-extended': ofEachHart(3, 7),
                 reg: reg(MemoryMap.CLINT, Clint.SIZE),
                 compatible: ['sifive,clint0', 'riscv,clint0'],
               },
@@ -442,8 +495,8 @@ export class Machine {
                 '#interrupt-cells': 1,
                 '#address-cells': 0,
                 'riscv,ndev': Plic.SOURCES - 1,
-                // context 0: machine external (11), context 1: supervisor external (9) of hart 0
-                'interrupts-extended': [INTC_PHANDLE, 11, INTC_PHANDLE, 9],
+                // contexts 2·hart: machine external (11), 2·hart + 1: supervisor external (9)
+                'interrupts-extended': ofEachHart(11, 9),
               },
             },
             [`rtc@${hex(MemoryMap.RTC)}`]: {

@@ -1,12 +1,13 @@
 //! The emulator's CPU core, compiled to WebAssembly and driven by src/cpu.ts.
 //!
-//! One module instance is one hart: its state is a single static, and guest
-//! RAM is a block of this instance's linear memory, so loads, stores and
+//! An instance holds the harts (each created by `hart_new`, and passed to
+//! every export that works on one) and guest RAM, a block of this
+//! instance's linear memory shared by them all, so loads, stores and
 //! instruction fetches never leave WebAssembly. Device accesses call out to
 //! the JavaScript bus (see memory.rs).
 //!
-//! Nothing allocates after `ram_alloc`, so the linear memory never grows and
-//! the JavaScript views into it (registers, RAM) stay valid.
+//! Nothing allocates after the harts are created, so the linear memory never
+//! grows and the JavaScript views into it (registers, RAM) stay valid.
 //!
 //! Register and CSR values cross over as 64-bit integers (BigInt in
 //! JavaScript).
@@ -22,65 +23,92 @@ mod rvc;
 #[cfg(test)]
 mod testfloat;
 
+use blocks::{Code, NO_CODE};
 use core::cell::UnsafeCell;
 use hart::Hart;
 
-struct Global(UnsafeCell<Hart>);
-// SAFETY: WebAssembly instances are single-threaded.
-unsafe impl Sync for Global {}
-
-static HART: Global = Global(UnsafeCell::new(Hart::new()));
-
-fn hart() -> &'static mut Hart {
-    // SAFETY: single-threaded; JavaScript re-enters only through the exports
-    // below, during device calls, which treat the hart as possibly modified.
-    unsafe { &mut *HART.0.get() }
+/// RAM, and what's known about code in it: shared by the harts (set up once,
+/// by `ram_alloc`, before they are created).
+struct Ram {
+    ptr: *mut u8,
+    base: u64,
+    size: u64,
+    code: &'static Code,
 }
 
-/// Flags for `init`.
+struct Global<T>(UnsafeCell<T>);
+// SAFETY: written once, before any hart exists; only read after that.
+unsafe impl<T> Sync for Global<T> {}
+
+static RAM: Global<Ram> = Global(UnsafeCell::new(Ram { ptr: core::ptr::null_mut(), base: 0, size: 0, code: &NO_CODE }));
+
+fn ram() -> &'static Ram {
+    // SAFETY: see Global.
+    unsafe { &*RAM.0.get() }
+}
+
+/// The hart JavaScript passes (as `hart_new` returned it).
+fn hart(h: *mut Hart) -> &'static mut Hart {
+    // SAFETY: a hart from hart_new, which lives forever. JavaScript re-enters
+    // only through these exports, during device calls, which treat the hart
+    // as possibly modified.
+    unsafe { &mut *h }
+}
+
+/// Flags for `hart_new`.
 const BREAK_ON_EBREAK: u32 = 1;
 const HAS_TIME: u32 = 2;
 
+/// Allocate `size` bytes of zeroed RAM at physical address `base` (before
+/// creating harts); returns where it is in linear memory.
 #[unsafe(no_mangle)]
-pub extern "C" fn init(reset_vector: u64, flags: u32) {
-    let h = hart();
+pub extern "C" fn ram_alloc(base: u32, size: u32) -> *mut u8 {
+    // SAFETY: see Global (no harts yet).
+    let ram = unsafe { &mut *RAM.0.get() };
+    // (8-byte aligned, for atomic accesses.)
+    ram.ptr = vec![0u64; (size as usize).div_ceil(8)].leak().as_mut_ptr().cast();
+    ram.base = base as u64;
+    ram.size = size as u64;
+    ram.code = Box::leak(Box::new(Code::new((size as usize).div_ceil(4096))));
+    ram.ptr
+}
+
+/// A new hart, `id` (mhartid), reset to start at `reset_vector`. With RAM
+/// (`ram_alloc`), it gets its decoded-instruction cache.
+#[unsafe(no_mangle)]
+pub extern "C" fn hart_new(id: u32, reset_vector: u64, flags: u32) -> *mut Hart {
     rvc::fill_table();
+    let h = Box::leak(Box::new(Hart::new()));
+    h.id = id as u64;
+    let ram = ram();
+    if ram.size > 0 {
+        h.ram = ram.ptr;
+        h.ram_base = ram.base;
+        h.ram_size = ram.size;
+        h.code = ram.code;
+        h.blocks = vec![blocks::EMPTY_BLOCK; blocks::BLOCKS];
+        h.ops = vec![blocks::NO_OP; blocks::OPS];
+        h.jit.allocate(ram.code.lines.len());
+        h.chain = vec![jit::CHAIN_EMPTY; jit::CHAIN_SIZE];
+    }
     h.reset(reset_vector);
     h.break_on_ebreak = flags & BREAK_ON_EBREAK != 0;
     h.has_time = flags & HAS_TIME != 0;
-}
-
-/// Allocate `size` bytes of zeroed RAM at physical address `base`; returns
-/// where it is in linear memory.
-#[unsafe(no_mangle)]
-pub extern "C" fn ram_alloc(base: u32, size: u32) -> *mut u8 {
-    let h = hart();
-    h.ram = vec![0u8; size as usize].leak().as_mut_ptr();
-    h.ram_base = base as u64;
-    h.ram_size = size as u64;
-    // The decoded-instruction cache, sized for it.
-    let pages = (size as usize).div_ceil(4096);
-    h.blocks = vec![blocks::EMPTY_BLOCK; blocks::BLOCKS];
-    h.ops = vec![blocks::NO_OP; blocks::OPS];
-    h.code_lines = vec![0; pages];
-    h.page_versions = vec![0; pages];
-    h.jit.allocate(pages);
-    h.chain = vec![jit::CHAIN_EMPTY; jit::CHAIN_SIZE];
-    h.ram
+    h
 }
 
 /// How many function table slots the JIT needs (one per page of RAM).
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_slots() -> u32 {
-    hart().code_lines.len() as u32
+    ram().code.lines.len() as u32
 }
 
-/// Turn the JIT on: its slots start at `table_base` in the function table;
-/// a block is compiled after running `threshold` times, `batch` of them at
+/// Turn a hart's JIT on: its slots start at `table_base` in the function
+/// table; a page is compiled after running `threshold` instructions, `batch`
 /// pages at a time.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_init(table_base: u32, threshold: u32, batch: u32) {
-    let h = hart();
+pub extern "C" fn jit_init(h: *mut Hart, table_base: u32, threshold: u32, batch: u32) {
+    let h = hart(h);
     h.jit.table_base = table_base;
     h.jit.threshold = threshold.max(1);
     h.jit.batch = (batch as usize).max(1);
@@ -89,62 +117,62 @@ pub extern "C" fn jit_init(table_base: u32, threshold: u32, batch: u32) {
 
 /// Compiled code's way into the interpreter (jit.rs: `Hart::jit_op`).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_op(index: u32, pc: u64) -> u32 {
-    hart().jit_op(index, pc)
+pub extern "C" fn jit_op(h: *mut Hart, index: u32, pc: u64) -> u32 {
+    hart(h).jit_op(index, pc)
 }
 
 /// Where x0..x31 live in linear memory (32 × 64 bits).
 #[unsafe(no_mangle)]
-pub extern "C" fn registers() -> *mut u64 {
-    hart().x.as_mut_ptr()
+pub extern "C" fn registers(h: *mut Hart) -> *mut u64 {
+    hart(h).x.as_mut_ptr()
 }
 
 /// Where f0..f31 live in linear memory (32 × 64 bits; singles NaN-boxed).
 #[unsafe(no_mangle)]
-pub extern "C" fn fp_registers() -> *mut u64 {
-    hart().f.as_mut_ptr()
+pub extern "C" fn fp_registers(h: *mut Hart) -> *mut u64 {
+    hart(h).f.as_mut_ptr()
 }
 
 /// A device wrote (or may have written) RAM at physical `pa..pa + len`.
 #[unsafe(no_mangle)]
 pub extern "C" fn code_written(pa: u64, len: u32) {
-    let h = hart();
-    let offset = pa.wrapping_sub(h.ram_base);
-    if offset < h.ram_size {
-        h.code_written(offset, (len as u64).min(h.ram_size - offset));
+    let ram = ram();
+    let offset = pa.wrapping_sub(ram.base);
+    if offset < ram.size {
+        ram.code.written(offset, (len as u64).min(ram.size - offset));
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn reset(pc: u64) {
-    hart().reset(pc);
+pub extern "C" fn reset(h: *mut Hart, pc: u64) {
+    hart(h).reset(pc);
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn run(max_steps: u32) -> u32 {
-    hart().run(max_steps)
+pub extern "C" fn run(h: *mut Hart, max_steps: u32) -> u32 {
+    hart(h).run(max_steps)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn step() {
-    hart().step();
+pub extern "C" fn step(h: *mut Hart) {
+    hart(h).step();
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn stop() {
-    hart().stop_reason = hart::STOPPED;
+pub extern "C" fn stop(h: *mut Hart) {
+    hart(h).stop_reason = hart::STOPPED;
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn set_interrupt_pending(bit: u32, pending: u32) {
-    let h = hart();
+pub extern "C" fn set_interrupt_pending(h: *mut Hart, bit: u32, pending: u32) {
+    let h = hart(h);
     h.mip = if pending != 0 { h.mip | bit as u64 } else { h.mip & !(bit as u64) };
 }
 
 /// Instructions retired since reset (not what software set the counters to).
 #[unsafe(no_mangle)]
-pub extern "C" fn instret() -> f64 {
-    hart().retired as f64
+pub extern "C" fn instret(h: *mut Hart) -> f64 {
+    hart(h).retired as f64
 }
 
 // State visible to JavaScript as CPU properties, by index (the order of
@@ -173,8 +201,8 @@ const WAITING: u32 = 20;
 const BREAK_ON_EBREAK_FIELD: u32 = 21;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get(field: u32) -> u64 {
-    let h = hart();
+pub extern "C" fn get(h: *mut Hart, field: u32) -> u64 {
+    let h = hart(h);
     match field {
         PC => h.pc,
         PRIV => h.priv_ as u64,
@@ -205,8 +233,8 @@ pub extern "C" fn get(field: u32) -> u64 {
 /// Set a field directly (no WARL masking, like poking the register file from
 /// a debugger), keeping derived state (translation mode, TLB) consistent.
 #[unsafe(no_mangle)]
-pub extern "C" fn set(field: u32, value: u64) {
-    let h = hart();
+pub extern "C" fn set(h: *mut Hart, field: u32, value: u64) {
+    let h = hart(h);
     match field {
         PC => h.pc = value,
         PRIV => h.priv_ = value as u32,

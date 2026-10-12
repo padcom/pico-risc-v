@@ -3,11 +3,12 @@
  * Interactive runner: boots a flat binary image (Linux `Image` or a bare-metal
  * program) and connects the emulated terminal to this process's stdin/stdout.
  *
- *   node dist/cli.js [--memory <MiB>] [--kernel <file>] [--disk <file> [--snapshot]]
+ *   node dist/cli.js [--memory <MiB>] [--harts <n>] [--kernel <file>] [--disk <file> [--snapshot]]
  *                    [--net [--forward <host port>:<guest port>]...] [--bootargs <string>]
  *                    [--virtual-clock] <image>
  *
- * The machine has one RV64GC CPU.
+ * The machine has RV64GC CPUs: one, or --harts of them (up to 8; each takes
+ * about 115 MB for its caches).
  *
  * With --kernel, <image> is firmware (OpenSBI's fw_dynamic.bin), and <file>
  * the next boot stage: a bootloader (U-Boot) or a Linux kernel. It is loaded
@@ -41,7 +42,7 @@ const KERNEL_OFFSET = 0x200000
 
 function usage(): never {
   console.error(
-    'usage: risc-emulator [--memory <MiB>] [--kernel <file>] [--disk <file> [--snapshot]] [--net [--forward <host port>:<guest port>]...] [--bootargs <string>] [--virtual-clock] <image>',
+    'usage: risc-emulator [--memory <MiB>] [--harts <n>] [--kernel <file>] [--disk <file> [--snapshot]] [--net [--forward <host port>:<guest port>]...] [--bootargs <string>] [--virtual-clock] <image>',
   )
   process.exit(2)
 }
@@ -52,6 +53,7 @@ const { values, positionals } = (() => {
       allowPositionals: true,
       options: {
         memory: { type: 'string', default: '64' },
+        harts: { type: 'string', default: '1' },
         kernel: { type: 'string' },
         disk: { type: 'string' },
         snapshot: { type: 'boolean', default: false },
@@ -70,6 +72,8 @@ if (values.help || positionals.length !== 1) usage()
 
 const ramSize = Number(values.memory) * 1024 * 1024
 if (!Number.isInteger(ramSize) || ramSize <= 0) usage()
+const harts = Number(values.harts)
+if (!Number.isInteger(harts) || harts < 1 || harts > 8) usage()
 
 let pending: number[] = []
 const flush = () => {
@@ -98,6 +102,7 @@ for (const { host, guest } of forwards) {
 
 const machine = new Machine({
   ramSize,
+  harts,
   disk,
   network,
   bootargs: values.bootargs,

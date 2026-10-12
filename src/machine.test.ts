@@ -144,6 +144,26 @@ describe('CLINT', () => {
     c.write32(Clint.MSIP, 0)
     expect(mip() & MIP_MSIP).toBe(0)
   })
+
+  it('has an msip and an mtimecmp per hart', () => {
+    let now = 0
+    const mip = [0, 0, 0, 0]
+    const c = new Clint(
+      () => now,
+      (bit, on, hart) => (mip[hart] = on ? mip[hart]! | bit : mip[hart]! & ~bit),
+      4,
+    )
+    c.reset()
+    c.write32(Clint.MSIP + 4 * 2, 1)
+    expect(mip.map(m => m & MIP_MSIP)).toEqual([0, 0, MIP_MSIP, 0])
+    expect(c.read32(Clint.MSIP + 4 * 2)).toBe(1)
+    c.write32(Clint.MTIMECMP + 8 * 3 + 4, 0)
+    c.write32(Clint.MTIMECMP + 8 * 3, 50)
+    expect(c.timecmp(3)).toBe(50)
+    now = 50
+    c.update()
+    expect(mip.map(m => m & MIP_MTIP)).toEqual([0, 0, 0, MIP_MTIP])
+  })
 })
 
 describe('Machine.run with the virtual clock', () => {
@@ -302,6 +322,17 @@ describe('Device tree', () => {
 })
 
 describe('C programs compiled with GNU toolchain', () => {
+  it.each([
+    ['interpreter', false],
+    ['JIT', { threshold: 1, batch: 1 }],
+  ] as const)('smp.c: 4 harts update shared counters atomically (AMOADD, LR/SC, a spinlock) (%s)', (_, jit) => {
+    let screen = ''
+    const machine = new Machine({ clock: 'virtual', harts: 4, jit, output: byte => (screen += String.fromCharCode(byte)) })
+    machine.boot(readFileSync(new URL('../examples/build/smp.bin', import.meta.url)))
+    expect(machine.run(100_000_000)).toBe('poweroff')
+    expect(screen).toBe('harts 4\namoadd 80000\nlr/sc 80000\nlocked 80000\n')
+  })
+
   it('hello.c prints its greeting, returns 0 from main and powers off', () => {
     const { machine, result, screen } = boot('hello')
     expect(screen()).toBe('Hello, world! from RISC-V emulator\n')

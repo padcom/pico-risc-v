@@ -3,6 +3,7 @@
 
 use crate::csr::*;
 use crate::hart::{Hart, Result, Trap};
+use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering::SeqCst};
 
 // Implemented by src/cpu.ts. Every call takes the hart as its first argument:
 // JavaScript ignores it, but it tells the compiler the call may read and write
@@ -38,7 +39,7 @@ unsafe fn read_time(_: *mut Hart) -> f64 {
 impl Hart {
     /// RAM offset of an access of `width` bytes at physical `pa`, if it's all in RAM.
     #[inline(always)]
-    fn ram_offset(&self, pa: u64, width: u32) -> Option<usize> {
+    pub(crate) fn ram_offset(&self, pa: u64, width: u32) -> Option<usize> {
         let offset = pa.wrapping_sub(self.ram_base);
         (offset < self.ram_size && offset + width as u64 <= self.ram_size).then_some(offset as usize)
     }
@@ -78,6 +79,55 @@ impl Hart {
                 true
             },
             None => self.device_write(pa, width, value),
+        }
+    }
+
+    /// An AMO (`op`: its funct5) of `width` (4 or 8) bytes at an aligned
+    /// RAM offset, atomic with respect to other harts; returns the old
+    /// value, or None for an unknown `op`.
+    pub(crate) fn ram_amo(&mut self, offset: usize, width: u32, op: u32, src: u64) -> Option<u64> {
+        // SAFETY: an aligned access inside RAM (8-byte aligned itself).
+        let p = unsafe { self.ram.add(offset) };
+        Some(if width == 8 {
+            let (u, i) = unsafe { (AtomicU64::from_ptr(p.cast()), AtomicI64::from_ptr(p.cast())) };
+            match op {
+                0b00001 => u.swap(src, SeqCst),
+                0b00000 => u.fetch_add(src, SeqCst),
+                0b00100 => u.fetch_xor(src, SeqCst),
+                0b01100 => u.fetch_and(src, SeqCst),
+                0b01000 => u.fetch_or(src, SeqCst),
+                0b10000 => i.fetch_min(src as i64, SeqCst) as u64,
+                0b10100 => i.fetch_max(src as i64, SeqCst) as u64,
+                0b11000 => u.fetch_min(src, SeqCst),
+                0b11100 => u.fetch_max(src, SeqCst),
+                _ => return None,
+            }
+        } else {
+            let (u, i, src) = unsafe { (AtomicU32::from_ptr(p.cast()), AtomicI32::from_ptr(p.cast()), src as u32) };
+            (match op {
+                0b00001 => u.swap(src, SeqCst),
+                0b00000 => u.fetch_add(src, SeqCst),
+                0b00100 => u.fetch_xor(src, SeqCst),
+                0b01100 => u.fetch_and(src, SeqCst),
+                0b01000 => u.fetch_or(src, SeqCst),
+                0b10000 => i.fetch_min(src as i32, SeqCst) as u32,
+                0b10100 => i.fetch_max(src as i32, SeqCst) as u32,
+                0b11000 => u.fetch_min(src, SeqCst),
+                0b11100 => u.fetch_max(src, SeqCst),
+                _ => return None,
+            }) as u64
+        })
+    }
+
+    /// Write `new` at an aligned RAM offset if it holds `old` (the low
+    /// `width` bytes of each), atomically; returns whether it did.
+    pub(crate) fn ram_compare_exchange(&mut self, offset: usize, width: u32, old: u64, new: u64) -> bool {
+        // SAFETY: as in ram_amo.
+        let p = unsafe { self.ram.add(offset) };
+        if width == 8 {
+            unsafe { AtomicU64::from_ptr(p.cast()) }.compare_exchange(old, new, SeqCst, SeqCst).is_ok()
+        } else {
+            unsafe { AtomicU32::from_ptr(p.cast()) }.compare_exchange(old as u32, new as u32, SeqCst, SeqCst).is_ok()
         }
     }
 

@@ -8,6 +8,7 @@
  *               initrd, systemd; Sv39 paging, the virtio disk as a read-only
  *               snapshot, no network card) booting to the login prompt, from
  *               images/debian/pristine.raw (as built, not the disk you use)
+ *   debian-4    the same on 4 harts (as npm start), counting all their instructions
  *
  * All run on the virtual clock (Debian with a fixed date and random seed), so
  * every run executes exactly the same instructions; the numbers are comparable
@@ -40,7 +41,7 @@ function bareMetal(program = 'bench'): Result {
   return { instructions: machine.cpu.instret, seconds }
 }
 
-function debian(): Result | undefined {
+function debian(harts = 1): Result | undefined {
   const files = ['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].map(f => new URL(`images/debian/${f}`, root))
   if (!files.every(existsSync)) return undefined
   const [firmware, uboot, disk] = files as [URL, URL, URL]
@@ -55,6 +56,7 @@ function debian(): Result | undefined {
     startTime: Date.UTC(2026, 0, 1),
     rngSeed: new Uint8Array(64).fill(42),
     ramSize: 1024 * 1024 * 1024,
+    harts,
     disk: new SnapshotStorage(file),
     output: b => (screen += String.fromCharCode(b)),
   })
@@ -67,13 +69,15 @@ function debian(): Result | undefined {
   }
   const seconds = (performance.now() - start) / 1000
   file.close()
-  return { instructions: machine.cpu.instret, seconds }
+  const instructions = machine.cpus.reduce((sum, cpu) => sum + cpu.instret, 0)
+  return { instructions, seconds }
 }
 
 const benchmarks: Record<string, () => Result | undefined> = {
   'bare-metal': () => bareMetal(),
   compressed: () => bareMetal('bench-c'),
   debian: () => debian(),
+  'debian-4': () => debian(4),
 }
 const selected = process.argv.slice(2)
 for (const name of selected.length ? selected : Object.keys(benchmarks)) {

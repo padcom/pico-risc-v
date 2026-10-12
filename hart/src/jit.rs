@@ -28,9 +28,9 @@
 //! - Loads and stores to RAM go straight to memory, through the JIT's own
 //!   TLB (`jit_tlb`), which maps virtual pages to where they are in linear
 //!   memory, per access type and translation context. A miss, a device, an
-//!   access across a page, or a store to a page holding cached code (the
-//!   TLB has none of those for stores) goes through `jit_op` (the
-//!   interpreter), which then refills the TLB.
+//!   access across a page, or a store to a page holding code that some hart
+//!   decoded (compiled code checks: that can change any time) goes through
+//!   `jit_op` (the interpreter), which then refills the TLB.
 //! - Whatever isn't compiled (floating point, atomics, CSRs, system
 //!   instructions, MULH*) also runs through `jit_op`. Only `jit_op` can
 //!   reach devices, so it also ends the function when one raised an
@@ -43,6 +43,7 @@
 use crate::blocks::{FETCH_CACHE, Kind, Op, SINK};
 use crate::hart::Hart;
 use crate::mmu::TLB_SIZE;
+use core::sync::atomic::Ordering::Relaxed;
 
 // Implemented by src/cpu.ts: compile `code` (a module), instantiate it and
 // put its exported functions "0", "1", ... into the table at `slots`.
@@ -220,7 +221,8 @@ impl Hart {
     pub(crate) fn jit_account(&mut self, page: usize, steps: u32) {
         let jit = &mut self.jit;
         jit.steps[page] += steps;
-        let backoff = if jit.compiled_version[page] == self.page_versions[page] { jit.compiles[page].min(MAX_BACKOFF) } else { 0 };
+        let version = self.code.versions[page].load(Relaxed);
+        let backoff = if jit.compiled_version[page] == version { jit.compiles[page].min(MAX_BACKOFF) } else { 0 };
         if jit.steps[page] >= jit.threshold << backoff && !jit.queued[page] && jit.queue.len() < MAX_QUEUE {
             jit.queued[page] = true;
             jit.queue.push(page as u32);
@@ -300,11 +302,12 @@ impl Hart {
             bodies.extend_from_slice(&function);
             self.jit.slots.push(self.jit.table_base + page);
             let page = page as usize;
-            if self.jit.compiled_version[page] != self.page_versions[page] {
+            let version = self.code.versions[page].load(Relaxed);
+            if self.jit.compiled_version[page] != version {
                 self.jit.compiles[page] = 0; // new code
             }
             self.jit.compiles[page] = self.jit.compiles[page].saturating_add(1);
-            self.jit.compiled_version[page] = self.page_versions[page];
+            self.jit.compiled_version[page] = version;
             for (case, &index) in self.jit.cases.iter().enumerate() {
                 self.jit.pending.push((index, case as u32));
             }
@@ -343,8 +346,8 @@ impl Hart {
     fn collect_cases(&mut self, page: usize) -> bool {
         self.jit.cases.clear();
         self.jit.case_at.fill(0);
-        let version = self.page_versions[page];
-        let lines = self.code_lines[page];
+        let version = self.code.versions[page].load(Relaxed);
+        let lines = self.code.lines[page].load(Relaxed);
         let page_pa = self.ram_base + ((page as u64) << 12);
         for line in 0..64 {
             if lines & 1 << line == 0 {
@@ -410,10 +413,12 @@ impl Hart {
         let op = self.ops[index as usize];
         let next = pc.wrapping_add(op.len as u64);
         let addr = self.x[op.rs1 as usize].wrapping_add(op.imm as i64 as u64);
-        self.code_changed = false;
-        match self.execute_op(&op, pc, next) {
+        let epoch = self.code.epoch.load(Relaxed);
+        let result = self.execute_op(&op, pc, next);
+        let code_changed = self.code.epoch.load(Relaxed) != epoch;
+        match result {
             Ok(target) => {
-                let leave = self.stop_reason != 0 || self.mip & self.mie != 0 || self.waiting || self.code_changed;
+                let leave = self.stop_reason != 0 || self.mip & self.mie != 0 || self.waiting || code_changed;
                 if target != next || leave {
                     self.retired += 1;
                     self.pc = target;
@@ -429,7 +434,7 @@ impl Hart {
             Err(trap) => {
                 self.pc = pc;
                 self.block_trap(&op, pc, trap);
-                if self.stop_reason != 0 || self.mip & self.mie != 0 || self.code_changed { 1 } else { 2 }
+                if self.stop_reason != 0 || self.mip & self.mie != 0 || code_changed { 1 } else { 2 }
             }
         }
     }
@@ -451,8 +456,8 @@ impl Hart {
             (self.tlb_ppn[i] as u64) << 12
         };
         let offset = page.wrapping_sub(self.ram_base);
-        if offset >= self.ram_size || (store && self.code_lines[(offset >> 12) as usize] != 0) {
-            return; // (stores to code must go through code_written)
+        if offset >= self.ram_size {
+            return;
         }
         let tag = vaddr & !0xfff | self.jit_ctx;
         let host = (self.ram as u32).wrapping_add(offset as u32).wrapping_sub(vaddr as u32 & !0xfff);
@@ -537,10 +542,10 @@ fn build_module(out: &mut Vec<u8>, bodies: &[u8], count: usize) {
     out.clear();
     out.extend_from_slice(b"\0asm\x01\0\0\0");
     // Types: 0 = (i32 hart, i64 page, i32 entry, i32 budget, i32 steps,
-    // i64 base) -> i32 steps, the pages (Compiled); 1 = (i32 index, i64 pc)
-    // -> i32, jit_op.
+    // i64 base) -> i32 steps, the pages (Compiled); 1 = (i32 hart, i32
+    // index, i64 pc) -> i32, jit_op.
     let s = begin_section(out, 1);
-    out.extend_from_slice(&[2, 0x60, 6, I32, I64, I32, I32, I32, I64, 1, I32, 0x60, 2, I32, I64, 1, I32]);
+    out.extend_from_slice(&[2, 0x60, 6, I32, I64, I32, I32, I32, I64, 1, I32, 0x60, 3, I32, I32, I64, 1, I32]);
     end_section(out, s);
     let s = begin_section(out, 2);
     out.extend_from_slice(&[3, 3, b'e', b'n', b'v', 6, b'm', b'e', b'm', b'o', b'r', b'y', 2, 0, 0]);
@@ -660,6 +665,7 @@ const CTX: u32 = 40;
 const PC_OUT: u32 = 41;
 const ENTRY: u32 = 42; // i32
 const FETCH: u32 = 43; // i32
+const HOST: u32 = 44; // i32
 
 /// The registers an instruction reads and writes (bit r: x[r]).
 fn registers(op: &Op) -> (u32, u32) {
@@ -703,6 +709,8 @@ struct Emitter<'a> {
     fetch_tags: u32,
     fetch_pages: u32,
     fetch_ctx: u32,
+    ram: u32,
+    code_lines: u32,
 }
 
 impl<'a> Emitter<'a> {
@@ -726,6 +734,8 @@ impl<'a> Emitter<'a> {
             fetch_tags: hart.fetch_tags.as_ptr() as u32,
             fetch_pages: hart.fetch_pages.as_ptr() as u32,
             fetch_ctx: &hart.fetch_ctx as *const u64 as u32,
+            ram: hart.ram as u32,
+            code_lines: hart.code.lines.as_ptr() as u32,
         }
     }
 
@@ -875,6 +885,7 @@ impl<'a> Emitter<'a> {
         self.flush();
         self.dirty = 0;
         self.set_retired(k);
+        self.local(LOCAL_GET, HART);
         self.i32c(index as i32);
         self.pc_at(offset);
         self.o(CALL);
@@ -957,8 +968,23 @@ impl<'a> Emitter<'a> {
         self.reg(op.rs2 as u32);
         self.local(LOCAL_SET, B);
         self.tlb_lookup(op, width, true);
-        self.open(IF, EMPTY);
+        // A hit, on a page without code (Code::lines of its RAM page is 0).
+        self.open(IF, I32);
         self.host_address();
+        self.local(LOCAL_TEE, HOST);
+        self.i32c(self.ram as i32);
+        self.o(I32_SUB);
+        self.i32c(12);
+        self.o(I32_SHR_U);
+        self.i32c(3);
+        self.o(I32_SHL);
+        self.mem(I64_LOAD, self.code_lines);
+        self.o(I64_EQZ);
+        self.o(ELSE);
+        self.i32c(0);
+        self.close();
+        self.open(IF, EMPTY);
+        self.local(LOCAL_GET, HOST);
         self.local(LOCAL_GET, B);
         self.mem(opcode, 0);
         self.o(ELSE);
@@ -1091,8 +1117,8 @@ impl<'a> Emitter<'a> {
         let cases = &hart.jit.cases;
         let case_at = &hart.jit.case_at[..];
         let n = cases.len() as u32;
-        // Locals: 36 i64 (x1..x31, ADDR, A, B, CTX, PC_OUT), 2 i32 (ENTRY, FETCH).
-        self.out.extend_from_slice(&[2, 36, I64, 2, I32]);
+        // Locals: 36 i64 (x1..x31, ADDR, A, B, CTX, PC_OUT), 3 i32 (ENTRY, FETCH, HOST).
+        self.out.extend_from_slice(&[2, 36, I64, 3, I32]);
         self.i32c(0);
         self.mem(I64_LOAD, self.ctx);
         self.local(LOCAL_SET, CTX);

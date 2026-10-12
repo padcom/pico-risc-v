@@ -4,11 +4,12 @@ import { MIP_MSIP, MIP_MTIP } from './csr.js'
 const TWO_32 = 0x1_0000_0000
 
 /**
- * Core-Local Interruptor (SiFive CLINT layout) for a single hart:
+ * Core-Local Interruptor (SiFive CLINT layout) for `harts` harts:
  *
- *   0x0000  msip         bit 0 raises the machine software interrupt
- *   0x4000  mtimecmp     64-bit; timer interrupt pending while mtime >= mtimecmp
- *   0xbff8  mtime        64-bit free-running counter (1 tick = 1 µs)
+ *   0x0000 + 4·hart  msip      bit 0 raises the hart's machine software interrupt
+ *   0x4000 + 8·hart  mtimecmp  64-bit; the hart's timer interrupt is pending
+ *                              while mtime >= its mtimecmp
+ *   0xbff8           mtime     64-bit free-running counter (1 tick = 1 µs)
  *
  * mtime comes from an external clock so the machine can run on wall-clock or
  * virtual (instruction-count) time.
@@ -20,45 +21,56 @@ export class Clint extends WordDevice {
   static readonly MTIMECMP = 0x4000
   static readonly MTIME = 0xbff8
 
-  private cmpLo = 0xffff_ffff
-  private cmpHi = 0xffff_ffff
-  private msip = 0
+  private readonly cmpLo: number[]
+  private readonly cmpHi: number[]
+  private readonly msip: number[]
   private timeOffset = 0
 
   constructor(
     private readonly clock: () => number,
-    private readonly raise: (bit: number, pending: boolean) => void,
+    private readonly raise: (bit: number, pending: boolean, hart: number) => void,
+    readonly harts = 1,
   ) {
     super()
+    this.cmpLo = Array<number>(harts).fill(0xffff_ffff)
+    this.cmpHi = Array<number>(harts).fill(0xffff_ffff)
+    this.msip = Array<number>(harts).fill(0)
   }
 
-  /** mtimecmp as a number (rounded above 2^53, which is fine: mtime never gets there). */
+  /** Hart 0's mtimecmp. */
   get mtimecmp(): number {
-    return this.cmpHi * TWO_32 + this.cmpLo
+    return this.timecmp(0)
+  }
+
+  /** A hart's mtimecmp as a number (rounded above 2^53, which is fine: mtime never gets there). */
+  timecmp(hart: number): number {
+    return this.cmpHi[hart]! * TWO_32 + this.cmpLo[hart]!
   }
 
   get mtime(): number {
     return this.clock() + this.timeOffset
   }
 
-  /** Re-evaluate the timer interrupt line; call whenever time has moved on. */
+  /** Re-evaluate the timer interrupt lines; call whenever time has moved on. */
   update(): void {
-    this.raise(MIP_MTIP, this.mtime >= this.mtimecmp)
+    const mtime = this.mtime
+    for (let hart = 0; hart < this.harts; hart++) this.raise(MIP_MTIP, mtime >= this.timecmp(hart), hart)
   }
 
   reset(): void {
-    this.cmpLo = this.cmpHi = 0xffff_ffff
-    this.msip = 0
+    this.cmpLo.fill(0xffff_ffff)
+    this.cmpHi.fill(0xffff_ffff)
+    this.msip.fill(0)
     this.timeOffset = -this.clock()
-    this.raise(MIP_MSIP, false)
+    for (let hart = 0; hart < this.harts; hart++) this.raise(MIP_MSIP, false, hart)
     this.update()
   }
 
   protected readWord(offset: number): number {
+    if (offset < 4 * this.harts) return this.msip[offset >>> 2]!
+    const cmp = offset - Clint.MTIMECMP
+    if (cmp >= 0 && cmp < 8 * this.harts) return (cmp & 4 ? this.cmpHi : this.cmpLo)[cmp >>> 3]!
     switch (offset) {
-      case Clint.MSIP: return this.msip
-      case Clint.MTIMECMP: return this.cmpLo
-      case Clint.MTIMECMP + 4: return this.cmpHi
       case Clint.MTIME: return this.mtime % TWO_32
       case Clint.MTIME + 4: return Math.floor(this.mtime / TWO_32)
       default: return 0
@@ -69,16 +81,22 @@ export class Clint extends WordDevice {
     const lo = (v: number) => v % TWO_32
     const hi = (v: number) => Math.floor(v / TWO_32)
     value >>>= 0
-    switch (offset) {
-      case Clint.MSIP:
-        this.msip = value & 1
-        this.raise(MIP_MSIP, this.msip !== 0)
-        return
-      case Clint.MTIMECMP: this.cmpLo = value; break
-      case Clint.MTIMECMP + 4: this.cmpHi = value; break
-      case Clint.MTIME: this.timeOffset += hi(this.mtime) * TWO_32 + value - this.mtime; break
-      case Clint.MTIME + 4: this.timeOffset += value * TWO_32 + lo(this.mtime) - this.mtime; break
-      default: return
+    if (offset < 4 * this.harts) {
+      const hart = offset >>> 2
+      this.msip[hart] = value & 1
+      this.raise(MIP_MSIP, (value & 1) !== 0, hart)
+      return
+    }
+    const cmp = offset - Clint.MTIMECMP
+    if (cmp >= 0 && cmp < 8 * this.harts) {
+      const half = cmp & 4 ? this.cmpHi : this.cmpLo
+      half[cmp >>> 3] = value
+    } else if (offset === Clint.MTIME) {
+      this.timeOffset += hi(this.mtime) * TWO_32 + value - this.mtime
+    } else if (offset === Clint.MTIME + 4) {
+      this.timeOffset += value * TWO_32 + lo(this.mtime) - this.mtime
+    } else {
+      return
     }
     this.update()
   }

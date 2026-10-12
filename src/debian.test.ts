@@ -26,7 +26,7 @@ const BUDGET = 5_000_000_000
  */
 describe.skipIf(![FIRMWARE, UBOOT, DISK].every(existsSync))('Debian 13 riscv64 cloud image', () => {
   it(
-    'boots with nothing failed; CPU, randomness, floating point, network (DHCP, ping, DNS, HTTP), date; keeps writes across a reboot',
+    'boots on 4 harts with nothing failed; CPUs, randomness, floating point, network (DHCP, ping, DNS, HTTP), date; keeps writes across a reboot',
     { timeout: 1_800_000 },
     async () => {
       // "The outside world": an HTTP server and a DNS server on this host.
@@ -45,6 +45,7 @@ describe.skipIf(![FIRMWARE, UBOOT, DISK].every(existsSync))('Debian 13 riscv64 c
           [readFileSync(FIRMWARE), { load: [{ offset: 0x200000, data: readFileSync(UBOOT) }], next: { offset: 0x200000 } }],
           {
             ramSize: 1024 * 1024 * 1024,
+            harts: 4, // as npm start
             disk: new SnapshotStorage(file),
             network,
             // Virtual time at about the emulator's real speed: at the default 10
@@ -80,11 +81,12 @@ describe.skipIf(![FIRMWARE, UBOOT, DISK].every(existsSync))('Debian 13 riscv64 c
         await s.waitForAsync('trixie-riscv64', BUDGET, 600_000)
         await s.waitForAsync('2\r\n', BUDGET, 600_000)
 
-        // The CPU as Linux sees it: RV64GC with Sv39 paging.
-        s.type('grep -E "^(isa|mmu)" /proc/cpuinfo; echo "done-$((1+2))"\n')
+        // The CPUs as Linux sees them: 4, all online, RV64GC with Sv39 paging.
+        s.type('echo "cpus-$(nproc)-$(grep -c ^processor /proc/cpuinfo)"; grep -E "^(isa|mmu)" /proc/cpuinfo | sort | uniq -c; echo "done-$((1+2))"\n')
         await s.waitForAsync('done-3', BUDGET, 600_000)
-        expect(s.screen).toMatch(/isa\s*:\s*rv64imafdc/)
-        expect(s.screen).toMatch(/mmu\s*:\s*sv39/)
+        expect(s.screen).toContain('cpus-4-4')
+        expect(s.screen).toMatch(/4 isa\s*:\s*rv64imafdc/)
+        expect(s.screen).toMatch(/4 mmu\s*:\s*sv39/)
 
         // Randomness is ready right away (seeded through the device tree):
         // /dev/random blocks until it is.
