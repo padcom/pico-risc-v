@@ -309,9 +309,10 @@ impl Hart {
         self.code.written(offset, len);
     }
 
-    /// Run instructions from the decoded block at pc, if there's one to run
-    /// (and it fits in `budget` steps); returns the steps taken, 0 if none
-    /// (then the caller steps one instruction the regular way).
+    /// Run the decoded block at pc, if there's one to run (whole: it may take
+    /// more than `budget` steps), and, if it's compiled, the ones after it
+    /// while there's budget left; returns the steps taken, 0 if none (then the
+    /// caller steps one instruction the regular way).
     #[inline(always)]
     pub(crate) fn run_block(&mut self, budget: u32) -> u32 {
         if self.blocks.is_empty() || self.waiting || self.pending() != 0 {
@@ -363,9 +364,6 @@ impl Hart {
             }
         }
         let block = self.blocks[index];
-        if block.count > budget {
-            return 0;
-        }
         if block.jit == COMPILED {
             self.chain_to(pc, pa, page, block.entry);
             return self.run_compiled(page, block.entry, pc, budget);

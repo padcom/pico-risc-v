@@ -138,6 +138,7 @@ run executes exactly the same instructions:
 | ...branches inside blocks, cheaper loads and stores | 505 MIPS | 505 MIPS | 300 MIPS, 60 s |
 | ...and Debian's boot trimmed (linux/README.md) | 505 MIPS | 505 MIPS | 284 MIPS, 43 s |
 | ...and the JIT | 1305 MIPS | 1340 MIPS | 436 MIPS, 28 s |
+| ...compiled code running on into the next block, whole blocks | 3815 MIPS | 4150 MIPS | 754 MIPS, 16 s |
 
 Measured on an Apple Silicon Mac with Node 26. Earlier, when the core also
 did RV32 (see the git history), the TypeScript CPU it replaced ran the

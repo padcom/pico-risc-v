@@ -315,8 +315,12 @@ impl Hart {
         self.update_translation();
     }
 
-    /// Execute up to `max_steps` steps (instructions or trap entries): whole
-    /// decoded blocks where possible (blocks.rs), else one at a time.
+    /// Execute about `max_steps` steps (instructions or trap entries): whole
+    /// decoded blocks where possible (blocks.rs), else one at a time. The last
+    /// block may go over (by less than a block): a block started runs to its
+    /// end, so the next run() starts where one starts too. (Stopping inside
+    /// blocks would make blocks start there, which splits the compiled code
+    /// of the ones around them into many short pieces.)
     pub fn run(&mut self, max_steps: u32) -> u32 {
         self.stop_reason = 0;
         let mut remaining = max_steps;
@@ -329,7 +333,7 @@ impl Hart {
                     self.step();
                     remaining -= 1;
                 }
-                steps => remaining -= steps,
+                steps => remaining = remaining.saturating_sub(steps),
             }
             if self.stop_reason != 0 {
                 return self.stop_reason;

@@ -9,8 +9,10 @@
 //! goes on there with a tail call: so compiled code mostly runs from one
 //! page to the next without returning to `run()`. It does return when the
 //! target isn't (known to be) compiled, at system instructions (which can
-//! change privilege, translation or interrupts), and before the next block
-//! would go over the step budget.
+//! change privilege, translation or interrupts), and once the step budget is
+//! used up (at the start of a block: a block started runs to its end). Code
+//! that runs off the end of a block into the next goes straight on (cases are
+//! in address order), without going through the switch.
 //!
 //! A page that has run `threshold` instructions the regular way (since it
 //! was last compiled, or its code changed) is queued; once `batch` pages are
@@ -616,7 +618,7 @@ const I32_CONST: u8 = 0x41;
 const I64_CONST: u8 = 0x42;
 const I32_EQZ: u8 = 0x45;
 const I32_EQ: u8 = 0x46;
-const I32_GT_U: u8 = 0x4b;
+const I32_GE_U: u8 = 0x4f;
 const I64_EQZ: u8 = 0x50;
 const I64_EQ: u8 = 0x51;
 const I64_NE: u8 = 0x52;
@@ -1146,12 +1148,11 @@ impl<'a> Emitter<'a> {
             let block = hart.blocks[index as usize];
             let length = hart.jit.lengths[case] as u32;
             let start_offset = (block.pa & 0xfff) as i64;
-            // Not enough budget left for the whole case: leave.
+            // The budget used up: leave. (Once started, a case runs to its end:
+            // see Hart::run.)
             self.local(LOCAL_GET, STEPS);
-            self.i32c(length as i32);
-            self.o(I32_ADD);
             self.local(LOCAL_GET, BUDGET);
-            self.o(I32_GT_U);
+            self.o(I32_GE_U);
             self.open(IF, EMPTY);
             self.pc_at(start_offset);
             self.exit_to_stack(false);
@@ -1171,7 +1172,15 @@ impl<'a> Emitter<'a> {
                 }
             }
             if !ended {
-                self.goto(length, offset, case_at);
+                let next = (0..4096).contains(&offset).then(|| case_at[offset as usize / 2]);
+                if next == Some(case as u16 + 2) {
+                    // Into the next case, whose code comes right after this one's
+                    // (cases are in address order): no need for the switch.
+                    self.add_steps(length);
+                    self.flush();
+                } else {
+                    self.goto(length, offset, case_at);
+                }
             }
         }
         self.close();
