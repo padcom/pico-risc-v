@@ -672,6 +672,17 @@ const ENTRY: u32 = 42; // i32
 const FETCH: u32 = 43; // i32
 const HOST: u32 = 44; // i32
 
+/// Whether the instructions `ops`, from `start` (in the page), jump to `start`.
+fn loops_to(ops: &[Op], start: i64) -> bool {
+    use Kind::*;
+    let mut offset = start;
+    ops.iter().any(|op| {
+        let to_start = matches!(op.kind, Beq | Bne | Blt | Bge | Bltu | Bgeu | Jal) && offset.wrapping_add(op.imm as i64) == start;
+        offset += op.len as i64;
+        to_start
+    })
+}
+
 /// The registers an instruction reads and writes (bit r: x[r]).
 fn registers(op: &Op) -> (u32, u32) {
     use Kind::*;
@@ -690,6 +701,17 @@ fn registers(op: &Op) -> (u32, u32) {
     (reads, if rd { bit(op.rd) } else { 0 })
 }
 
+/// A case that jumps back to its own start (a loop of one block), compiled as
+/// a WebAssembly loop: `regs`, the registers it uses, are in their locals all
+/// along, and its jumps back go straight to `label`, not through the switch.
+#[derive(Clone, Copy)]
+struct SelfLoop {
+    label: u32,
+    /// Its start, from the page's.
+    offset: i64,
+    regs: u32,
+}
+
 /// Compiles a page into a function body.
 struct Emitter<'a> {
     out: &'a mut Vec<u8>,
@@ -700,6 +722,7 @@ struct Emitter<'a> {
     /// Open blocks, and the depths of the ones jumps go to.
     depth: u32,
     top: u32,
+    self_loop: Option<SelfLoop>,
     chain: u32,
     exit: u32,
     helper_exit: u32,
@@ -726,6 +749,7 @@ impl<'a> Emitter<'a> {
             dirty: 0,
             depth: 0,
             top: 0,
+            self_loop: None,
             chain: 0,
             exit: 0,
             helper_exit: 0,
@@ -803,6 +827,14 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Load x[r] into its local.
+    fn preload(&mut self, r: u32) {
+        self.i32c(0);
+        self.mem(I64_LOAD, self.x + 8 * r);
+        self.local(LOCAL_SET, X + r);
+        self.loaded |= 1 << r;
+    }
+
     /// Pop into x[rd] (x0: `SINK`, discarded).
     fn set_reg(&mut self, rd: u32) {
         if rd == 0 || rd == SINK as u32 {
@@ -868,6 +900,26 @@ impl<'a> Emitter<'a> {
     /// start: the block there if it's compiled, else leave the function.
     fn goto(&mut self, steps: u32, offset: i64, case_at: &[u16]) {
         self.add_steps(steps);
+        if let Some(self_loop) = self.self_loop.filter(|l| l.offset == offset) {
+            // Back to the start of this case's loop, if there's budget left,
+            // with its registers in their locals.
+            let (loaded, dirty) = (self.loaded, self.dirty);
+            self.local(LOCAL_GET, STEPS);
+            self.local(LOCAL_GET, BUDGET);
+            self.o(I32_GE_U);
+            self.open(IF, EMPTY);
+            self.pc_at(offset);
+            self.exit_to_stack(false);
+            self.close();
+            for r in 1..32 {
+                if self_loop.regs & !self.loaded & 1 << r != 0 {
+                    self.preload(r); // (left in memory by jit_op)
+                }
+            }
+            self.br(self_loop.label);
+            (self.loaded, self.dirty) = (loaded, dirty);
+            return;
+        }
         let case = if (0..4096).contains(&offset) && offset & 1 == 0 { case_at[offset as usize / 2] } else { 0 };
         if case != 0 {
             self.i32c(case as i32 - 1);
@@ -1158,6 +1210,25 @@ impl<'a> Emitter<'a> {
             self.exit_to_stack(false);
             self.close();
 
+            // A loop of this block alone: its registers loaded first, and
+            // (written back at every way out of it, as if all it writes were
+            // changed: they're all in their locals) kept there.
+            let ops = &hart.ops[block.start as usize..(block.start + length) as usize];
+            if loops_to(ops, start_offset) {
+                let (reads, writes) = ops.iter().fold((0, 0), |(r, w), op| {
+                    let (reads, writes) = registers(op);
+                    (r | reads, w | writes)
+                });
+                for r in 1..32 {
+                    if (reads | writes) & 1 << r != 0 {
+                        self.preload(r);
+                    }
+                }
+                self.dirty = writes;
+                let label = self.open(LOOP, EMPTY);
+                self.self_loop = Some(SelfLoop { label, offset: start_offset, regs: reads | writes });
+            }
+
             let mut offset = start_offset;
             let mut ended = false;
             for k in 0..length {
@@ -1181,6 +1252,9 @@ impl<'a> Emitter<'a> {
                 } else {
                     self.goto(length, offset, case_at);
                 }
+            }
+            if self.self_loop.take().is_some() {
+                self.close();
             }
         }
         self.close();
