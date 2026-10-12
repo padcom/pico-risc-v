@@ -31,7 +31,9 @@ compiled code. Registers are WebAssembly locals within a block; loads and
 stores to RAM go straight to memory through a TLB of the JIT's own;
 everything else (floating point, atomics, CSRs, a TLB miss) goes back to the
 interpreter for that instruction. The functions are put into the core's
-function table, so `run()` calls them directly. A page compiled again for
+function table, so `run()` calls them directly, and when code jumps to
+another page that's compiled, its function goes on in that page's (a tail
+call), without returning to `run()`. A page compiled again for
 the same code needs twice as much running each time; pages whose code
 changes start over. The JIT is on by default (`jit: false` in the CPU's or
 the machine's options turns it off); the riscv-tests run both ways.

@@ -3,10 +3,14 @@
 //!
 //! The unit is a page of RAM: its hot blocks (blocks.rs) become one
 //! function, a loop around a switch over them, so jumps between them (loops,
-//! branches, calls within the page) stay inside the function. A function returns to `run()` when
-//! the code leaves the page, through an indirect jump (JALR), at system
-//! instructions (which can change privilege, translation or interrupts), and
-//! before the next block would go over the step budget.
+//! branches, calls within the page) stay inside the function. When the code
+//! leaves the page, or jumps through a register (JALR), the function looks
+//! the target up in the chain cache (`Hart::chain`) and, if it's compiled,
+//! goes on there with a tail call: so compiled code mostly runs from one
+//! page to the next without returning to `run()`. It does return when the
+//! target isn't (known to be) compiled, at system instructions (which can
+//! change privilege, translation or interrupts), and before the next block
+//! would go over the step budget.
 //!
 //! A page that has run `threshold` instructions the regular way (since it
 //! was last compiled, or its code changed) is queued; once `batch` pages are
@@ -36,7 +40,7 @@
 //! Functions take the page's virtual address as a parameter: the same
 //! physical code may run at several (shared libraries).
 
-use crate::blocks::{Kind, Op, SINK};
+use crate::blocks::{FETCH_CACHE, Kind, Op, SINK};
 use crate::hart::Hart;
 use crate::mmu::TLB_SIZE;
 
@@ -55,9 +59,10 @@ unsafe fn jit_install(_: *const u8, _: u32, _: *const u32, _: u32) -> u32 {
 }
 
 /// A compiled page: (hart, the page's virtual address, the block to start
-/// with, the step budget) → steps taken. (The hart pointer tells the
-/// compiler the call reads and writes it; the code knows where it is.)
-type Compiled = extern "C" fn(*mut Hart, u64, u32, u32) -> u32;
+/// with, the step budget, the steps taken so far, the instruction count
+/// when they started) → steps taken. (The hart pointer tells the compiler
+/// the call reads and writes it; the code knows where it is.)
+type Compiled = extern "C" fn(*mut Hart, u64, u32, u32, u32, u64) -> u32;
 
 /// Block::jit for a block in its page's function, as case `Block::entry`
 /// (otherwise, how often it has run).
@@ -70,14 +75,34 @@ pub const COMPILED: u32 = u32::MAX;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct JitTlbEntry {
-    load: u64,
-    store: u64,
+    pub(crate) load: u64,
+    pub(crate) store: u64,
     host: u32,
     _pad: [u32; 3],
 }
 
 /// Matches nothing (tags have bits 12+ from the page, 0..11 from the context).
 pub const JIT_TLB_EMPTY: JitTlbEntry = JitTlbEntry { load: u64::MAX, store: u64::MAX, host: 0, _pad: [0; 3] };
+
+/// A chain cache entry: a virtual pc with the epoch it was found in
+/// (`Hart::chain_ctx`), and the compiled code there: the table slot of its
+/// page's function and the case, valid while the pc's page is the physical
+/// page `ppn`: compiled code checks that in the fetch cache.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ChainEntry {
+    pc: u64,
+    ctx: u64,
+    slot: u32,
+    case: u32,
+    ppn: u32,
+    _pad: u32,
+}
+
+/// Entries, direct mapped by pc.
+pub const CHAIN_SIZE: usize = 1 << 16;
+/// Of no epoch (they start at 1).
+pub const CHAIN_EMPTY: ChainEntry = ChainEntry { pc: 0, ctx: 0, slot: 0, case: 0, ppn: 0, _pad: 0 };
 
 /// `jit_ctx` for loads and stores without translation (identity-mapped);
 /// with translation it's `data_ok_tag` (0x40..0x7c).
@@ -216,7 +241,34 @@ impl Hart {
         // SAFETY: a WebAssembly function pointer is its table index, and the
         // slot holds this page's function, of this type (jit_compile).
         let f: Compiled = unsafe { core::mem::transmute::<usize, Compiled>(slot) };
-        f(self, pc & !0xfff, entry, budget)
+        f(self, pc & !0xfff, entry, budget, 0, self.retired)
+    }
+
+    /// The block at virtual `pc` (physical `pa`) is case `case` of RAM
+    /// `page`'s function: put it in the chain cache.
+    #[inline(always)]
+    pub(crate) fn chain_to(&mut self, pc: u64, pa: u64, page: usize, case: u32) {
+        if !self.translate_fetch {
+            // Compiled code checks the translation in the fetch cache, which
+            // run_block doesn't use without translation: put it there. (Only
+            // a TLB flush, which starts a new epoch, turns translation on
+            // at the same privilege.)
+            let i = (pc >> 12) as usize & (FETCH_CACHE - 1);
+            self.fetch_tags[i] = pc & !0xfff | self.fetch_ctx;
+            self.fetch_pages[i] = (pa >> 12) as u32;
+        }
+        let e = &mut self.chain[(pc >> 1) as usize & (CHAIN_SIZE - 1)];
+        e.pc = pc;
+        e.ctx = self.chain_ctx;
+        e.slot = self.jit.table_base + page as u32;
+        e.case = case;
+        e.ppn = (pa >> 12) as u32;
+    }
+
+    /// Compiled code changed (or its blocks' ops went): forget the chain
+    /// cache's entries, by starting a new epoch.
+    pub(crate) fn forget_chains(&mut self) {
+        self.chain_ctx = self.chain_ctx.wrapping_add(1);
     }
 
     /// Compile the queued pages.
@@ -275,6 +327,7 @@ impl Hart {
                     block.jit = COMPILED;
                     block.entry = case;
                 }
+                self.forget_chains(); // (pages compiled again have new cases)
             } else {
                 self.jit.enabled = false;
             }
@@ -349,8 +402,10 @@ impl Hart {
     /// An instruction that compiled code hands to the interpreter:
     /// `ops[index]` at `pc`, with `retired` already counting the
     /// instructions before it. Returns 0 to go on with the next instruction;
-    /// 1 to leave the function (pc and retired updated): a jump, a trap, a
-    /// device stopped the CPU or raised an interrupt, or code was written.
+    /// otherwise pc and retired are updated, and it's 2 to go on at pc
+    /// (after a jump or a trap), 1 to return to `run()`: a device stopped
+    /// the CPU or raised an interrupt, the hart waits for one, or code was
+    /// written.
     pub(crate) fn jit_op(&mut self, index: u32, pc: u64) -> u32 {
         let op = self.ops[index as usize];
         let next = pc.wrapping_add(op.len as u64);
@@ -358,10 +413,11 @@ impl Hart {
         self.code_changed = false;
         match self.execute_op(&op, pc, next) {
             Ok(target) => {
-                if target != next || self.stop_reason != 0 || self.mip & self.mie != 0 || self.code_changed {
+                let leave = self.stop_reason != 0 || self.mip & self.mie != 0 || self.waiting || self.code_changed;
+                if target != next || leave {
                     self.retired += 1;
                     self.pc = target;
-                    return 1;
+                    return if leave { 1 } else { 2 };
                 }
                 if op.kind.is_load() {
                     self.jit_fill(addr, false);
@@ -373,7 +429,7 @@ impl Hart {
             Err(trap) => {
                 self.pc = pc;
                 self.block_trap(&op, pc, trap);
-                1
+                if self.stop_reason != 0 || self.mip & self.mie != 0 || self.code_changed { 1 } else { 2 }
             }
         }
     }
@@ -475,18 +531,20 @@ fn end_section(out: &mut Vec<u8>, start: usize) {
 }
 
 /// A module of `count` compiled pages (`bodies`: the code section's
-/// entries), importing the memory and `jit_op` as "env" "memory" / "op",
-/// exporting the functions as "0", "1", ...
+/// entries), importing the memory, the function table and `jit_op` as
+/// "env" "memory" / "table" / "op", exporting the functions as "0", "1", ...
 fn build_module(out: &mut Vec<u8>, bodies: &[u8], count: usize) {
     out.clear();
     out.extend_from_slice(b"\0asm\x01\0\0\0");
-    // Types: 0 = (i32 hart, i64 page, i32 entry, i32 budget) -> i32 steps,
-    // the pages; 1 = (i32 index, i64 pc) -> i32, jit_op.
+    // Types: 0 = (i32 hart, i64 page, i32 entry, i32 budget, i32 steps,
+    // i64 base) -> i32 steps, the pages (Compiled); 1 = (i32 index, i64 pc)
+    // -> i32, jit_op.
     let s = begin_section(out, 1);
-    out.extend_from_slice(&[2, 0x60, 4, I32, I64, I32, I32, 1, I32, 0x60, 2, I32, I64, 1, I32]);
+    out.extend_from_slice(&[2, 0x60, 6, I32, I64, I32, I32, I32, I64, 1, I32, 0x60, 2, I32, I64, 1, I32]);
     end_section(out, s);
     let s = begin_section(out, 2);
-    out.extend_from_slice(&[2, 3, b'e', b'n', b'v', 6, b'm', b'e', b'm', b'o', b'r', b'y', 2, 0, 0]);
+    out.extend_from_slice(&[3, 3, b'e', b'n', b'v', 6, b'm', b'e', b'm', b'o', b'r', b'y', 2, 0, 0]);
+    out.extend_from_slice(&[3, b'e', b'n', b'v', 5, b't', b'a', b'b', b'l', b'e', 1, FUNCREF, 0, 0]);
     out.extend_from_slice(&[3, b'e', b'n', b'v', 2, b'o', b'p', 0, 1]);
     end_section(out, s);
     let s = begin_section(out, 3);
@@ -525,6 +583,7 @@ fn decimal(mut i: usize, buf: &mut [u8; 8]) -> &[u8] {
 const I32: u8 = 0x7f;
 const I64: u8 = 0x7e;
 const EMPTY: u8 = 0x40;
+const FUNCREF: u8 = 0x70;
 
 // Opcodes
 const UNREACHABLE: u8 = 0x00;
@@ -537,6 +596,7 @@ const BR: u8 = 0x0c;
 const BR_TABLE: u8 = 0x0e;
 const RETURN: u8 = 0x0f;
 const CALL: u8 = 0x10;
+const RETURN_CALL_INDIRECT: u8 = 0x13;
 const DROP: u8 = 0x1a;
 const LOCAL_GET: u8 = 0x20;
 const LOCAL_SET: u8 = 0x21;
@@ -584,19 +644,22 @@ const I32_WRAP_I64: u8 = 0xa7;
 const I64_EXTEND_I32_S: u8 = 0xac;
 const I64_EXTEND_I32_U: u8 = 0xad;
 
-// A compiled page's locals: the parameters, then x1..x31 (x[r] in local
-// 3 + r), then scratch.
+// A compiled page's locals: the parameters (Compiled), then x1..x31 (x[r]
+// in local X + r), then scratch.
+const HART: u32 = 0;
 const PAGE: u32 = 1;
 const NEXT: u32 = 2; // the case to run next (the parameter `entry`, to start with)
 const BUDGET: u32 = 3;
-const ADDR: u32 = 35;
-const A: u32 = 36;
-const B: u32 = 37;
-const CTX: u32 = 38;
-const BASE: u32 = 39;
-const PC_OUT: u32 = 40;
-const ENTRY: u32 = 41; // i32
-const STEPS: u32 = 42; // i32
+const STEPS: u32 = 4; // i32
+const BASE: u32 = 5; // retired = BASE + STEPS
+const X: u32 = 5;
+const ADDR: u32 = 37;
+const A: u32 = 38;
+const B: u32 = 39;
+const CTX: u32 = 40;
+const PC_OUT: u32 = 41;
+const ENTRY: u32 = 42; // i32
+const FETCH: u32 = 43; // i32
 
 /// The registers an instruction reads and writes (bit r: x[r]).
 fn registers(op: &Op) -> (u32, u32) {
@@ -626,6 +689,7 @@ struct Emitter<'a> {
     /// Open blocks, and the depths of the ones jumps go to.
     depth: u32,
     top: u32,
+    chain: u32,
     exit: u32,
     helper_exit: u32,
     // Where things are in linear memory.
@@ -634,6 +698,11 @@ struct Emitter<'a> {
     retired: u32,
     ctx: u32,
     tlb: u32,
+    chains: u32,
+    chain_ctx: u32,
+    fetch_tags: u32,
+    fetch_pages: u32,
+    fetch_ctx: u32,
 }
 
 impl<'a> Emitter<'a> {
@@ -644,6 +713,7 @@ impl<'a> Emitter<'a> {
             dirty: 0,
             depth: 0,
             top: 0,
+            chain: 0,
             exit: 0,
             helper_exit: 0,
             x: hart.x.as_ptr() as u32,
@@ -651,6 +721,11 @@ impl<'a> Emitter<'a> {
             retired: &hart.retired as *const u64 as u32,
             ctx: &hart.jit_ctx as *const u64 as u32,
             tlb: hart.jit_tlb.as_ptr() as u32,
+            chains: hart.chain.as_ptr() as u32,
+            chain_ctx: &hart.chain_ctx as *const u64 as u32,
+            fetch_tags: hart.fetch_tags.as_ptr() as u32,
+            fetch_pages: hart.fetch_pages.as_ptr() as u32,
+            fetch_ctx: &hart.fetch_ctx as *const u64 as u32,
         }
     }
 
@@ -704,11 +779,11 @@ impl<'a> Emitter<'a> {
         if r == 0 {
             self.i64c(0);
         } else if self.loaded & 1 << r != 0 {
-            self.local(LOCAL_GET, 3 + r);
+            self.local(LOCAL_GET, X + r);
         } else {
             self.i32c(0);
             self.mem(I64_LOAD, self.x + 8 * r);
-            self.local(LOCAL_TEE, 3 + r);
+            self.local(LOCAL_TEE, X + r);
             self.loaded |= 1 << r;
         }
     }
@@ -718,7 +793,7 @@ impl<'a> Emitter<'a> {
         if rd == 0 || rd == SINK as u32 {
             self.o(DROP);
         } else {
-            self.local(LOCAL_SET, 3 + rd);
+            self.local(LOCAL_SET, X + rd);
             self.loaded |= 1 << rd;
             self.dirty |= 1 << rd;
         }
@@ -730,7 +805,7 @@ impl<'a> Emitter<'a> {
         for r in 1..32 {
             if self.dirty & 1 << r != 0 {
                 self.i32c(0);
-                self.local(LOCAL_GET, 3 + r);
+                self.local(LOCAL_GET, X + r);
                 self.mem(I64_STORE, self.x + 8 * r);
             }
         }
@@ -766,11 +841,12 @@ impl<'a> Emitter<'a> {
         self.mem(I64_STORE, self.retired);
     }
 
-    /// Leave the function for the pc on the stack.
-    fn exit_to_stack(&mut self) {
+    /// Leave the function for the pc on the stack: go on in the compiled
+    /// code there (if `chain`, and the chain cache knows it), or return.
+    fn exit_to_stack(&mut self, chain: bool) {
         self.local(LOCAL_SET, PC_OUT);
         self.flush();
-        self.br(self.exit);
+        self.br(if chain { self.chain } else { self.exit });
     }
 
     /// After `steps` more instructions, go on at `offset` from the page's
@@ -785,12 +861,13 @@ impl<'a> Emitter<'a> {
             self.br(self.top);
         } else {
             self.pc_at(offset);
-            self.exit_to_stack();
+            self.exit_to_stack(true);
         }
     }
 
     /// Run instruction `k` of a block (`ops[index]`, at `offset` in the
-    /// page) through jit_op; leave the function if that says so.
+    /// page) through jit_op; leave the function if that says so (ENTRY:
+    /// what it said).
     fn interpret(&mut self, k: u32, index: u32, offset: i64, op: &Op) {
         // jit_op works on the registers in memory, and the function may end
         // there: write them all back.
@@ -802,6 +879,7 @@ impl<'a> Emitter<'a> {
         self.pc_at(offset);
         self.o(CALL);
         self.o(0); // the import
+        self.local(LOCAL_TEE, ENTRY);
         self.open(IF, EMPTY);
         self.add_steps(k + 1);
         self.br(self.helper_exit);
@@ -1013,17 +1091,15 @@ impl<'a> Emitter<'a> {
         let cases = &hart.jit.cases;
         let case_at = &hart.jit.case_at[..];
         let n = cases.len() as u32;
-        // Locals: 37 i64 (x1..x31, ADDR, A, B, CTX, BASE, PC_OUT), 2 i32 (ENTRY, STEPS).
-        self.out.extend_from_slice(&[2, 37, I64, 2, I32]);
-        self.i32c(0);
-        self.mem(I64_LOAD, self.retired);
-        self.local(LOCAL_SET, BASE);
+        // Locals: 36 i64 (x1..x31, ADDR, A, B, CTX, PC_OUT), 2 i32 (ENTRY, FETCH).
+        self.out.extend_from_slice(&[2, 36, I64, 2, I32]);
         self.i32c(0);
         self.mem(I64_LOAD, self.ctx);
         self.local(LOCAL_SET, CTX);
 
-        self.helper_exit = self.open(BLOCK, EMPTY);
         self.exit = self.open(BLOCK, EMPTY);
+        self.chain = self.open(BLOCK, EMPTY);
+        self.helper_exit = self.open(BLOCK, EMPTY);
         self.top = self.open(LOOP, EMPTY);
         // The switch: case i's code follows the end of the i-th innermost block.
         for _ in 0..=n {
@@ -1049,7 +1125,7 @@ impl<'a> Emitter<'a> {
             self.o(I32_GT_U);
             self.open(IF, EMPTY);
             self.pc_at(start_offset);
-            self.exit_to_stack();
+            self.exit_to_stack(false);
             self.close();
 
             let mut offset = start_offset;
@@ -1072,17 +1148,99 @@ impl<'a> Emitter<'a> {
         self.close();
         self.o(UNREACHABLE);
         self.close(); // the loop
+        self.close(); // helper_exit: jit_op set pc and retired; ENTRY is 1 or 2
+        self.local(LOCAL_GET, ENTRY);
+        self.i32c(1);
+        self.o(I32_EQ);
+        self.open(IF, EMPTY);
+        self.local(LOCAL_GET, STEPS);
+        self.o(RETURN);
+        self.close();
+        // Go on at pc (counting from the retired count jit_op left: a trap
+        // isn't an instruction retired, but it's a step).
+        self.i32c(0);
+        self.mem(I64_LOAD, self.pc);
+        self.local(LOCAL_SET, PC_OUT);
+        self.i32c(0);
+        self.mem(I64_LOAD, self.retired);
+        self.local(LOCAL_GET, STEPS);
+        self.o(I64_EXTEND_I32_U);
+        self.o(I64_SUB);
+        self.local(LOCAL_SET, BASE);
+        self.close(); // chain: (registers written back)
+        self.chain_lookup();
         self.close(); // exit: (registers written back)
         self.i32c(0);
         self.local(LOCAL_GET, PC_OUT);
         self.mem(I64_STORE, self.pc);
         self.set_retired(0);
         self.local(LOCAL_GET, STEPS);
-        self.o(RETURN);
-        self.close(); // helper_exit: jit_op set pc and retired
-        self.local(LOCAL_GET, STEPS);
         self.o(END);
         true
+    }
+
+    /// If the chain cache has compiled code for PC_OUT (of this epoch, and
+    /// the fetch cache maps its page to the same physical page): go on
+    /// there (a tail call, with the steps so far).
+    fn chain_lookup(&mut self) {
+        // The entry: (pc >> 1) % CHAIN_SIZE, 32 bytes each.
+        self.local(LOCAL_GET, PC_OUT);
+        self.o(I32_WRAP_I64);
+        self.i32c(4);
+        self.o(I32_SHL);
+        self.i32c(((CHAIN_SIZE - 1) << 5) as i32);
+        self.o(I32_AND);
+        self.local(LOCAL_TEE, ENTRY);
+        self.mem(I64_LOAD, self.chains);
+        self.local(LOCAL_GET, PC_OUT);
+        self.o(I64_EQ);
+        self.local(LOCAL_GET, ENTRY);
+        self.mem(I64_LOAD, self.chains + 8);
+        self.i32c(0);
+        self.mem(I64_LOAD, self.chain_ctx);
+        self.o(I64_EQ);
+        self.o(I32_AND);
+        // The fetch cache entry: (pc >> 12) % FETCH_CACHE.
+        self.local(LOCAL_GET, PC_OUT);
+        self.o(I32_WRAP_I64);
+        self.i32c(9);
+        self.o(I32_SHR_U);
+        self.i32c(((FETCH_CACHE - 1) << 3) as i32);
+        self.o(I32_AND);
+        self.local(LOCAL_TEE, FETCH);
+        self.mem(I64_LOAD, self.fetch_tags);
+        self.local(LOCAL_GET, PC_OUT);
+        self.i64c(!0xfff);
+        self.o(I64_AND);
+        self.i32c(0);
+        self.mem(I64_LOAD, self.fetch_ctx);
+        self.o(I64_OR);
+        self.o(I64_EQ);
+        self.o(I32_AND);
+        self.local(LOCAL_GET, FETCH);
+        self.i32c(1);
+        self.o(I32_SHR_U);
+        self.mem(I32_LOAD, self.fetch_pages);
+        self.local(LOCAL_GET, ENTRY);
+        self.mem(I32_LOAD, self.chains + 24);
+        self.o(I32_EQ);
+        self.o(I32_AND);
+        self.open(IF, EMPTY);
+        self.local(LOCAL_GET, HART);
+        self.local(LOCAL_GET, PC_OUT);
+        self.i64c(!0xfff);
+        self.o(I64_AND);
+        self.local(LOCAL_GET, ENTRY);
+        self.mem(I32_LOAD, self.chains + 20);
+        self.local(LOCAL_GET, BUDGET);
+        self.local(LOCAL_GET, STEPS);
+        self.local(LOCAL_GET, BASE);
+        self.local(LOCAL_GET, ENTRY);
+        self.mem(I32_LOAD, self.chains + 16);
+        self.o(RETURN_CALL_INDIRECT);
+        self.o(0); // the type: Compiled
+        self.o(0); // the table
+        self.close();
     }
 
     /// Instruction `k` of a block; returns whether it ends the block.
@@ -1171,18 +1329,19 @@ impl<'a> Emitter<'a> {
                 self.set_reg(op.rd as u32);
                 self.add_steps(k + 1);
                 self.local(LOCAL_GET, A);
-                self.exit_to_stack();
+                self.exit_to_stack(true);
                 return true;
             }
             // Through the interpreter, continuing.
             Mulh | Mulhsu | Mulhu | Execute => self.interpret(k, index, offset, op),
-            // Through the interpreter, then out: these can change privilege,
-            // translation, interrupts.
+            // Through the interpreter, then on through the chain cache:
+            // these can change privilege, translation (which the function
+            // assumes doesn't change), interrupts (jit_op leaves for those).
             ExecuteEnd | Illegal => {
                 self.interpret(k, index, offset, op);
                 self.add_steps(k + 1);
                 self.pc_at(next);
-                self.exit_to_stack();
+                self.exit_to_stack(true);
                 return true;
             }
         }

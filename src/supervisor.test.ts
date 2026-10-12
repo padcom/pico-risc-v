@@ -306,6 +306,38 @@ describe('Sv39 address translation', () => {
     expect([cpu.x[10], cpu.x[15]]).toEqual([111, 222])
   })
 
+  // SFENCE.VMA with an address: the translations that may map it go, even
+  // those of other 4 KiB pages of the same superpage (the TLB keeps a
+  // superpage's translations a 4 KiB page each).
+  it.each([
+    ['a 4 KiB page', L0 + 3 * 8, pte(3, V | R | W), 0x3000],
+    ['a megapage', L1, pte(0, V | R | W), 0x5000],
+    ['a gigapage', ROOT + 8, pte(0, V | R | W), 0x205000],
+  ])('SFENCE.VMA with an address forgets its translation: %s', (_, entry, leaf, other) => {
+    // VA + 0x3000 → physical 0x3000, through the leaf entry at `entry`.
+    const r = run(
+      [
+        a.lw(10, 11, 0), // the translation is in the TLB now
+        a.sw(0, 14, 0), // the leaf entry goes
+        a.sfenceVma(13), // for VA + other
+        a.lw(10, 11, 0), // faults
+        a.ebreak(),
+      ],
+      {
+        mode: Priv.Supervisor,
+        setup: (cpu, ram) => {
+          ram.write32(entry, leaf)
+          ram.write32(0x3000, 111)
+          cpu.x[11] = VA + 0x3000
+          cpu.x[13] = VA + other
+          cpu.x[14] = entry
+        },
+      },
+    )
+    expectMachineTrap(r, TrapCause.LoadPageFault, VA + 0x3000)
+    expect(r.cpu.x[10]).toBe(111)
+  })
+
   it('with satp in bare mode S-mode addresses are physical', () => {
     const { cpu } = run([a.lw(10, 11, 0), a.ebreak()], {
       mode: Priv.Supervisor,

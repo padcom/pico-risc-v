@@ -8,8 +8,10 @@
 //! privilege and SUM/MXR, so the TLB only needs flushing when the page tables
 //! or satp change (SFENCE.VMA / satp writes).
 
+use crate::blocks::FETCH_CACHE;
 use crate::csr::*;
 use crate::hart::{Hart, Result, Trap};
+use crate::jit::JIT_TLB_EMPTY;
 use crate::memory::Access;
 
 // Page table entry bits
@@ -83,6 +85,55 @@ impl Hart {
         }
         self.fetch_ctx = self.fetch_ctx & 3 | epoch << 2;
         self.flush_jit_tlb();
+        self.gigapages = [0; 8];
+        self.megapages = [0; 64];
+    }
+
+    /// Forget the translations of the page at `vaddr` (SFENCE.VMA with an
+    /// address): its entries in the TLB, the JIT's TLB and the fetch cache.
+    /// If a superpage that may map it was cached, everything from that
+    /// superpage's range (a 4 KiB entry each) goes.
+    pub(crate) fn flush_tlb_page(&mut self, vaddr: u64) {
+        let vpn = vaddr >> 12;
+        let giga = (vaddr >> 30) as usize & 511;
+        let mega = (vaddr >> 21) as usize & 4095;
+        if self.gigapages[giga / 64] & 1 << (giga % 64) != 0 {
+            self.flush_tlb_range(vaddr, 30, 0..TLB_SIZE);
+        } else if self.megapages[mega / 64] & 1 << (mega % 64) != 0 {
+            // A megapage's 4 KiB pages are 512 consecutive TLB entries.
+            let first = vpn as usize & (TLB_SIZE - 1) & !511;
+            self.flush_tlb_range(vaddr, 21, first..first + 512);
+        } else {
+            let i = vpn as usize & (TLB_SIZE - 1);
+            if self.tlb_vpn[i] == vpn {
+                self.tlb_vpn[i] = TLB_EMPTY;
+            }
+            self.jit_tlb[i] = JIT_TLB_EMPTY;
+            let j = vpn as usize & (FETCH_CACHE - 1);
+            if self.fetch_tags[j] >> 12 == vpn {
+                self.fetch_tags[j] = TLB_EMPTY;
+            }
+        }
+    }
+
+    /// Forget the translations of the `1 << shift` bytes around `vaddr`,
+    /// which are in the TLB entries `entries`.
+    fn flush_tlb_range(&mut self, vaddr: u64, shift: u32, entries: core::ops::Range<usize>) {
+        let range = vaddr >> shift;
+        for i in entries {
+            if self.tlb_vpn[i] != TLB_EMPTY && self.tlb_vpn[i] >> (shift - 12) == range {
+                self.tlb_vpn[i] = TLB_EMPTY;
+            }
+            let e = &mut self.jit_tlb[i];
+            if e.load >> shift == range || e.store >> shift == range {
+                *e = JIT_TLB_EMPTY;
+            }
+        }
+        for tag in &mut self.fetch_tags {
+            if *tag >> shift == range {
+                *tag = TLB_EMPTY;
+            }
+        }
     }
 
     /// Translate `vaddr` for an access by `priv_` (the effective privilege: for
@@ -144,6 +195,13 @@ impl Hart {
         }
         let mut ppn = pte >> 10;
         if level > 0 {
+            // (For SFENCE.VMA with an address: flush_tlb_page.)
+            let (bits, i) = if level == 2 {
+                (&mut self.gigapages[..], (vaddr >> 30) as usize & 511)
+            } else {
+                (&mut self.megapages[..], (vaddr >> 21) as usize & 4095)
+            };
+            bits[i / 64] |= 1 << (i % 64);
             // A superpage: its physical page number must be aligned to its size.
             let low_bits = (1 << (level * 9)) - 1;
             if ppn & low_bits != 0 {

@@ -6,7 +6,7 @@
 //! medeleg/mideleg (sepc/scause/stval, stvec).
 
 use crate::blocks::{Block, FETCH_CACHE, Op};
-use crate::jit::{JIT_TLB_EMPTY, Jit, JitTlbEntry};
+use crate::jit::{ChainEntry, JIT_TLB_EMPTY, Jit, JitTlbEntry};
 use crate::csr::*;
 use crate::memory::Access;
 use crate::mmu::{DATA_LOAD_OK, DATA_STORE_OK, Paging, TLB_EMPTY, TLB_SIZE};
@@ -160,11 +160,21 @@ pub struct Hart {
     /// The context loads and stores are checked in: the data privilege, SUM
     /// and MXR, in tlb_ok's format.
     pub(crate) data_ok_tag: u8,
+    /// Superpages that may be cached (in the TLBs and the fetch cache, a 4
+    /// KiB page each) since the last full flush: bit (vaddr >> 30) % 512 for
+    /// gigapages, (vaddr >> 21) % 4096 for megapages.
+    pub(crate) gigapages: [u64; 8],
+    pub(crate) megapages: [u64; 64],
     /// The JIT's TLB (jit.rs), and the context its entries are tagged with
     /// (the data translation context, and the TLB's epoch).
     pub(crate) jit_tlb: [JitTlbEntry; TLB_SIZE],
     pub(crate) jit_ctx: u64,
     pub(crate) jit: Jit,
+    /// Where compiled code finds the compiled code for a pc it jumps to
+    /// (jit.rs), and the context its entries are tagged with (an epoch
+    /// bumped when compiled code changes).
+    pub(crate) chain: Vec<ChainEntry>,
+    pub(crate) chain_ctx: u64,
 
     // The decoded-instruction cache (blocks.rs), set up with the RAM.
     pub(crate) blocks: Vec<Block>,
@@ -232,8 +242,12 @@ impl Hart {
             tlb_ok: [0; TLB_SIZE],
             data_ok_tag: 0,
             jit_tlb: [JIT_TLB_EMPTY; TLB_SIZE],
+            gigapages: [0; 8],
+            megapages: [0; 64],
             jit_ctx: 0,
             jit: Jit::new(),
+            chain: Vec::new(),
+            chain_ctx: 1,
             blocks: Vec::new(),
             ops: Vec::new(),
             ops_used: 0,
@@ -628,7 +642,11 @@ impl Hart {
             if self.priv_ == PRIV_U || (self.priv_ == PRIV_S && self.mstatus & MSTATUS_TVM != 0) {
                 return Err(illegal(inst));
             }
-            self.flush_tlb(); // no ASIDs, so flush everything regardless of rs1/rs2
+            // No ASIDs: rs2 doesn't matter.
+            match (inst >> 15) & 0x1f {
+                0 => self.flush_tlb(),
+                rs1 => self.flush_tlb_page(self.x[rs1 as usize]),
+            }
             return Ok(next_pc);
         }
 

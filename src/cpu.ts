@@ -136,12 +136,13 @@ export class CPU {
           return 0
         }, 1),
       read_time: () => readTime?.() ?? 0,
-      // Compiled blocks: a module of functions "0", "1", ... (`count` of
-      // them), for the function table at `slots` (the core's jit.rs).
+      // Compiled pages: a module of functions "0", "1", ... (`count` of
+      // them), for the function table at `slots` (the core's jit.rs). They
+      // call each other through the table.
       jit_install: (code: number, length: number, slots: number, count: number) => {
         const { memory, jit_op, __indirect_function_table: table } = this.core
         const module = new WebAssembly.Module(new Uint8Array(memory.buffer, code, length))
-        const { exports } = new WebAssembly.Instance(module, { env: { memory, op: jit_op } })
+        const { exports } = new WebAssembly.Instance(module, { env: { memory, table, op: jit_op } })
         const at = new Uint32Array(memory.buffer, slots, count)
         for (let i = 0; i < count; i++) table.set(at[i]!, exports[i] as () => void)
         return 1

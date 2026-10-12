@@ -244,6 +244,7 @@ impl Hart {
     pub(crate) fn flush_blocks(&mut self) {
         self.blocks.fill(EMPTY_BLOCK);
         self.ops_used = 0;
+        self.forget_chains(); // (compiled code refers to ops)
     }
 
     /// RAM at `offset..offset + len` (offsets into RAM) has been written: retire
@@ -260,6 +261,7 @@ impl Hart {
                 self.page_versions[page] = self.page_versions[page].wrapping_add(1);
                 self.code_lines[page] = 0;
                 self.code_changed = true;
+                self.forget_chains();
             }
         }
     }
@@ -316,6 +318,7 @@ impl Hart {
             return 0;
         }
         if block.jit == COMPILED {
+            self.chain_to(pc, pa, page, block.entry);
             return self.run_compiled(page, block.entry, pc, budget);
         }
         // (How often it ran: which block of a set to replace, see victim().)

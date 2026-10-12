@@ -65,6 +65,7 @@ pub extern "C" fn ram_alloc(base: u32, size: u32) -> *mut u8 {
     h.code_lines = vec![0; pages];
     h.page_versions = vec![0; pages];
     h.jit.allocate(pages);
+    h.chain = vec![jit::CHAIN_EMPTY; jit::CHAIN_SIZE];
     h.ram
 }
 
