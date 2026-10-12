@@ -158,7 +158,7 @@ export class Machine {
     this.fixedRngSeed = rngSeed
     this.rngSeed = this.newRngSeed()
 
-    this.terminal = new Terminal(output)
+    this.terminal = new Terminal(output, high => this.plic.setLevel(TERMINAL_IRQ, high))
     // RAM lives inside the CPU core (fast); devices reach it through the bus.
     this.cpu = new CPU(this.bus, {
       resetVector: MemoryMap.RAM,
@@ -245,6 +245,7 @@ export class Machine {
     this.powerOnTime = this.startTime ?? Date.now()
     this.cpu.reset(MemoryMap.RAM)
     this.clint.reset()
+    this.terminal.reset()
     this.plic.reset()
     this.disk?.reset()
     this.nic?.reset()
@@ -410,6 +411,8 @@ export class Machine {
               props: {
                 'clock-frequency': 0x1000000,
                 reg: reg(MemoryMap.TERMINAL, Terminal.SIZE),
+                'interrupt-parent': PLIC_PHANDLE,
+                interrupts: TERMINAL_IRQ,
                 compatible: 'ns16550a',
               },
             },
@@ -485,3 +488,4 @@ const hex = (n: number) => n.toString(16)
 const DISK_IRQ = 1
 const NET_IRQ = 2
 const RTC_IRQ = 3
+const TERMINAL_IRQ = 4

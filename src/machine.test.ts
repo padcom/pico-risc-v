@@ -48,6 +48,46 @@ describe('Terminal device', () => {
     expect(t.read8(Terminal.LSR) & Terminal.LSR_DR).toBe(0)
   })
 
+  it('raises its interrupt for received data while enabled, until it is read', () => {
+    const line: boolean[] = []
+    const t = new Terminal(() => {}, high => line.push(high))
+    t.type('a')
+    expect(line.at(-1)).toBe(false) // not enabled
+    expect(t.read8(Terminal.IIR)).toBe(Terminal.IIR_NO_INT)
+    t.write8(Terminal.IER, Terminal.IER_RDI)
+    expect(line.at(-1)).toBe(true)
+    expect(t.read8(Terminal.IIR)).toBe(Terminal.IIR_RDI)
+    expect(t.read8(Terminal.RBR)).toBe(0x61)
+    expect(line.at(-1)).toBe(false)
+    expect(t.read8(Terminal.IIR)).toBe(Terminal.IIR_NO_INT)
+  })
+
+  it('raises its transmitter interrupt when enabled and after each character, until IIR reports it', () => {
+    const line: boolean[] = []
+    const out: number[] = []
+    const t = new Terminal(b => out.push(b), high => line.push(high))
+    t.write8(Terminal.FCR, Terminal.FCR_ENABLE_FIFO)
+    t.write8(Terminal.IER, Terminal.IER_THRI)
+    expect(line.at(-1)).toBe(true)
+    expect(t.read8(Terminal.IIR)).toBe(Terminal.IIR_THRI | Terminal.IIR_FIFOS)
+    expect(line.at(-1)).toBe(false)
+    expect(t.read8(Terminal.IIR)).toBe(Terminal.IIR_NO_INT | Terminal.IIR_FIFOS)
+    t.write8(Terminal.THR, 0x41)
+    expect(line.at(-1)).toBe(true)
+    t.write8(Terminal.IER, 0) // as Linux does when it has nothing more to send
+    expect(line.at(-1)).toBe(false)
+    expect(out).toEqual([0x41])
+  })
+
+  it('has its interrupt off after a reset', () => {
+    const line: boolean[] = []
+    const t = new Terminal(() => {}, high => line.push(high))
+    t.write8(Terminal.IER, Terminal.IER_THRI)
+    t.reset()
+    expect(line.at(-1)).toBe(false)
+    expect(t.read8(Terminal.IER)).toBe(0)
+  })
+
   it('is reachable through the system bus at its mapped address', () => {
     let out = ''
     const m = new Machine({ output: b => (out += String.fromCharCode(b)) })
