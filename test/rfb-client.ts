@@ -42,6 +42,11 @@ export class RfbClient {
     socket.write(`RFB ${version}\n`)
     if (version === '003.003') {
       client.securityTypes = [(await client.read(4)).readUInt32BE()]
+      if (client.securityTypes[0] === 2) {
+        await client.read(16) // the challenge
+        socket.write(Buffer.alloc(16)) // the answer: whatever
+        client.securityResult = (await client.read(4)).readUInt32BE()
+      }
     } else {
       client.securityTypes = [...(await client.read((await client.read(1))[0]!))]
       socket.write(Buffer.from([security]))

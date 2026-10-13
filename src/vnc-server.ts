@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { appendFileSync } from 'node:fs'
 import { createServer, type Server, type Socket } from 'node:net'
 import type { Framebuffer } from './framebuffer.js'
 import { linuxKey } from './keysyms.js'
@@ -9,6 +10,16 @@ export interface Display {
   screen: Framebuffer
   keyboard: VirtioInput
   tablet: VirtioInput
+}
+
+/**
+ * With RISC_EMULATOR_VNC_LOG=<file>, what viewers and the server say to
+ * each other goes there (to find out why a viewer doesn't get along).
+ */
+const LOG = typeof process !== 'undefined' ? process.env.RISC_EMULATOR_VNC_LOG : undefined
+let connections = 0
+function log(connection: number, message: string): void {
+  if (LOG) appendFileSync(LOG, `${new Date().toISOString()} #${connection} ${message}\n`)
 }
 
 /** How often to look for changes on the screen to send (ms). */
@@ -33,8 +44,8 @@ const NATIVE: PixelFormat = { bytes: 4, bigEndian: false, max: [255, 255, 255], 
  * pixels, in the viewer's format, only what changed: it's meant for this
  * machine (it listens on localhost).
  *
- * No password: viewers that insist on one (Screen Sharing) are offered VNC
- * authentication too, and any password does.
+ * No password, or any: viewers can choose (3.7, 3.8), or are asked for one
+ * (3.3, which macOS's Screen Sharing speaks; it insists on a password).
  */
 export class VncServer {
   private readonly server: Server
@@ -88,6 +99,9 @@ class Client {
   private buttons = 0
   /** Keys held: the KEY_* each keysym pressed. */
   private readonly keys = new Map<number, number>()
+  /** (For the log.) */
+  private readonly id = ++connections
+  private updates = 0
 
   constructor(
     private readonly socket: Socket,
@@ -96,16 +110,24 @@ class Client {
   ) {
     this.sent = new Uint32Array(display.screen.width * display.screen.height)
     socket.setNoDelay(true)
+    log(this.id, `connected from ${socket.remoteAddress}:${socket.remotePort}`)
     socket.on('data', (data: Buffer) => {
       this.input = Buffer.concat([this.input, data])
       try {
         while (this.step());
-      } catch {
+      } catch (e) {
+        log(this.id, `closing: ${e instanceof Error ? e.message : e} (input: ${this.input.subarray(0, 32).toString('hex')})`)
         this.close()
       }
     })
-    socket.on('error', () => this.close())
-    socket.on('close', () => this.letGo())
+    socket.on('error', e => {
+      log(this.id, `error: ${e.message}`)
+      this.close()
+    })
+    socket.on('close', () => {
+      log(this.id, 'closed')
+      this.letGo()
+    })
     socket.write('RFB 003.008\n')
   }
 
@@ -132,13 +154,15 @@ class Client {
       case 'version': {
         const version = take(12)
         if (!version) return false
+        log(this.id, `version ${JSON.stringify(version.toString('latin1'))}`)
         const minor = Number(/^RFB 003\.(\d{3})\n$/.exec(version.toString('latin1'))?.[1])
         if (!minor) throw new Error('not RFB')
         this.minor = minor >= 8 ? 8 : minor >= 7 ? 7 : 3
         if (this.minor === 3) {
-          // 3.3: the server says which: none.
-          this.socket.write(u32(1))
-          this.state = 'init'
+          // 3.3: the server says which: VNC authentication (macOS's Screen
+          // Sharing speaks 3.3, and won't do without a password).
+          this.socket.write(Buffer.concat([u32(2), randomBytes(16)])) // the challenge
+          this.state = 'password'
         } else {
           this.socket.write(Buffer.from([2, 1, 2])) // None, VNC authentication
           this.state = 'security'
@@ -148,6 +172,7 @@ class Client {
       case 'security': {
         const type = take(1)?.[0]
         if (type === undefined) return false
+        log(this.id, `security type ${type}`)
         if (type === 2) {
           this.socket.write(randomBytes(16)) // the challenge
           this.state = 'password'
@@ -159,11 +184,13 @@ class Client {
       }
       case 'password':
         if (!take(16)) return false
+        log(this.id, 'password: taken')
         this.socket.write(u32(0)) // OK: any password
         this.state = 'init'
         return true
       case 'init': {
         if (!take(1)) return false // shared flag
+        log(this.id, 'ClientInit; sending ServerInit')
         const { width, height } = this.display.screen
         const name = Buffer.from(this.name)
         const init = Buffer.alloc(24)
@@ -190,6 +217,7 @@ class Client {
         // SetPixelFormat
         const m = take(20)
         if (!m) return false
+        log(this.id, `SetPixelFormat ${m.subarray(4, 20).toString('hex')}`)
         this.format = readFormat(m, 4)
         this.request = undefined
         return true
@@ -198,12 +226,16 @@ class Client {
         // SetEncodings (raw it is, whatever they are)
         const head = peek(4)
         if (!head) return false
-        return take(4 + 4 * head.readUInt16BE(2)) !== undefined
+        const m = take(4 + 4 * head.readUInt16BE(2))
+        if (!m) return false
+        log(this.id, `SetEncodings ${Array.from({ length: head.readUInt16BE(2) }, (_, i) => m.readInt32BE(4 + 4 * i)).join(' ')}`)
+        return true
       }
       case 3: {
         // FramebufferUpdateRequest
         const m = take(10)
         if (!m) return false
+        if (this.updates++ < 5) log(this.id, `FramebufferUpdateRequest ${m[1] ? 'incremental' : 'full'} ${m.readUInt16BE(2)},${m.readUInt16BE(4)} ${m.readUInt16BE(6)}x${m.readUInt16BE(8)}`)
         if (m[1]) this.request ??= 'incremental'
         else this.request = 'full'
         if (this.request === 'full') this.send([[0, 0, this.display.screen.width, this.display.screen.height]])

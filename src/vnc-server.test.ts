@@ -35,7 +35,7 @@ describe('VNC server', () => {
     }
   }
 
-  it('lets viewers in: 3.8 with no password, or with any (VNC authentication); 3.3; tells them the screen', async () => {
+  it('lets viewers in: 3.8 with no password, or with any (VNC authentication); 3.3 with any; tells them the screen', async () => {
     const { port } = await start()
     client = await RfbClient.connect(port)
     expect([client.version, client.securityTypes, client.securityResult]).toEqual(['RFB 003.008\n', [1, 2], 0])
@@ -46,10 +46,10 @@ describe('VNC server', () => {
     client = await RfbClient.connect(port, { security: 2 })
     expect(client.securityResult).toBe(0)
     client.close()
-    client = await RfbClient.connect(port, { version: '003.003' })
-    expect([client.securityTypes, client.width]).toEqual([[1], WIDTH])
+    client = await RfbClient.connect(port, { version: '003.003' }) // (macOS's Screen Sharing)
+    expect([client.securityTypes, client.securityResult, client.width]).toEqual([[2], 0, WIDTH])
     client.close()
-    client = await RfbClient.connect(port, { version: '003.889' }) // macOS's Screen Sharing
+    client = await RfbClient.connect(port, { version: '003.889' }) // (Apple's)
     expect(client.securityResult).toBe(0)
   })
 
