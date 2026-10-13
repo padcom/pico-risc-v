@@ -2,23 +2,31 @@ import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { LinuxSession } from '../test/linux-session.js'
+import { RfbClient } from '../test/rfb-client.js'
 import { SnapshotStorage } from './block-storage.js'
 import { FileStorage } from './file-storage.js'
 import { Input } from './virtio-input.js'
+import { VncServer } from './vnc-server.js'
 
 const WIDTH = 1024
 const HEIGHT = 768
 /** Instructions to wait for any one thing at the shell, at most. */
 const BUDGET = 5_000_000_000
 
-/** Run the machine until `done()` (it's on the screen, say), in at most BUDGET more instructions. */
+/**
+ * Run the machine until `done()` (it's on the screen, say), in at most BUDGET
+ * more instructions, or a minute (when it idles, waiting for something, it
+ * runs none).
+ */
 async function until(s: LinuxSession, what: string, done: () => boolean): Promise<void> {
   const end = s.machine.cpu.instret + BUDGET
+  const deadline = Date.now() + 60_000
   while (!done()) {
     const result = s.machine.run(1_000_000)
     if (result !== 'limit' && result !== 'idle') throw new Error(`machine stopped (${result}) waiting for ${what}`)
-    if (s.machine.cpu.instret > end) throw new Error(`timed out waiting for ${what}`)
-    await new Promise(resolve => setImmediate(resolve))
+    if (s.machine.cpu.instret > end || Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    // (When it idles: a moment for the world to do something.)
+    await new Promise(resolve => (result === 'idle' ? setTimeout(resolve, 1) : setImmediate(resolve)))
   }
 }
 
@@ -46,7 +54,7 @@ const DEBIAN_DISK = fileURLToPath(new URL('pristine.raw', DEBIAN))
  */
 describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => existsSync(new URL(f, DEBIAN))))('Debian with a screen', () => {
   it(
-    'has the screen (efifb), the keyboard and the mouse, and starts Xfce on them',
+    'has the screen (efifb), the keyboard and the mouse, and starts Xfce on them; a VNC viewer sees it and uses it',
     { timeout: 1_800_000 },
     async () => {
       const file = new FileStorage(DEBIAN_DISK, { readOnly: true })
@@ -112,6 +120,44 @@ describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => exi
         expect(s.screen).toContain("Using input driver 'libinput' for 'risc-emulator keyboard'")
         expect(s.screen).toContain("Using input driver 'libinput' for 'risc-emulator tablet'")
         await until(s, 'the panel', () => lit(pixels(s), 0, 20) > (WIDTH * 20) / 2)
+
+        // A VNC viewer (npm start --display) gets the screen as it is, and
+        // what it does gets to X: a right-click on the desktop opens Xfce's
+        // menu there (white, to the click's lower right), Escape closes it.
+        const vnc = new VncServer({ screen: s.machine.screen!, keyboard: s.machine.keyboard!, tablet: s.machine.tablet! })
+        const viewer = await RfbClient.connect(await vnc.listen(0))
+        try {
+          const [all] = await viewer.update(false)
+          const { pixels: screen } = s.machine.screen!
+          expect(all!.data.equals(new Uint8Array(screen.buffer, screen.byteOffset, screen.byteLength))).toBe(true)
+          const seen = new Uint32Array(all!.data.buffer, all!.data.byteOffset, WIDTH * HEIGHT).slice()
+          /** Run the machine until `done()` with what the viewer sees, asking for updates as it goes. */
+          let asking: Promise<void> | undefined
+          const watch = (what: string, done: () => boolean) =>
+            until(s, what, () => {
+              asking ??= viewer.update(true).then(rects => {
+                for (const { x, y, w, h, data } of rects) {
+                  for (let row = 0; row < h; row++) seen.set(new Uint32Array(data.buffer, data.byteOffset + row * w * 4, w), (y + row) * WIDTH + x)
+                }
+                asking = undefined
+              })
+              return done()
+            })
+          const menu = () => (seen[500 * WIDTH + 750]! & 0xffffff) > 0xe0e0e0
+          expect(menu()).toBe(false)
+          viewer.pointer(0, 600, 400)
+          viewer.pointer(4, 600, 400) // right button
+          viewer.pointer(0, 600, 400)
+          await watch("Xfce's menu", menu)
+          viewer.key(0xff1b, true) // Escape
+          viewer.key(0xff1b, false)
+          await watch("Xfce's menu closing", () => !menu())
+          // (An update still asked for won't come: closing the viewer ends it.)
+          asking?.catch(() => {})
+        } finally {
+          viewer.close()
+          vnc.close()
+        }
 
         s.type('poweroff\n')
         expect(s.runToPowerOff(20_000_000_000)).toBe('poweroff')

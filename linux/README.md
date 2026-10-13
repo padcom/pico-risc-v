@@ -60,6 +60,16 @@ shows up once among them.)
 Options after `--` go to the emulator: `npm start -- --snapshot` (see
 [The disk](#the-disk)), `npm start -- --memory 2048`.
 
+`npm start -- --display` gives the machine a screen, with a keyboard and a
+mouse, and Debian starts its desktop (Xfce) on it, as in the page
+(`?display`, below). It's shown by VNC: open `vnc://localhost:5900` in
+macOS's Screen Sharing (it asks for a password: any will do), or another
+VNC viewer (TigerVNC, say); `--vnc 5901` picks another port. The emulator
+is the VNC server, for this machine only (localhost), and sends what changes
+on the screen; the viewer's keys go to the guest as a US keyboard's. (A
+`disk.raw` from before the desktop was added has no X: see `linux/debian/packages`
+for what to `apt install`, or start over from `pristine.raw`.)
+
 Since the kernel boots from the disk, `apt upgrade` updates it as on any
 Debian machine; the next boot uses the new one.
 

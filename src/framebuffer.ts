@@ -15,7 +15,8 @@ export class Framebuffer {
 
   readonly stride: number
   readonly size: number
-  private readonly pixels: Uint32Array
+  /** The pixels, as the guest has them (x8r8g8b8), row by row. */
+  readonly pixels: Uint32Array
 
   /** A `width` × `height` screen over `bytes` (the framebuffer, at least size() long). */
   constructor(
