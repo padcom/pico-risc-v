@@ -32,6 +32,8 @@
  *   harts=<n>            default 4
  *   persist=0            don't keep the disk's changes (a throwaway session)
  *   memory=<MiB>         default 1024 for Debian, boot.json's, 64 for an image
+ *   display=<w>x<h>      a screen (1024x768 if just display), shown above
+ *                        the terminal; Linux has it as /dev/fb0
  *
  * How the machine stopped ends up in the page's `data-result` attribute,
  * and everything it printed in `window.emulatorOutput` (for tests).
@@ -41,6 +43,7 @@ import { Terminal } from '@xterm/xterm'
 import { type BlockStorage, SnapshotStorage } from './block-storage.js'
 import { ChunkedStorage, gunzip } from './chunked-storage.js'
 import { setCoreModule } from './cpu.js'
+import type { Framebuffer } from './framebuffer.js'
 import { HttpStorage } from './http-storage.js'
 import { IndexedDbStore } from './indexeddb-store.js'
 import { Machine, type RunResult } from './machine.js'
@@ -72,6 +75,7 @@ const distribution = params.get('distribution') ?? page.distribution ?? 'debian'
 const harts = Number(params.get('harts') ?? 4)
 const relay = params.get('relay')
 const persist = params.get('persist') !== '0'
+const display = params.has('display') ? parseDisplay(params.get('display')!) : undefined
 /** How often the disk's changes are saved, besides when the guest flushes it (ms). */
 const SAVE_INTERVAL = 2000
 /** Where npm run relay is, by default. */
@@ -120,7 +124,7 @@ try {
 
   let machine: Machine
   if (image) {
-    machine = new Machine({ ramSize: Number(params.get('memory') ?? 64) << 20, harts, output })
+    machine = new Machine({ ramSize: Number(params.get('memory') ?? 64) << 20, harts, output, display })
     machine.boot(await fetchBytes(image))
   } else {
     log(`loading ${distribution}…`)
@@ -142,9 +146,11 @@ try {
       network,
       bootargs: config.bootargs,
       output,
+      display,
     })
     machine.boot(firmware, { load: [{ offset: KERNEL_OFFSET, data: kernel }], next: { offset: KERNEL_OFFSET }, initrd })
   }
+  if (machine.screen) show(machine.screen)
   terminal.onData(data => machine.type(data))
   // The terminal's size, and changes to it (fit() follows the window).
   machine.resize(terminal.cols, terminal.rows)
@@ -164,6 +170,30 @@ try {
   document.body.dataset.result = 'error'
   log(String(error))
   throw error
+}
+
+/** `display`'s value: <width>x<height>, 1024x768 if none. */
+function parseDisplay(value: string): { width: number; height: number } {
+  if (!value) return { width: 1024, height: 768 }
+  const [, width, height] = /^(\d+)x(\d+)$/.exec(value) ?? []
+  if (!width || !height) throw new Error(`display=${value}: should be <width>x<height>, e.g. 1024x768`)
+  return { width: Number(width), height: Number(height) }
+}
+
+/** Show the screen on the page's canvas, a frame at a time (when it changed). */
+function show(screen: Framebuffer): void {
+  const canvas = document.getElementById('screen') as HTMLCanvasElement
+  canvas.width = screen.width
+  canvas.height = screen.height
+  canvas.hidden = false
+  fit.fit() // (the terminal has less room now)
+  const context = canvas.getContext('2d')!
+  const image = context.createImageData(screen.width, screen.height)
+  const frame = () => {
+    if (screen.draw(image.data)) context.putImageData(image, 0, 0)
+    requestAnimationFrame(frame)
+  }
+  frame()
 }
 
 /**

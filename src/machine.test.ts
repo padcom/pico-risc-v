@@ -326,6 +326,29 @@ describe('Device tree', () => {
     expect(m.ram.bytes.subarray(start - MemoryMap.RAM, end - MemoryMap.RAM)).toEqual(initrd)
   })
 
+  it('describes the screen, a framebuffer at the top of RAM, above the RAM the OS gets and itself', () => {
+    const m = new Machine({ ramSize: 8 * 1024 * 1024, display: { width: 640, height: 480 } })
+    m.boot([0x73, 0x00, 0x10, 0x00]) // ebreak
+    const fbAddr = MemoryMap.RAM + 8 * 1024 * 1024 - 640 * 480 * 4
+    const dtbAddr = m.cpu.x[11]! >>> 0
+    const dtb = m.ram.bytes.subarray(dtbAddr - MemoryMap.RAM)
+    const fb = fdtProperties(dtb, `framebuffer@${fbAddr.toString(16)}`)
+    const cell = (name: string, i = 0) => fb.get(name)!.getUint32(i * 4)
+    const text = (name: string) => new TextDecoder().decode(fb.get(name)!).replace(/\0$/, '')
+    expect(text('compatible')).toBe('simple-framebuffer')
+    expect([0, 1, 2, 3].map(i => cell('reg', i))).toEqual([0, fbAddr, 0, 640 * 480 * 4])
+    expect([cell('width'), cell('height'), cell('stride'), text('format')]).toEqual([640, 480, 640 * 4, 'x8r8g8b8'])
+    const memory = fdtProperties(dtb, `memory@${MemoryMap.RAM.toString(16)}`).get('reg')!
+    expect(MemoryMap.RAM + memory.getUint32(12)).toBeLessThanOrEqual(fbAddr)
+    expect(dtbAddr + new DataView(dtb.buffer, dtb.byteOffset).getUint32(4)).toBeLessThanOrEqual(fbAddr)
+
+    // What the guest writes there is on the screen.
+    m.bus.write32(fbAddr + 4, 0x00ff8040)
+    const pixels = new Uint8Array(640 * 480 * 4)
+    m.screen!.draw(pixels)
+    expect([...pixels.subarray(4, 8)]).toEqual([0xff, 0x80, 0x40, 0xff])
+  })
+
   it('is passed to the program in a1, with the hart id in a0', () => {
     const m = new Machine({ ramSize: 1024 * 1024 })
     m.boot([0x73, 0x00, 0x10, 0x00]) // ebreak

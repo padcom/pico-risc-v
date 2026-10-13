@@ -198,6 +198,12 @@ terminal. Debian must have been set up once (`npm start` does it).
   machine get a network (not other web sites open in the browser).
 - `?harts=2`, `?memory=512` change the machine; `?image=examples/build/hello.bin`
   boots a bare-metal program instead of Debian.
+- `?display` gives the machine a screen, 1024×768 (`?display=800x600`,
+  another size), shown above the terminal: a framebuffer, as boot firmware
+  leaves one set up, which Linux has as `/dev/fb0`, its own console (`tty1`)
+  on it. Debian gets it from U-Boot, through UEFI (`efifb`); Alpine's kernel
+  from the device tree (`simpledrm`). There's no keyboard or mouse for it yet.
+  (GRUB then writes to the screen, not the serial port.)
 
 The harts' threads share memory (`SharedArrayBuffer`), which browsers only
 allow on a cross-origin isolated page: the server sends the headers for

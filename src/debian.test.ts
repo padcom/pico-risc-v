@@ -26,7 +26,7 @@ const BUDGET = 5_000_000_000
  */
 describe.skipIf(![FIRMWARE, UBOOT, DISK].every(existsSync))('Debian 13 riscv64 cloud image', () => {
   it(
-    'boots on 4 harts with nothing failed; CPUs, randomness, floating point, network (DHCP, ping, DNS, HTTP), date; keeps writes across a reboot',
+    'boots on 4 harts with nothing failed; CPUs, randomness, floating point, network (DHCP, ping, DNS, HTTP), date, screen; keeps writes across a reboot',
     { timeout: 1_800_000 },
     async () => {
       // "The outside world": an HTTP server and a DNS server on this host.
@@ -51,6 +51,7 @@ describe.skipIf(![FIRMWARE, UBOOT, DISK].every(existsSync))('Debian 13 riscv64 c
             // Virtual time at about the emulator's real speed: at the default 10
             // MIPS systemd's service timeouts expire before a service is up.
             instructionsPerMicrosecond: 100,
+            display: { width: 1024, height: 768 },
           },
         )
         const login = async () => {
@@ -67,7 +68,12 @@ describe.skipIf(![FIRMWARE, UBOOT, DISK].every(existsSync))('Debian 13 riscv64 c
 
         await login()
         expect(s.screen).toContain('U-Boot')
-        expect(s.screen).toMatch(/Loading Linux \S+-riscv64/) // GRUB, loading Debian's kernel
+
+        // GRUB loaded Debian's kernel. (It tells us so on the screen, not the
+        // serial port, when there is one.)
+        s.type('cat /proc/cmdline\n')
+        await s.waitForAsync('-riscv64 ', BUDGET, 600_000)
+        expect(s.screen).toMatch(/BOOT_IMAGE=\/boot\/vmlinu[xz]-\S+-riscv64 /)
 
         // The root file system on the virtio disk, grown to the disk's size on the first boot.
         s.type('findmnt -no SOURCE /; df -B1G --output=size / | tail -1; echo "done-$((0+1))"\n')
@@ -112,6 +118,15 @@ describe.skipIf(![FIRMWARE, UBOOT, DISK].every(existsSync))('Debian 13 riscv64 c
         // The date comes from the emulator's RTC (HTTPS certificate checks need it).
         s.type('echo "year=$(date -u +%Y)"\n')
         await s.waitForAsync(`year=${new Date().getUTCFullYear()}`, BUDGET, 600_000)
+
+        // The screen: U-Boot hands it on (UEFI), Linux draws on it (efifb).
+        // A red pixel (x8r8g8b8) in the bottom right corner, where no text goes.
+        s.type(`cat /proc/fb; printf '\\0\\0\\377\\0' | dd of=/dev/fb0 bs=4 seek=$((1024*768-1)) status=none; echo "done-$((2+3))"\n`)
+        await s.waitForAsync('done-5', BUDGET, 600_000)
+        expect(s.screen).toMatch(/^0 EFI VGA\r$/m)
+        const pixels = new Uint8Array(1024 * 768 * 4)
+        s.machine.screen!.draw(pixels)
+        expect([...pixels.subarray(-4)]).toEqual([255, 0, 0, 255])
 
         // A write survives a reboot (in the snapshot: the image file is untouched).
         s.type('echo "persisted-$((6*7))" > /root/note.txt; sync; reboot\n')

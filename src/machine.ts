@@ -3,6 +3,7 @@ import { BusError } from './bus.js'
 import { Clint } from './clint.js'
 import { CPU, type CPUOptions } from './cpu.js'
 import { encodeFdt, type FdtNode } from './fdt.js'
+import { Framebuffer } from './framebuffer.js'
 import { GoldfishRtc } from './goldfish-rtc.js'
 import type { HartThreadData } from './hart-worker.js'
 import { Plic } from './plic.js'
@@ -26,7 +27,9 @@ import { type NetworkBackend, VirtioNet } from './virtio-net.js'
  *   0x1100_0000 - 0x1100_ffff   CLINT (timer + software interrupt)
  *   0x1110_0000 - 0x1110_0fff   Syscon (power-off / reboot)
  *   0x8000_0000 - ...           RAM; execution starts at its first byte,
- *                               the device tree sits in its last page(s)
+ *                               the device tree sits in its last page(s),
+ *                               or below the screen's framebuffer, if any,
+ *                               which takes the very last ones
  */
 export const MemoryMap = {
   RTC: 0x0010_1000,
@@ -95,6 +98,11 @@ export interface MachineOptions {
    * `SLICE` steps each.
    */
   harts?: number
+  /**
+   * A screen, `width` × `height` pixels: a framebuffer at the top of RAM
+   * (not part of the RAM the OS is told about), see Framebuffer.
+   */
+  display?: { width: number; height: number }
 }
 
 export interface BootOptions {
@@ -179,6 +187,8 @@ export class Machine {
   readonly disk: VirtioBlock | undefined
   readonly console: VirtioConsole | undefined
   readonly nic: VirtioNet | undefined
+  /** The screen, if the machine has one (MachineOptions.display). */
+  readonly screen: Framebuffer | undefined
   private readonly network: NetworkBackend | undefined
   /** The harts, by mhartid. */
   readonly cpus: CPU[]
@@ -230,6 +240,7 @@ export class Machine {
     jit,
     harts = 1,
     console = true,
+    display,
   }: MachineOptions = {}) {
     this.bootargs = bootargs
     this.virtual = clock === 'virtual'
@@ -248,6 +259,11 @@ export class Machine {
     })
     this.cpu = this.cpus[0]!
     this.ram = this.cpu.ram!
+    if (display) {
+      const size = Framebuffer.size(display.width, display.height)
+      if (size > ramSize / 2) throw new RangeError(`The screen (${size} bytes) takes too much of the RAM`)
+      this.screen = new Framebuffer(display.width, display.height, this.ram.bytes.subarray(ramSize - size))
+    }
     const raise = (bit: number, pending: boolean, hart: number) => {
       const cpu = this.cpus[hart]!
       const before = this.threads && cpu.mip
@@ -575,11 +591,12 @@ export class Machine {
   }
 
   /**
-   * The DTB goes into the last page-aligned chunk of RAM that fits it, with
-   * FDT_ROOM to spare after it: firmware (OpenSBI) grows it in place.
+   * The DTB goes into the last page-aligned chunk of RAM (below the
+   * framebuffer) that fits it, with FDT_ROOM to spare after it: firmware
+   * (OpenSBI) grows it in place.
    */
   private dtbOffset(dtbSize: number): number {
-    return (this.ram.size - dtbSize - FDT_ROOM) & ~0xfff
+    return (this.ram.size - (this.screen?.size ?? 0) - dtbSize - FDT_ROOM) & ~0xfff
   }
 
   private describe(memSize: number): FdtNode {
@@ -614,6 +631,20 @@ export class Machine {
         [`memory@${hex(MemoryMap.RAM)}`]: {
           props: { device_type: 'memory', reg: reg(MemoryMap.RAM, memSize) },
         },
+        ...(this.screen && {
+          // Above the memory the OS gets: the screen's, set up as by firmware.
+          [`framebuffer@${hex(MemoryMap.RAM + this.ram.size - this.screen.size)}`]: {
+            props: {
+              compatible: 'simple-framebuffer',
+              reg: reg(MemoryMap.RAM + this.ram.size - this.screen.size, this.screen.size),
+              width: this.screen.width,
+              height: this.screen.height,
+              stride: this.screen.stride,
+              format: Framebuffer.FORMAT,
+              status: 'okay',
+            },
+          },
+        }),
         cpus: {
           props: { '#address-cells': 1, '#size-cells': 0, 'timebase-frequency': TIMEBASE_HZ },
           children: {
