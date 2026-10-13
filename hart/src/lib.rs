@@ -27,21 +27,24 @@ use blocks::{Code, NO_CODE};
 use core::cell::UnsafeCell;
 use core::sync::atomic::Ordering::Relaxed;
 use hart::Hart;
+use jit::{JitShared, NO_JIT, Table};
 
-/// RAM, and what's known about code in it: shared by the harts (set up once,
-/// by `ram_alloc`, before they are created).
+/// RAM, what's known about code in it, and what's compiled: shared by the
+/// harts (set up once, by `ram_alloc`, before they are created).
 struct Ram {
     ptr: *mut u8,
     base: u64,
     size: u64,
     code: &'static Code,
+    jit: &'static JitShared,
 }
 
 struct Global<T>(UnsafeCell<T>);
 // SAFETY: written once, before any hart exists; only read after that.
 unsafe impl<T> Sync for Global<T> {}
 
-static RAM: Global<Ram> = Global(UnsafeCell::new(Ram { ptr: core::ptr::null_mut(), base: 0, size: 0, code: &NO_CODE }));
+static RAM: Global<Ram> =
+    Global(UnsafeCell::new(Ram { ptr: core::ptr::null_mut(), base: 0, size: 0, code: &NO_CODE, jit: &NO_JIT }));
 
 fn ram() -> &'static Ram {
     // SAFETY: see Global.
@@ -71,6 +74,7 @@ pub extern "C" fn ram_alloc(base: u32, size: u32) -> *mut u8 {
     ram.base = base as u64;
     ram.size = size as u64;
     ram.code = Box::leak(Box::new(Code::new((size as usize).div_ceil(4096))));
+    ram.jit = Box::leak(Box::new(JitShared::new((size as usize).div_ceil(4096))));
     ram.ptr
 }
 
@@ -97,8 +101,10 @@ pub extern "C" fn hart_new(id: u32, reset_vector: u64, flags: u32) -> *mut Hart 
         h.code = ram.code;
         h.blocks = vec![blocks::EMPTY_BLOCK; blocks::BLOCKS];
         h.ops = vec![blocks::NO_OP; blocks::OPS];
-        h.jit.allocate(ram.code.lines.len());
+        h.jit.allocate();
+        h.jits = ram.jit;
         h.chain = vec![jit::CHAIN_EMPTY; jit::CHAIN_SIZE];
+        h.chain_base = h.chain.as_ptr() as u32;
     }
     h.reset(reset_vector);
     h.break_on_ebreak = flags & BREAK_ON_EBREAK != 0;
@@ -112,22 +118,38 @@ pub extern "C" fn jit_slots() -> u32 {
     ram().code.lines.len() as u32
 }
 
-/// Turn a hart's JIT on: its slots start at `table_base` in the function
-/// table; a page is compiled after running `threshold` instructions, `batch`
-/// pages at a time.
+/// A new table (jit.rs) for an instance of the core: for the harts running
+/// in it. `thread`: one running on another thread than the one compiling
+/// (which then keep the modules compiled for it in a log).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_init(h: *mut Hart, table_base: u32, threshold: u32, batch: u32) {
+pub extern "C" fn jit_table_new(thread: u32) -> *mut Table {
+    let ram = ram();
+    if thread != 0 {
+        ram.jit.allocate_log();
+    }
+    Box::leak(Box::new(Table::new(ram.code.lines.len())))
+}
+
+/// Turn a hart's JIT on, in the instance whose table is `table` (from
+/// jit_table_new; for the pages, its slots from `table_base` in the
+/// instance's function table, empty): a page is compiled after running
+/// `threshold` instructions, `batch` pages at a time.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_init(h: *mut Hart, table: *mut Table, table_base: u32, threshold: u32, batch: u32) {
     let h = hart(h);
-    h.jit.table_base = table_base;
+    if h.blocks.is_empty() {
+        return;
+    }
+    h.jit_use_table(table, table_base);
     h.jit.threshold = threshold.max(1);
     h.jit.batch = (batch as usize).max(1);
-    h.jit.enabled = !h.blocks.is_empty();
+    h.jit.enabled = true;
 }
 
 /// Compiled code's way into the interpreter (jit.rs: `Hart::jit_op`).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_op(h: *mut Hart, index: u32, pc: u64) -> u32 {
-    hart(h).jit_op(index, pc)
+pub extern "C" fn jit_op(h: *mut Hart, a: u64, b: u64, pc: u64) -> u32 {
+    hart(h).jit_op(a, b, pc)
 }
 
 /// Where x0..x31 live in linear memory (32 × 64 bits).

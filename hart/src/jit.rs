@@ -14,14 +14,20 @@
 //! that runs off the end of a block into the next goes straight on (cases are
 //! in address order), without going through the switch.
 //!
-//! A page that has run `threshold` instructions the regular way (since it
-//! was last compiled, or its code changed) is queued; once `batch` pages are
-//! queued (or they've waited long enough), each is compiled (again, if it
-//! was before) with all its blocks in the cache, together into one module,
-//! which src/cpu.ts instantiates
-//! against this module's memory, putting the functions into its function
-//! table. RAM page `p` owns table slot `table_base + p`, so a page's code is
-//! called with a plain indirect call, never leaving WebAssembly.
+//! The harts share what's compiled. A page that has run `threshold`
+//! instructions the regular way (by any hart, since it was last compiled, or
+//! its code changed) is queued; once `batch` pages are queued (or they've
+//! waited long enough), the hart that notices compiles each (again, if it
+//! was before), with all its blocks in its cache and those of the page's
+//! previous function, together into one module, which src/cpu.ts
+//! instantiates against this module's memory, putting the functions into
+//! the instance's function table. RAM page `p` owns table slot `base + p`,
+//! so a page's code is called with a plain indirect call, never leaving
+//! WebAssembly. Harts running in other instances of the core (on threads of
+//! their own) install the module in theirs from a log (`JitShared`), and
+//! find their blocks in it through its case lists: the code is the same for
+//! every hart (it finds the hart's things from the hart pointer it's
+//! passed), so it's compiled once.
 //!
 //! What compiled code does is what `execute_block` does, without decoding:
 //! - Within a block, registers live in WebAssembly locals, loaded on first
@@ -34,30 +40,37 @@
 //!   decoded (compiled code checks: that can change any time) goes through
 //!   `jit_op` (the interpreter), which then refills the TLB.
 //! - Whatever isn't compiled (floating point, atomics, CSRs, system
-//!   instructions, MULH*) also runs through `jit_op`. Only `jit_op` can
-//!   reach devices, so it also ends the function when one raised an
-//!   interrupt or stopped the CPU, or when code was written (which may be
-//!   the function's own).
+//!   instructions, MULH*) also runs through `jit_op` (passed the decoded
+//!   instruction). Only `jit_op` can reach devices, so it also ends the
+//!   function when one raised an interrupt or stopped the CPU, or when code
+//!   was written (which may be the function's own).
 //!
 //! Functions take the page's virtual address as a parameter: the same
 //! physical code may run at several (shared libraries).
 
-use crate::blocks::{FETCH_CACHE, Kind, Op, SINK};
+use crate::blocks::{Block, FETCH_CACHE, Kind, Op, SINK};
 use crate::hart::Hart;
 use crate::mmu::TLB_SIZE;
-use core::sync::atomic::Ordering::Relaxed;
+use core::cell::UnsafeCell;
+use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU16, AtomicU32, AtomicU64, fence};
 
-// Implemented by src/cpu.ts: compile `code` (a module), instantiate it and
-// put its exported functions "0", "1", ... into the table at `slots`.
-// Returns 1 on success.
+// Implemented by src/cpu.ts (and src/hart-worker.ts): `jit_load` copies
+// `code` (a module); `jit_install` compiles the module copied last,
+// instantiates it and puts its exported functions "0", "1", ... into the
+// table at `slots`. Returns 1 on success.
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn jit_install(code: *const u8, len: u32, slots: *const u32, count: u32) -> u32;
+    fn jit_load(code: *const u8, len: u32);
+    fn jit_install(slots: *const u32, count: u32) -> u32;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-unsafe fn jit_install(_: *const u8, _: u32, _: *const u32, _: u32) -> u32 {
+unsafe fn jit_load(_: *const u8, _: u32) {}
+
+#[cfg(not(target_arch = "wasm32"))]
+unsafe fn jit_install(_: *const u32, _: u32) -> u32 {
     0
 }
 
@@ -135,70 +148,272 @@ const WAIT: u32 = 200_000;
 /// part, or keep running new code (each time, all of it is compiled).
 const MAX_BACKOFF: u8 = 6;
 
+/// Case lists (the offsets of functions' cases in their pages, halved) take
+/// at most this many entries in all (`JitShared::offsets`), then start over.
+const OFFSETS: usize = 1 << 21;
+/// The log of compiled modules, for the tables of other instances (on other
+/// threads): this many bytes, which take the latest modules...
+const LOG_SIZE: usize = 16 << 20;
+/// ...of which this many are indexed.
+const LOG_INDEX: usize = 4096;
+
+/// What the harts share about compiled code (allocated with the RAM, like
+/// `Code`): which pages are hot, the queue of pages to compile, the latest
+/// function of each page, and the modules compiled, numbered from 1.
+///
+/// One hart at a time queues and compiles pages: the one holding `lock`
+/// (another just tries again later). A module is compiled once: the harts
+/// of other instances of the core install it from the log.
+pub struct JitShared {
+    lock: AtomicU32,
+    /// Pages waiting to be compiled (under the lock), and how many.
+    queue: UnsafeCell<Vec<u32>>,
+    queue_len: AtomicU32,
+    /// Per RAM page: instructions run the regular way (by any hart) since it
+    /// was last compiled (or its code changed); whether it's queued; how
+    /// often it's been compiled, and the version of its code it was last
+    /// compiled from.
+    steps: Vec<AtomicU32>,
+    queued: Vec<AtomicBool>,
+    compiles: Vec<AtomicU8>,
+    compiled_version: Vec<AtomicU32>,
+    /// Per RAM page: its latest function's module and code version
+    /// (`module << 32 | version`), and where its case list is in
+    /// `offsets` (`start << 32 | count`).
+    function: Vec<AtomicU64>,
+    cases: Vec<AtomicU64>,
+    offsets: Vec<AtomicU16>,
+    /// Entries of `offsets` in use (under the lock), and the first module
+    /// whose case lists are all still there.
+    offsets_used: UnsafeCell<usize>,
+    floor: AtomicU32,
+    /// The modules compiled so far.
+    modules: AtomicU32,
+    /// The log (LOG_SIZE bytes; allocated with the first table for another
+    /// thread, else none): each module as its page count (u32), its pages
+    /// (u32 each), its code; `written` is how many bytes have been written
+    /// in all (a module's bytes are intact while it's at most LOG_SIZE past
+    /// where they start). Module n is at `index[n % LOG_INDEX]`: where it
+    /// starts, and `n << 32 | length`.
+    log: AtomicPtr<u8>,
+    written: AtomicU64,
+    index: Vec<[AtomicU64; 2]>,
+}
+
+// SAFETY: what isn't atomic is only used under the lock.
+unsafe impl Sync for JitShared {}
+
+/// For harts without RAM (no JIT).
+pub static NO_JIT: JitShared = JitShared {
+    lock: AtomicU32::new(0),
+    queue: UnsafeCell::new(Vec::new()),
+    queue_len: AtomicU32::new(0),
+    steps: Vec::new(),
+    queued: Vec::new(),
+    compiles: Vec::new(),
+    compiled_version: Vec::new(),
+    function: Vec::new(),
+    cases: Vec::new(),
+    offsets: Vec::new(),
+    offsets_used: UnsafeCell::new(0),
+    floor: AtomicU32::new(0),
+    modules: AtomicU32::new(0),
+    log: AtomicPtr::new(core::ptr::null_mut()),
+    written: AtomicU64::new(0),
+    index: Vec::new(),
+};
+
+impl JitShared {
+    pub fn new(pages: usize) -> JitShared {
+        JitShared {
+            lock: AtomicU32::new(0),
+            queue: UnsafeCell::new(Vec::with_capacity(MAX_QUEUE)),
+            queue_len: AtomicU32::new(0),
+            steps: (0..pages).map(|_| AtomicU32::new(0)).collect(),
+            queued: (0..pages).map(|_| AtomicBool::new(false)).collect(),
+            compiles: (0..pages).map(|_| AtomicU8::new(0)).collect(),
+            compiled_version: (0..pages).map(|_| AtomicU32::new(0)).collect(),
+            function: (0..pages).map(|_| AtomicU64::new(0)).collect(),
+            cases: (0..pages).map(|_| AtomicU64::new(0)).collect(),
+            offsets: (0..OFFSETS).map(|_| AtomicU16::new(0)).collect(),
+            offsets_used: UnsafeCell::new(0),
+            floor: AtomicU32::new(0),
+            modules: AtomicU32::new(0),
+            log: AtomicPtr::new(core::ptr::null_mut()),
+            written: AtomicU64::new(0),
+            index: (0..LOG_INDEX).map(|_| [AtomicU64::new(0), AtomicU64::new(0)]).collect(),
+        }
+    }
+
+    /// Allocate the log, if it isn't (before the threads that read it start).
+    pub fn allocate_log(&self) {
+        if self.log.load(Relaxed).is_null() {
+            self.log.store(vec![0u8; LOG_SIZE].leak().as_mut_ptr(), SeqCst);
+        }
+    }
+
+    fn try_lock(&self) -> bool {
+        self.lock.compare_exchange(0, 1, Acquire, Relaxed).is_ok()
+    }
+
+    fn unlock(&self) {
+        self.lock.store(0, Release);
+    }
+
+    /// Before compiling module `module`: start `offsets` over if its case
+    /// lists might not fit (those of the modules before then no longer count).
+    fn make_room(&self, module: u32) {
+        // SAFETY: under the lock.
+        let used = unsafe { &mut *self.offsets_used.get() };
+        if *used + MAX_PENDING > OFFSETS {
+            *used = 0;
+            self.floor.store(module, SeqCst);
+            fence(SeqCst);
+        }
+    }
+
+    /// Room for `count` entries in `offsets` (make_room made sure there is).
+    fn offsets_for(&self, count: usize) -> usize {
+        // SAFETY: under the lock.
+        let used = unsafe { &mut *self.offsets_used.get() };
+        let start = *used;
+        *used += count;
+        start
+    }
+
+    /// Whether the log still has the bytes written from `pos`.
+    fn intact(&self, pos: u64) -> bool {
+        self.written.load(SeqCst) <= pos + LOG_SIZE as u64
+    }
+
+    /// Make module `module` (its code, for `pages`, whose case lists are
+    /// `lists`: start, count, version) the latest function of those pages,
+    /// and put it in the log.
+    fn publish(&self, module: u32, pages: &[u32], lists: &[(u32, u32, u32)], code: &[u8]) {
+        let log = self.log.load(Relaxed);
+        if !log.is_null() {
+            let len = 4 + 4 * pages.len() + code.len();
+            let mut pos = self.written.load(Relaxed);
+            if pos as usize % LOG_SIZE + len > LOG_SIZE {
+                pos = pos.next_multiple_of(LOG_SIZE as u64); // (all in one piece)
+            }
+            // Written first: a reader of what's overwritten sees it's gone.
+            self.written.store(pos + len as u64, SeqCst);
+            fence(SeqCst);
+            // SAFETY: the log has LOG_SIZE bytes, and len fits (MAX_MODULE).
+            unsafe {
+                let at = log.add(pos as usize % LOG_SIZE);
+                at.cast::<u32>().write_unaligned(pages.len() as u32);
+                core::ptr::copy_nonoverlapping(pages.as_ptr().cast::<u8>(), at.add(4), 4 * pages.len());
+                core::ptr::copy_nonoverlapping(code.as_ptr(), at.add(4 + 4 * pages.len()), code.len());
+            }
+            let entry = &self.index[module as usize % LOG_INDEX];
+            entry[1].store(0, SeqCst);
+            entry[0].store(pos, SeqCst);
+            entry[1].store((module as u64) << 32 | len as u64, SeqCst);
+        }
+        for (&page, &(start, count, version)) in pages.iter().zip(lists) {
+            self.cases[page as usize].store((start as u64) << 32 | count as u64, Release);
+            self.function[page as usize].store((module as u64) << 32 | version as u64, Release);
+        }
+        self.modules.store(module, Release);
+    }
+}
+
+/// An instance's function table, as far as the JIT is concerned: shared by
+/// the harts running in that instance (one per thread, or all of them
+/// taking turns), each of which has its own.
+pub struct Table {
+    /// The table slot of RAM page 0.
+    pub(crate) base: u32,
+    /// Modules installed (or passed over: gone from the log): all up to this one.
+    installed: u32,
+    /// Bumped by every install (harts then forget their chains).
+    epoch: u32,
+    /// Per RAM page: the module whose function is in its slot (0: none).
+    pub(crate) slot_module: Vec<u32>,
+    /// Scratch: the pages and slots of a module being installed.
+    pages: Vec<u32>,
+    slots: Vec<u32>,
+}
+
+impl Table {
+    pub fn new(pages: usize) -> Table {
+        Table {
+            base: 0,
+            installed: 0,
+            epoch: 0,
+            slot_module: vec![0; pages],
+            pages: Vec::with_capacity(MAX_QUEUE),
+            slots: Vec::with_capacity(MAX_QUEUE),
+        }
+    }
+
+    /// For a new function table at `base` (empty).
+    pub fn reset(&mut self, base: u32) {
+        self.base = base;
+        self.installed = 0;
+        self.epoch = self.epoch.wrapping_add(1);
+        self.slot_module.fill(0);
+    }
+}
+
 pub struct Jit {
     pub enabled: bool,
-    /// The table slot of RAM page 0.
-    pub table_base: u32,
+    /// The table of the instance the hart runs in, and its epoch when the
+    /// hart last looked.
+    pub table: *mut Table,
+    table_epoch: u32,
     /// Instructions run the regular way before a page is compiled, and how
     /// many pages are compiled together.
     pub threshold: u32,
     pub batch: usize,
-    /// Pages waiting to be compiled, and whether a page is (per RAM page).
-    queue: Vec<u32>,
-    /// Instructions run the regular way since the queue's first page was queued.
+    /// Instructions this hart has run the regular way since it last saw the
+    /// queue empty, or compiled.
     waited: u32,
-    queued: Vec<bool>,
-    /// The module being built, a function's code, the code section, the slots.
+    /// The module being built, a function's code, the code section, the
+    /// slots and pages, and the pages' case lists (start, count, version).
     module: Vec<u8>,
     function: Vec<u8>,
     bodies: Vec<u8>,
     slots: Vec<u32>,
-    /// The blocks compiled in this batch (cache index, case), marked
-    /// compiled once installed.
-    pending: Vec<(u32, u32)>,
+    pages: Vec<u32>,
+    lists: Vec<(u32, u32, u32)>,
+    /// The blocks compiled in this batch (cache index, case, address),
+    /// marked compiled once installed (if they're still there).
+    pending: Vec<(u32, u32, u64)>,
     /// The page being compiled: its blocks (cache indexes, by address), and
     /// for each 2-byte offset in the page, the case of the block starting
     /// there, plus 1 (0: none).
     cases: Vec<u32>,
     case_at: Vec<u16>,
     lengths: Vec<u16>,
-    /// Per RAM page: instructions run the regular way since it was last
-    /// compiled; how often it's been compiled, and the version of its code
-    /// it was last compiled from.
-    steps: Vec<u32>,
-    compiles: Vec<u8>,
-    compiled_version: Vec<u32>,
 }
 
 impl Jit {
     pub const fn new() -> Jit {
         Jit {
             enabled: false,
-            table_base: 0,
+            table: core::ptr::null_mut(),
+            table_epoch: 0,
             threshold: 0,
             batch: 0,
-            queue: Vec::new(),
             waited: 0,
-            queued: Vec::new(),
             module: Vec::new(),
             function: Vec::new(),
             bodies: Vec::new(),
             slots: Vec::new(),
+            pages: Vec::new(),
+            lists: Vec::new(),
             pending: Vec::new(),
             cases: Vec::new(),
             case_at: Vec::new(),
             lengths: Vec::new(),
-            steps: Vec::new(),
-            compiles: Vec::new(),
-            compiled_version: Vec::new(),
         }
     }
 
-    /// Allocate the buffers, once, for `pages` of RAM (nothing may allocate
-    /// later: see lib.rs).
-    pub fn allocate(&mut self, pages: usize) {
-        self.queue = Vec::with_capacity(MAX_QUEUE);
-        self.queued = vec![false; pages];
+    /// Allocate the buffers, once (nothing may allocate later: see lib.rs).
+    pub fn allocate(&mut self) {
         // (The module: its sections, exports, and the code section: up to
         // MAX_MODULE, plus one more function, of up to MAX_FUNCTION plus an
         // instruction's and the end's code.)
@@ -206,34 +421,147 @@ impl Jit {
         self.bodies = Vec::with_capacity(MAX_MODULE + 2 * MAX_FUNCTION);
         self.module = Vec::with_capacity(MAX_MODULE + 2 * MAX_FUNCTION + 16 * MAX_QUEUE + 4096);
         self.slots = Vec::with_capacity(MAX_QUEUE);
+        self.pages = Vec::with_capacity(MAX_QUEUE);
+        self.lists = Vec::with_capacity(MAX_QUEUE);
         self.pending = Vec::with_capacity(MAX_PENDING);
         self.cases = Vec::with_capacity(2048);
         self.case_at = vec![0; 2048];
         self.lengths = Vec::with_capacity(2048);
-        self.steps = vec![0; pages];
-        self.compiles = vec![0; pages];
-        self.compiled_version = vec![0; pages];
     }
 }
 
 impl Hart {
+    #[inline(always)]
+    pub(crate) fn jit_table(&self) -> &Table {
+        // SAFETY: set by jit_init (with `enabled`); lives forever.
+        unsafe { &*self.jit.table }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn jit_table_mut(&self) -> &mut Table {
+        // SAFETY: as jit_table; only this thread uses it, and no reference
+        // to it is held across this.
+        unsafe { &mut *self.jit.table }
+    }
+
+    /// Use the table at `table` (an instance's, new: it's emptied) from now on.
+    pub fn jit_use_table(&mut self, table: *mut Table, base: u32) {
+        self.jit.table = table;
+        self.jit_table_mut().reset(base);
+        self.jit.table_epoch = self.jit_table().epoch;
+        self.forget_chains();
+    }
+
+    /// Before running: install the modules other instances compiled, and
+    /// forget the chains if the table changed.
+    #[inline(always)]
+    pub(crate) fn jit_catch_up(&mut self) {
+        if self.jits.modules.load(Relaxed) != self.jit_table().installed {
+            self.jit_sync();
+        }
+        if self.jit_table().epoch != self.jit.table_epoch {
+            self.jit.table_epoch = self.jit_table().epoch;
+            self.forget_chains();
+        }
+    }
+
+    /// Install the modules compiled since the table's last, in order, from
+    /// the log (those gone from it are passed over: their pages run the
+    /// regular way until compiled again).
+    #[inline(never)]
+    fn jit_sync(&mut self) {
+        let shared = self.jits;
+        let latest = shared.modules.load(Acquire);
+        let log = shared.log.load(Acquire);
+        let table = self.jit_table_mut();
+        while table.installed < latest {
+            let n = table.installed + 1;
+            table.installed = n;
+            if log.is_null() {
+                continue;
+            }
+            let entry = &shared.index[n as usize % LOG_INDEX];
+            let tag = entry[1].load(SeqCst);
+            let pos = entry[0].load(SeqCst);
+            if tag >> 32 != n as u64 || entry[1].load(SeqCst) != tag || !shared.intact(pos) {
+                continue;
+            }
+            let len = tag as u32 as usize;
+            // (Read while another thread may be overwriting it: checked after.)
+            // SAFETY: the entry is in the log, in one piece.
+            let at = unsafe { log.add(pos as usize % LOG_SIZE) };
+            let count = unsafe { at.cast::<u32>().read_unaligned() } as usize;
+            if count > MAX_QUEUE || 4 + 4 * count > len {
+                continue;
+            }
+            table.pages.clear();
+            table.slots.clear();
+            for i in 0..count {
+                // SAFETY: as above: within the entry.
+                let page = unsafe { at.add(4 + 4 * i).cast::<u32>().read_unaligned() };
+                let page = page.min(table.slot_module.len() as u32 - 1);
+                table.pages.push(page);
+                table.slots.push(table.base + page);
+            }
+            // SAFETY: an import implemented in JavaScript, which copies the bytes.
+            unsafe { jit_load(at.add(4 + 4 * count), (len - 4 - 4 * count) as u32) };
+            fence(SeqCst);
+            if !shared.intact(pos) {
+                continue;
+            }
+            // SAFETY: an import implemented in JavaScript; it only reads the buffer.
+            if unsafe { jit_install(table.slots.as_ptr(), count as u32) } != 0 {
+                for &page in &table.pages {
+                    table.slot_module[page as usize] = n;
+                }
+                table.epoch = table.epoch.wrapping_add(1);
+            }
+        }
+    }
+
     /// `steps` instructions of RAM `page` have run the regular way: queue
     /// the page when that's enough, and compile the queue when it's time.
     #[inline(always)]
     pub(crate) fn jit_account(&mut self, page: usize, steps: u32) {
-        let jit = &mut self.jit;
-        jit.steps[page] += steps;
-        let version = self.code.versions[page].load(Relaxed);
-        let backoff = if jit.compiled_version[page] == version { jit.compiles[page].min(MAX_BACKOFF) } else { 0 };
-        if jit.steps[page] >= jit.threshold << backoff && !jit.queued[page] && jit.queue.len() < MAX_QUEUE {
-            jit.queued[page] = true;
-            jit.queue.push(page as u32);
-        }
-        if !jit.queue.is_empty() {
-            jit.waited += steps;
-            if jit.waited >= WAIT || jit.queue.len() >= jit.batch.min(MAX_QUEUE) {
-                self.jit_compile();
+        let shared = self.jits;
+        // (Not atomically: another hart's steps may be lost, now and then.)
+        let total = shared.steps[page].load(Relaxed).saturating_add(steps);
+        shared.steps[page].store(total, Relaxed);
+        if !shared.queued[page].load(Relaxed) {
+            let version = self.code.versions[page].load(Relaxed);
+            let backoff = if shared.compiled_version[page].load(Relaxed) == version {
+                shared.compiles[page].load(Relaxed).min(MAX_BACKOFF)
+            } else {
+                0
+            };
+            if total >= self.jit.threshold << backoff {
+                self.jit_queue(page);
             }
+        }
+        let queued = shared.queue_len.load(Relaxed);
+        if queued == 0 {
+            self.jit.waited = 0;
+        } else {
+            self.jit.waited += steps;
+            if (self.jit.waited >= WAIT || queued as usize >= self.jit.batch.min(MAX_QUEUE)) && shared.try_lock() {
+                self.jit_compile();
+                shared.unlock();
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn jit_queue(&mut self, page: usize) {
+        let shared = self.jits;
+        if shared.try_lock() {
+            // SAFETY: under the lock.
+            let queue = unsafe { &mut *shared.queue.get() };
+            if !shared.queued[page].load(Relaxed) && queue.len() < MAX_QUEUE {
+                shared.queued[page].store(true, Relaxed);
+                queue.push(page as u32);
+                shared.queue_len.store(queue.len() as u32, Relaxed);
+            }
+            shared.unlock();
         }
     }
 
@@ -241,7 +569,7 @@ impl Hart {
     /// block `entry`, for up to `budget` steps.
     #[inline(always)]
     pub(crate) fn run_compiled(&mut self, page: usize, entry: u32, pc: u64, budget: u32) -> u32 {
-        let slot = self.jit.table_base as usize + page;
+        let slot = self.jit_table().base as usize + page;
         // SAFETY: a WebAssembly function pointer is its table index, and the
         // slot holds this page's function, of this type (jit_compile).
         let f: Compiled = unsafe { core::mem::transmute::<usize, Compiled>(slot) };
@@ -261,10 +589,11 @@ impl Hart {
             self.fetch_tags[i] = pc & !0xfff | self.fetch_ctx;
             self.fetch_pages[i] = (pa >> 12) as u32;
         }
+        let slot = self.jit_table().base + page as u32;
         let e = &mut self.chain[(pc >> 1) as usize & (CHAIN_SIZE - 1)];
         e.pc = pc;
         e.ctx = self.chain_ctx;
-        e.slot = self.jit.table_base + page as u32;
+        e.slot = slot;
         e.case = case;
         e.ppn = (pa >> 12) as u32;
     }
@@ -275,26 +604,72 @@ impl Hart {
         self.chain_ctx = self.chain_ctx.wrapping_add(1);
     }
 
-    /// Compile the queued pages.
+    /// `block` (of RAM `page`) isn't known to be in the function of module
+    /// `installed`, now in the page's slot: look it up there (in its case
+    /// list, if that's the page's latest function, of the block's code).
+    #[inline(never)]
+    pub(crate) fn jit_lookup(&self, mut block: Block, page: usize, installed: u32) -> Block {
+        block.module = installed;
+        if block.jit == COMPILED {
+            block.jit = 0;
+        }
+        let shared = self.jits;
+        let function = shared.function[page].load(Acquire);
+        if installed == 0 || function != (installed as u64) << 32 | block.version as u64 {
+            return block;
+        }
+        let cases = shared.cases[page].load(Acquire);
+        let (start, count) = ((cases >> 32) as usize, cases as u32 as usize);
+        let offset = ((block.pa & 0xfff) / 2) as u16;
+        let at = |i: usize| shared.offsets[(start + i) % OFFSETS].load(Relaxed);
+        let (mut low, mut high) = (0, count);
+        while low < high {
+            let mid = (low + high) / 2;
+            if at(mid) < offset {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let found = low < count && at(low) == offset;
+        // (Still the list read: the page's function is the same, and its list wasn't overwritten.)
+        fence(SeqCst);
+        if found && shared.function[page].load(SeqCst) == function && shared.floor.load(SeqCst) <= installed {
+            block.jit = COMPILED;
+            block.entry = low as u32;
+        }
+        block
+    }
+
+    /// Compile the queued pages (holding the lock): into a module, which is
+    /// installed in this hart's table, and published for the others.
     #[inline(never)]
     fn jit_compile(&mut self) {
-        let mut queue = core::mem::take(&mut self.jit.queue);
+        // The table first has every module so far (they're installed in order).
+        self.jit_sync();
+        let shared = self.jits;
+        let module = shared.modules.load(Relaxed) + 1;
+        // SAFETY: under the lock.
+        let queue = unsafe { &mut *shared.queue.get() };
+        shared.make_room(module);
         let mut bodies = core::mem::take(&mut self.jit.bodies);
         let mut function = core::mem::take(&mut self.jit.function);
         bodies.clear();
         self.jit.slots.clear();
+        self.jit.pages.clear();
+        self.jit.lists.clear();
         self.jit.pending.clear();
+        let base = self.jit_table().base;
         let mut taken = 0;
-        for &page in &queue {
+        for &page in queue.iter() {
             if bodies.len() > MAX_MODULE || self.jit.pending.len() + 2048 > MAX_PENDING {
                 break; // the rest next time
             }
             taken += 1;
-            self.jit.queued[page as usize] = false;
-            self.jit.steps[page as usize] = 0;
-            if !self.collect_cases(page as usize) {
-                continue;
-            }
+            let page = page as usize;
+            shared.queued[page].store(false, Relaxed);
+            shared.steps[page].store(0, Relaxed);
+            let Some(version) = self.collect_cases(page) else { continue };
             function.clear();
             let emitter = Emitter::new(self, &mut function);
             if !emitter.page(self) {
@@ -302,55 +677,85 @@ impl Hart {
             }
             uleb(&mut bodies, function.len() as u64);
             bodies.extend_from_slice(&function);
-            self.jit.slots.push(self.jit.table_base + page);
-            let page = page as usize;
-            let version = self.code.versions[page].load(Relaxed);
-            if self.jit.compiled_version[page] != version {
-                self.jit.compiles[page] = 0; // new code
-            }
-            self.jit.compiles[page] = self.jit.compiles[page].saturating_add(1);
-            self.jit.compiled_version[page] = version;
+            self.jit.slots.push(base + page as u32);
+            self.jit.pages.push(page as u32);
+            let start = shared.offsets_for(self.jit.cases.len());
             for (case, &index) in self.jit.cases.iter().enumerate() {
-                self.jit.pending.push((index, case as u32));
+                let pa = self.blocks[index as usize].pa;
+                shared.offsets[start + case].store((pa & 0xfff) as u16 / 2, Relaxed);
+                self.jit.pending.push((index, case as u32, pa));
             }
+            self.jit.lists.push((start as u32, self.jit.cases.len() as u32, version));
+            if shared.compiled_version[page].load(Relaxed) != version {
+                shared.compiles[page].store(0, Relaxed); // new code
+            }
+            shared.compiles[page].store(shared.compiles[page].load(Relaxed).saturating_add(1), Relaxed);
+            shared.compiled_version[page].store(version, Relaxed);
         }
         queue.drain(..taken);
-        self.jit.queue = queue;
+        shared.queue_len.store(queue.len() as u32, Relaxed);
         self.jit.waited = 0;
         self.jit.function = function;
 
         let count = self.jit.slots.len();
         if count > 0 {
-            let mut module = core::mem::take(&mut self.jit.module);
-            build_module(&mut module, &bodies, count);
-            // SAFETY: an import implemented in JavaScript; it only reads the buffers.
-            let ok = unsafe { jit_install(module.as_ptr(), module.len() as u32, self.jit.slots.as_ptr(), count as u32) } != 0;
-            self.jit.module = module;
+            let mut code = core::mem::take(&mut self.jit.module);
+            build_module(&mut code, &bodies, count);
+            // SAFETY: imports implemented in JavaScript; they only read the buffers.
+            let ok = unsafe {
+                jit_load(code.as_ptr(), code.len() as u32);
+                jit_install(self.jit.slots.as_ptr(), count as u32)
+            } != 0;
             if ok {
-                for &(index, case) in &self.jit.pending {
+                let table = self.jit_table_mut();
+                for &page in &self.jit.pages {
+                    table.slot_module[page as usize] = module;
+                }
+                table.installed = module;
+                table.epoch = table.epoch.wrapping_add(1);
+                shared.publish(module, &self.jit.pages, &self.jit.lists, &code);
+                for &(index, case, pa) in &self.jit.pending {
                     let block = &mut self.blocks[index as usize];
+                    if block.pa != pa {
+                        continue; // (replaced by one decoded for a later page)
+                    }
                     block.jit = COMPILED;
                     block.entry = case;
+                    block.module = module;
                 }
                 self.forget_chains(); // (pages compiled again have new cases)
+                self.jit.table_epoch = self.jit_table().epoch;
             } else {
                 self.jit.enabled = false;
             }
+            self.jit.module = code;
         }
         self.jit.bodies = bodies;
     }
 
-    /// The blocks of RAM `page` (those still current; hot or not) into
-    /// `jit.cases`, by address, with `jit.case_at`, and how much of each
-    /// to compile into `jit.lengths`: up to where another one starts (which
-    /// then goes on), so each instruction is compiled once. Those beyond the
-    /// limit are left out. Returns whether there are any.
-    fn collect_cases(&mut self, page: usize) -> bool {
+    /// The blocks of RAM `page` of its current code (hot or not; this hart's,
+    /// and those of its latest function, if that's of the same code) into
+    /// `jit.cases`, by address, with `jit.case_at`, and how much of each to
+    /// compile into `jit.lengths`: up to where another one starts (which then
+    /// goes on), so each instruction is compiled once. Those beyond the limit
+    /// are left out. Returns the code's version, if there are any.
+    fn collect_cases(&mut self, page: usize) -> Option<u32> {
         self.jit.cases.clear();
         self.jit.case_at.fill(0);
         let version = self.code.versions[page].load(Relaxed);
-        let lines = self.code.lines[page].load(Relaxed);
         let page_pa = self.ram_base + ((page as u64) << 12);
+        // Those of the latest function (perhaps another hart's) this hart
+        // doesn't have: decoded now.
+        let shared = self.jits;
+        let function = shared.function[page].load(Relaxed);
+        if function as u32 == version && (function >> 32) as u32 >= shared.floor.load(Relaxed) && function != 0 {
+            let cases = shared.cases[page].load(Relaxed);
+            for i in 0..cases as u32 as usize {
+                let offset = shared.offsets[((cases >> 32) as usize + i) % OFFSETS].load(Relaxed) as u64 * 2;
+                self.jit_decode(page_pa + offset);
+            }
+        }
+        let lines = self.code.lines[page].load(Relaxed);
         for line in 0..64 {
             if lines & 1 << line == 0 {
                 continue;
@@ -380,7 +785,7 @@ impl Hart {
             self.jit.cases.truncate(keep);
             self.case_lengths();
         }
-        !self.jit.cases.is_empty()
+        (!self.jit.cases.is_empty()).then_some(version)
     }
 
     /// `jit.lengths` for `jit.cases`; returns their sum.
@@ -404,15 +809,15 @@ impl Hart {
         total
     }
 
-    /// An instruction that compiled code hands to the interpreter:
-    /// `ops[index]` at `pc`, with `retired` already counting the
+    /// An instruction that compiled code hands to the interpreter: `op` (as
+    /// `Op::pack` made it) at `pc`, with `retired` already counting the
     /// instructions before it. Returns 0 to go on with the next instruction;
     /// otherwise pc and retired are updated, and it's 2 to go on at pc
     /// (after a jump or a trap), 1 to return to `run()`: a device stopped
     /// the CPU or raised an interrupt, the hart waits for one, or code was
     /// written.
-    pub(crate) fn jit_op(&mut self, index: u32, pc: u64) -> u32 {
-        let op = self.ops[index as usize];
+    pub(crate) fn jit_op(&mut self, a: u64, b: u64, pc: u64) -> u32 {
+        let op = Op::unpack(a, b);
         let next = pc.wrapping_add(op.len as u64);
         let addr = self.x[op.rs1 as usize].wrapping_add(op.imm as i64 as u64);
         let result = self.execute_op(&op, pc, next);
@@ -546,10 +951,10 @@ fn build_module(out: &mut Vec<u8>, bodies: &[u8], count: usize) {
     out.clear();
     out.extend_from_slice(b"\0asm\x01\0\0\0");
     // Types: 0 = (i32 hart, i64 page, i32 entry, i32 budget, i32 steps,
-    // i64 base) -> i32 steps, the pages (Compiled); 1 = (i32 hart, i32
-    // index, i64 pc) -> i32, jit_op.
+    // i64 base) -> i32 steps, the pages (Compiled); 1 = (i32 hart, i64 op,
+    // i64 op, i64 pc) -> i32, jit_op.
     let s = begin_section(out, 1);
-    out.extend_from_slice(&[2, 0x60, 6, I32, I64, I32, I32, I32, I64, 1, I32, 0x60, 3, I32, I32, I64, 1, I32]);
+    out.extend_from_slice(&[2, 0x60, 6, I32, I64, I32, I32, I32, I64, 1, I32, 0x60, 4, I32, I64, I64, I64, 1, I32]);
     end_section(out, s);
     let s = begin_section(out, 2);
     // (The memory is shared: limits 0 to 4 GiB, 65536 pages.)
@@ -726,23 +1131,26 @@ struct Emitter<'a> {
     chain: u32,
     exit: u32,
     helper_exit: u32,
-    // Where things are in linear memory.
+    // Where the hart's things are, from its start (so that the code works
+    // for any hart: the parameter HART)...
     x: u32,
     pc: u32,
     retired: u32,
     ctx: u32,
     tlb: u32,
-    chains: u32,
+    chain_base: u32,
     chain_ctx: u32,
     fetch_tags: u32,
     fetch_pages: u32,
     fetch_ctx: u32,
+    // ...and the RAM's, in linear memory.
     ram: u32,
     code_lines: u32,
 }
 
 impl<'a> Emitter<'a> {
     fn new(hart: &Hart, out: &'a mut Vec<u8>) -> Emitter<'a> {
+        let at = |field: *const u64| field as u32 - hart as *const Hart as u32;
         Emitter {
             out,
             loaded: 0,
@@ -753,16 +1161,16 @@ impl<'a> Emitter<'a> {
             chain: 0,
             exit: 0,
             helper_exit: 0,
-            x: hart.x.as_ptr() as u32,
-            pc: &hart.pc as *const u64 as u32,
-            retired: &hart.retired as *const u64 as u32,
-            ctx: &hart.jit_ctx as *const u64 as u32,
-            tlb: hart.jit_tlb.as_ptr() as u32,
-            chains: hart.chain.as_ptr() as u32,
-            chain_ctx: &hart.chain_ctx as *const u64 as u32,
-            fetch_tags: hart.fetch_tags.as_ptr() as u32,
-            fetch_pages: hart.fetch_pages.as_ptr() as u32,
-            fetch_ctx: &hart.fetch_ctx as *const u64 as u32,
+            x: at(hart.x.as_ptr()),
+            pc: at(&hart.pc),
+            retired: at(&hart.retired),
+            ctx: at(&hart.jit_ctx),
+            tlb: at(hart.jit_tlb.as_ptr().cast()),
+            chain_base: at((&hart.chain_base as *const u32).cast()),
+            chain_ctx: at(&hart.chain_ctx),
+            fetch_tags: at(hart.fetch_tags.as_ptr()),
+            fetch_pages: at(hart.fetch_pages.as_ptr().cast()),
+            fetch_ctx: at(&hart.fetch_ctx),
             ram: hart.ram as u32,
             code_lines: hart.code.lines.as_ptr() as u32,
         }
@@ -785,6 +1193,11 @@ impl<'a> Emitter<'a> {
     fn local(&mut self, opcode: u8, local: u32) {
         self.o(opcode);
         uleb(self.out, local as u64);
+    }
+
+    /// Push the hart (where its things are from).
+    fn hart(&mut self) {
+        self.local(LOCAL_GET, HART);
     }
 
     /// A load or store at a fixed address (or that plus the address on the stack).
@@ -820,7 +1233,7 @@ impl<'a> Emitter<'a> {
         } else if self.loaded & 1 << r != 0 {
             self.local(LOCAL_GET, X + r);
         } else {
-            self.i32c(0);
+            self.hart();
             self.mem(I64_LOAD, self.x + 8 * r);
             self.local(LOCAL_TEE, X + r);
             self.loaded |= 1 << r;
@@ -829,7 +1242,7 @@ impl<'a> Emitter<'a> {
 
     /// Load x[r] into its local.
     fn preload(&mut self, r: u32) {
-        self.i32c(0);
+        self.hart();
         self.mem(I64_LOAD, self.x + 8 * r);
         self.local(LOCAL_SET, X + r);
         self.loaded |= 1 << r;
@@ -851,7 +1264,7 @@ impl<'a> Emitter<'a> {
     fn flush(&mut self) {
         for r in 1..32 {
             if self.dirty & 1 << r != 0 {
-                self.i32c(0);
+                self.hart();
                 self.local(LOCAL_GET, X + r);
                 self.mem(I64_STORE, self.x + 8 * r);
             }
@@ -876,7 +1289,7 @@ impl<'a> Emitter<'a> {
 
     /// retired = the count on entry + steps so far + `more`.
     fn set_retired(&mut self, more: u32) {
-        self.i32c(0);
+        self.hart();
         self.local(LOCAL_GET, BASE);
         self.local(LOCAL_GET, STEPS);
         self.o(I64_EXTEND_I32_U);
@@ -932,18 +1345,20 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Run instruction `k` of a block (`ops[index]`, at `offset` in the
-    /// page) through jit_op; leave the function if that says so (ENTRY:
-    /// what it said).
-    fn interpret(&mut self, k: u32, index: u32, offset: i64, op: &Op) {
+    /// Run instruction `k` of a block (`op`, at `offset` in the page)
+    /// through jit_op; leave the function if that says so (ENTRY: what it
+    /// said).
+    fn interpret(&mut self, k: u32, offset: i64, op: &Op) {
         // jit_op works on the registers in memory, and the function may end
         // there: write them all back.
         let (_, writes) = registers(op);
         self.flush();
         self.dirty = 0;
         self.set_retired(k);
-        self.local(LOCAL_GET, HART);
-        self.i32c(index as i32);
+        let (a, b) = op.pack();
+        self.hart();
+        self.i64c(a as i64);
+        self.i64c(b as i64);
         self.pc_at(offset);
         self.o(CALL);
         self.o(0); // the import
@@ -957,9 +1372,9 @@ impl<'a> Emitter<'a> {
 
     /// The slow path of a load or store: like `interpret`, but inside one
     /// arm of an `if`, so the registers' state after it is the other arm's.
-    fn slow_path(&mut self, k: u32, index: u32, offset: i64, op: &Op) {
+    fn slow_path(&mut self, k: u32, offset: i64, op: &Op) {
         let (loaded, dirty) = (self.loaded, self.dirty);
-        self.interpret(k, index, offset, op);
+        self.interpret(k, offset, op);
         (self.loaded, self.dirty) = (loaded, dirty);
     }
 
@@ -978,6 +1393,8 @@ impl<'a> Emitter<'a> {
         self.o(I32_WRAP_I64);
         self.i32c(((TLB_SIZE - 1) << 5) as i32);
         self.o(I32_AND);
+        self.hart();
+        self.o(I32_ADD);
         self.local(LOCAL_TEE, ENTRY);
         self.mem(I64_LOAD, self.tlb + if store { 8 } else { 0 });
         // The tag: the page of the access's last byte (so one that crosses
@@ -1003,25 +1420,25 @@ impl<'a> Emitter<'a> {
         self.o(I32_ADD);
     }
 
-    fn load(&mut self, k: u32, index: u32, offset: i64, op: &Op, width: i64, opcode: u8) {
+    fn load(&mut self, k: u32, offset: i64, op: &Op, width: i64, opcode: u8) {
         self.tlb_lookup(op, width, false);
         self.open(IF, I64);
         self.host_address();
         self.mem(opcode, 0);
         self.o(ELSE);
-        self.slow_path(k, index, offset, op);
+        self.slow_path(k, offset, op);
         let rd = op.rd as u32;
         if rd == SINK as u32 {
             self.i64c(0);
         } else {
-            self.i32c(0);
+            self.hart();
             self.mem(I64_LOAD, self.x + 8 * rd);
         }
         self.close();
         self.set_reg(rd);
     }
 
-    fn store(&mut self, k: u32, index: u32, offset: i64, op: &Op, width: i64, opcode: u8) {
+    fn store(&mut self, k: u32, offset: i64, op: &Op, width: i64, opcode: u8) {
         self.reg(op.rs2 as u32);
         self.local(LOCAL_SET, B);
         self.tlb_lookup(op, width, true);
@@ -1045,7 +1462,7 @@ impl<'a> Emitter<'a> {
         self.local(LOCAL_GET, B);
         self.mem(opcode, 0);
         self.o(ELSE);
-        self.slow_path(k, index, offset, op);
+        self.slow_path(k, offset, op);
         self.close();
     }
 
@@ -1176,7 +1593,7 @@ impl<'a> Emitter<'a> {
         let n = cases.len() as u32;
         // Locals: 36 i64 (x1..x31, ADDR, A, B, CTX, PC_OUT), 3 i32 (ENTRY, FETCH, HOST).
         self.out.extend_from_slice(&[2, 36, I64, 3, I32]);
-        self.i32c(0);
+        self.hart();
         self.mem(I64_LOAD, self.ctx);
         self.local(LOCAL_SET, CTX);
 
@@ -1236,7 +1653,7 @@ impl<'a> Emitter<'a> {
                     return false;
                 }
                 let op = hart.ops[(block.start + k) as usize];
-                ended = self.op(k, block.start + k, offset, &op, case_at);
+                ended = self.op(k, offset, &op, case_at);
                 offset += op.len as i64;
                 if ended {
                     break;
@@ -1270,10 +1687,10 @@ impl<'a> Emitter<'a> {
         self.close();
         // Go on at pc (counting from the retired count jit_op left: a trap
         // isn't an instruction retired, but it's a step).
-        self.i32c(0);
+        self.hart();
         self.mem(I64_LOAD, self.pc);
         self.local(LOCAL_SET, PC_OUT);
-        self.i32c(0);
+        self.hart();
         self.mem(I64_LOAD, self.retired);
         self.local(LOCAL_GET, STEPS);
         self.o(I64_EXTEND_I32_U);
@@ -1282,7 +1699,7 @@ impl<'a> Emitter<'a> {
         self.close(); // chain: (registers written back)
         self.chain_lookup();
         self.close(); // exit: (registers written back)
-        self.i32c(0);
+        self.hart();
         self.local(LOCAL_GET, PC_OUT);
         self.mem(I64_STORE, self.pc);
         self.set_retired(0);
@@ -1302,13 +1719,16 @@ impl<'a> Emitter<'a> {
         self.o(I32_SHL);
         self.i32c(((CHAIN_SIZE - 1) << 5) as i32);
         self.o(I32_AND);
+        self.hart();
+        self.mem(I32_LOAD, self.chain_base);
+        self.o(I32_ADD);
         self.local(LOCAL_TEE, ENTRY);
-        self.mem(I64_LOAD, self.chains);
+        self.mem(I64_LOAD, 0);
         self.local(LOCAL_GET, PC_OUT);
         self.o(I64_EQ);
         self.local(LOCAL_GET, ENTRY);
-        self.mem(I64_LOAD, self.chains + 8);
-        self.i32c(0);
+        self.mem(I64_LOAD, 8);
+        self.hart();
         self.mem(I64_LOAD, self.chain_ctx);
         self.o(I64_EQ);
         self.o(I32_AND);
@@ -1320,11 +1740,13 @@ impl<'a> Emitter<'a> {
         self.i32c(((FETCH_CACHE - 1) << 3) as i32);
         self.o(I32_AND);
         self.local(LOCAL_TEE, FETCH);
+        self.hart();
+        self.o(I32_ADD);
         self.mem(I64_LOAD, self.fetch_tags);
         self.local(LOCAL_GET, PC_OUT);
         self.i64c(!0xfff);
         self.o(I64_AND);
-        self.i32c(0);
+        self.hart();
         self.mem(I64_LOAD, self.fetch_ctx);
         self.o(I64_OR);
         self.o(I64_EQ);
@@ -1332,9 +1754,11 @@ impl<'a> Emitter<'a> {
         self.local(LOCAL_GET, FETCH);
         self.i32c(1);
         self.o(I32_SHR_U);
+        self.hart();
+        self.o(I32_ADD);
         self.mem(I32_LOAD, self.fetch_pages);
         self.local(LOCAL_GET, ENTRY);
-        self.mem(I32_LOAD, self.chains + 24);
+        self.mem(I32_LOAD, 24);
         self.o(I32_EQ);
         self.o(I32_AND);
         self.open(IF, EMPTY);
@@ -1343,12 +1767,12 @@ impl<'a> Emitter<'a> {
         self.i64c(!0xfff);
         self.o(I64_AND);
         self.local(LOCAL_GET, ENTRY);
-        self.mem(I32_LOAD, self.chains + 20);
+        self.mem(I32_LOAD, 20);
         self.local(LOCAL_GET, BUDGET);
         self.local(LOCAL_GET, STEPS);
         self.local(LOCAL_GET, BASE);
         self.local(LOCAL_GET, ENTRY);
-        self.mem(I32_LOAD, self.chains + 16);
+        self.mem(I32_LOAD, 16);
         self.o(RETURN_CALL_INDIRECT);
         self.o(0); // the type: Compiled
         self.o(0); // the table
@@ -1356,7 +1780,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Instruction `k` of a block; returns whether it ends the block.
-    fn op(&mut self, k: u32, index: u32, offset: i64, op: &Op, case_at: &[u16]) -> bool {
+    fn op(&mut self, k: u32, offset: i64, op: &Op, case_at: &[u16]) -> bool {
         use Kind::*;
         let next = offset + op.len as i64;
         match op.kind {
@@ -1407,17 +1831,17 @@ impl<'a> Emitter<'a> {
             Divuw => self.divide(op, I32_DIV_U, true, Some(-1), false),
             Remw => self.divide(op, I32_REM_S, true, None, true),
             Remuw => self.divide(op, I32_REM_U, true, None, false),
-            Lb => self.load(k, index, offset, op, 1, 0x30),
-            Lbu => self.load(k, index, offset, op, 1, 0x31),
-            Lh => self.load(k, index, offset, op, 2, 0x32),
-            Lhu => self.load(k, index, offset, op, 2, 0x33),
-            Lw => self.load(k, index, offset, op, 4, 0x34),
-            Lwu => self.load(k, index, offset, op, 4, 0x35),
-            Ld => self.load(k, index, offset, op, 8, I64_LOAD),
-            Sb => self.store(k, index, offset, op, 1, 0x3c),
-            Sh => self.store(k, index, offset, op, 2, 0x3d),
-            Sw => self.store(k, index, offset, op, 4, 0x3e),
-            Sd => self.store(k, index, offset, op, 8, I64_STORE),
+            Lb => self.load(k, offset, op, 1, 0x30),
+            Lbu => self.load(k, offset, op, 1, 0x31),
+            Lh => self.load(k, offset, op, 2, 0x32),
+            Lhu => self.load(k, offset, op, 2, 0x33),
+            Lw => self.load(k, offset, op, 4, 0x34),
+            Lwu => self.load(k, offset, op, 4, 0x35),
+            Ld => self.load(k, offset, op, 8, I64_LOAD),
+            Sb => self.store(k, offset, op, 1, 0x3c),
+            Sh => self.store(k, offset, op, 2, 0x3d),
+            Sw => self.store(k, offset, op, 4, 0x3e),
+            Sd => self.store(k, offset, op, 8, I64_STORE),
             Beq => self.branch(k, offset, op, I64_EQ, case_at),
             Bne => self.branch(k, offset, op, I64_NE, case_at),
             Blt => self.branch(k, offset, op, I64_LT_S, case_at),
@@ -1445,12 +1869,12 @@ impl<'a> Emitter<'a> {
                 return true;
             }
             // Through the interpreter, continuing.
-            Mulh | Mulhsu | Mulhu | Execute => self.interpret(k, index, offset, op),
+            Mulh | Mulhsu | Mulhu | Execute => self.interpret(k, offset, op),
             // Through the interpreter, then on through the chain cache:
             // these can change privilege, translation (which the function
             // assumes doesn't change), interrupts (jit_op leaves for those).
             ExecuteEnd | Illegal => {
-                self.interpret(k, index, offset, op);
+                self.interpret(k, offset, op);
                 self.add_steps(k + 1);
                 self.pc_at(next);
                 self.exit_to_stack(true);

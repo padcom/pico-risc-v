@@ -52,9 +52,12 @@ pub struct Block {
     pub(crate) start: u32,
     pub(crate) count: u32,
     /// How often it ran (up to 65535), or jit::COMPILED: then it's case
-    /// `entry` of its page's function.
+    /// `entry` of its page's function...
     pub(crate) jit: u32,
     pub(crate) entry: u32,
+    /// ...the one from this module (jit.rs), as long as that's the one in
+    /// the hart's table: this is the module it was last looked up in.
+    pub(crate) module: u32,
 }
 
 /// What's known about code in RAM, shared by all harts: per page, which of
@@ -102,16 +105,18 @@ impl Code {
         self.epoch.fetch_add(1, Relaxed);
     }
 
-    /// Forget all code (RAM was reloaded).
+    /// Forget all code (RAM was reloaded): new versions of every page (what
+    /// was compiled from them is of the old code).
     pub fn clear(&self) {
-        for line in &self.lines {
+        for (line, version) in self.lines.iter().zip(&self.versions) {
             line.store(0, Relaxed);
+            version.fetch_add(1, Relaxed);
         }
         self.epoch.fetch_add(1, Relaxed);
     }
 }
 
-pub const EMPTY_BLOCK: Block = Block { pa: 0, version: 0, start: 0, count: 0, jit: 0, entry: 0 };
+pub const EMPTY_BLOCK: Block = Block { pa: 0, version: 0, start: 0, count: 0, jit: 0, entry: 0, module: 0 };
 
 /// A decoded instruction.
 #[derive(Clone, Copy)]
@@ -132,6 +137,22 @@ pub struct Op {
     pub(crate) imm: i32,
     /// The 32-bit instruction (expanded, if compressed), for `Execute`.
     inst: u32,
+}
+
+impl Op {
+    /// As two words, for compiled code to hand to `jit_op` (`unpack`).
+    pub(crate) fn pack(&self) -> (u64, u64) {
+        let a = self.kind as u64 | (self.rd as u64) << 8 | (self.rs1 as u64) << 16 | (self.rs2 as u64) << 24;
+        let a = a | (self.len as u64) << 32 | (self.sync as u64) << 40;
+        (a, self.imm as u32 as u64 | (self.inst as u64) << 32)
+    }
+
+    pub(crate) fn unpack(a: u64, b: u64) -> Op {
+        // SAFETY: from `pack`: a Kind's value (Kind is repr(u8)).
+        let kind = unsafe { core::mem::transmute::<u8, Kind>(a as u8) };
+        let (rd, rs1, rs2, len) = ((a >> 8) as u8, (a >> 16) as u8, (a >> 24) as u8, (a >> 32) as u8);
+        Op { kind, rd, rs1, rs2, len, sync: a >> 40 & 1 != 0, imm: b as u32 as i32, inst: (b >> 32) as u32 }
+    }
 }
 
 pub const NO_OP: Op = Op { kind: Kind::Execute, rd: 0, rs1: 0, rs2: 0, len: 0, sync: true, imm: 0, inst: 0 };
@@ -299,7 +320,6 @@ impl Hart {
     pub(crate) fn flush_blocks(&mut self) {
         self.blocks.fill(EMPTY_BLOCK);
         self.ops_used = 0;
-        self.forget_chains(); // (compiled code refers to ops)
     }
 
     /// RAM at `offset..offset + len` (offsets into RAM) has been written: retire
@@ -363,10 +383,18 @@ impl Hart {
                 None => return 0,
             }
         }
-        let block = self.blocks[index];
-        if block.jit == COMPILED {
-            self.chain_to(pc, pa, page, block.entry);
-            return self.run_compiled(page, block.entry, pc, budget);
+        let mut block = self.blocks[index];
+        if self.jit.enabled {
+            let installed = self.jit_table().slot_module[page];
+            if block.module != installed {
+                // A new function for the page here: is the block in it?
+                block = self.jit_lookup(block, page, installed);
+                self.blocks[index] = block;
+            }
+            if block.jit == COMPILED {
+                self.chain_to(pc, pa, page, block.entry);
+                return self.run_compiled(page, block.entry, pc, budget);
+            }
         }
         // (How often it ran: which block of a set to replace, see victim().)
         self.blocks[index].jit = (block.jit + 1).min(u16::MAX as u32);
@@ -375,6 +403,24 @@ impl Hart {
             self.jit_account(page, n);
         }
         n
+    }
+
+    /// Have the block at physical `pa` (in RAM) in the cache, decoded from
+    /// its page's current code (for the JIT: blocks of another hart's).
+    pub(crate) fn jit_decode(&mut self, pa: u64) {
+        let offset = pa - self.ram_base;
+        let version = self.code.versions[(offset >> 12) as usize].load(Relaxed);
+        let index = match self.find_block(pa) {
+            Some(index) if self.blocks[index].version == version => return,
+            Some(index) => index,
+            None => self.victim(Self::block_set(pa)),
+        };
+        // (Not when the ops are used up: starting over drops the blocks being compiled.)
+        if self.ops_used + MAX_BLOCK <= self.ops.len() {
+            if let Some(block) = self.decode_block(pa, offset) {
+                self.blocks[index] = block;
+            }
+        }
     }
 
     /// The first of the blocks (`WAYS` of them) where the block at `pa` may be.
@@ -439,7 +485,7 @@ impl Hart {
         if count == 0 {
             return None;
         }
-        Some(Block { pa, version, start: start as u32, count: count as u32, jit: 0, entry: 0 })
+        Some(Block { pa, version, start: start as u32, count: count as u32, jit: 0, entry: 0, module: 0 })
     }
 
     /// Run a block: like `step()` for each instruction, minus fetching,

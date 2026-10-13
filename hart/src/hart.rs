@@ -6,7 +6,7 @@
 //! medeleg/mideleg (sepc/scause/stval, stvec).
 
 use crate::blocks::{Block, Code, FETCH_CACHE, NO_CODE, Op};
-use crate::jit::{ChainEntry, JIT_TLB_EMPTY, Jit, JitTlbEntry};
+use crate::jit::{ChainEntry, JIT_TLB_EMPTY, Jit, JitShared, JitTlbEntry, NO_JIT};
 use crate::csr::*;
 use crate::memory::Access;
 use crate::mmu::{DATA_LOAD_OK, DATA_STORE_OK, Paging, TLB_EMPTY, TLB_SIZE};
@@ -176,10 +176,14 @@ pub struct Hart {
     pub(crate) jit_tlb: [JitTlbEntry; TLB_SIZE],
     pub(crate) jit_ctx: u64,
     pub(crate) jit: Jit,
+    /// What the harts share about compiled code (jit.rs).
+    pub(crate) jits: &'static JitShared,
     /// Where compiled code finds the compiled code for a pc it jumps to
-    /// (jit.rs), and the context its entries are tagged with (an epoch
-    /// bumped when compiled code changes).
+    /// (jit.rs; `chain_base`: where it is in linear memory), and the context
+    /// its entries are tagged with (an epoch bumped when compiled code
+    /// changes).
     pub(crate) chain: Vec<ChainEntry>,
+    pub(crate) chain_base: u32,
     pub(crate) chain_ctx: u64,
 
     // The decoded-instruction cache (blocks.rs), set up with the RAM.
@@ -252,7 +256,9 @@ impl Hart {
             megapages: [0; 64],
             jit_ctx: 0,
             jit: Jit::new(),
+            jits: &NO_JIT,
             chain: Vec::new(),
+            chain_base: 0,
             chain_ctx: 1,
             blocks: Vec::new(),
             ops: Vec::new(),
@@ -323,6 +329,9 @@ impl Hart {
     /// of the ones around them into many short pieces.)
     pub fn run(&mut self, max_steps: u32) -> u32 {
         self.stop_reason = 0;
+        if self.jit.enabled {
+            self.jit_catch_up();
+        }
         let mut remaining = max_steps;
         while remaining > 0 {
             if self.waiting && self.pending() == 0 {

@@ -130,7 +130,7 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
         await page.goto(url)
         await until('alpine:~# ')
         expect(await disk()).toBe('disk: changes kept in this browser · start over')
-        await page.keyboard.type('echo "kept-$((6*7))" > /root/note.txt; sync; echo synced-1\n')
+        await page.keyboard.type('echo "kept-$((6*7))" > /root/note.txt; sync; echo synced-$((0+1))\n')
         await until('synced-1\r\n')
         await new Promise(resolve => setTimeout(resolve, 3000)) // (saved within 2 s)
 
@@ -142,7 +142,7 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
         // Start over: confirmed, it reloads.
         await Promise.all([page.waitForEvent('framenavigated'), page.click('#disk a')])
         await until('alpine:~# ')
-        await page.keyboard.type('ls /root/note.txt; echo listed-1\n')
+        await page.keyboard.type('ls /root/note.txt; echo listed-$((0+1))\n')
         await until('listed-1\r\n')
         expect(await output()).toContain('No such file')
       } finally {

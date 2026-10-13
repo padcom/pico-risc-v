@@ -74,8 +74,9 @@ interface Core {
   set_interrupt_pending(hart: number, bit: number, pending: number): void
   instret(hart: number): number
   jit_slots(): number
-  jit_init(hart: number, tableBase: number, threshold: number, batch: number): void
-  jit_op(hart: number, index: number, pc: bigint): number
+  jit_table_new(thread: number): number
+  jit_init(hart: number, table: number, tableBase: number, threshold: number, batch: number): void
+  jit_op(hart: number, a: bigint, b: bigint, pc: bigint): number
   __indirect_function_table: WebAssembly.Table
   __stack_pointer: WebAssembly.Global
   get(hart: number, field: number): bigint
@@ -97,6 +98,8 @@ export interface HartThread {
   hart: number
   stackTop: number
   jit: false | { threshold: number; batch: number }
+  /** The JIT's table for the thread's instance (the core's jit_table_new), with jit. */
+  table: number
 }
 
 /** A hart thread's stack. */
@@ -123,6 +126,19 @@ function coreModule(): WebAssembly.Module {
  */
 export function setCoreModule(module: WebAssembly.Module): void {
   compiled = module
+}
+
+/**
+ * Compiled pages (the core's jit.rs): compile `code`, a module of functions
+ * "0", "1", ..., and put them into the core's function table at `slots`
+ * (`count` of them). Returns 1 (the core's "done").
+ */
+function installJit(core: Core, code: Uint8Array<ArrayBuffer>, slots: number, count: number): number {
+  const { memory, jit_op, __indirect_function_table: table } = core
+  const { exports } = new WebAssembly.Instance(new WebAssembly.Module(code), { env: { memory, table, op: jit_op } })
+  const at = new Uint32Array(memory.buffer, slots, count)
+  for (let i = 0; i < count; i++) table.set(at[i]!, exports[i] as () => void)
+  return 1
 }
 
 /**
@@ -154,18 +170,13 @@ function createHarts(bus: Bus, count: number, { resetVector = 0, readTime, break
         return 0
       }, 1),
     read_time: () => readTime?.() ?? 0,
-    // Compiled pages: a module of functions "0", "1", ... (`count` of
-    // them), for the function table at `slots` (the core's jit.rs). They
-    // call each other through the table.
-    jit_install: (code: number, length: number, slots: number, count: number) => {
-      const { memory, jit_op, __indirect_function_table: table } = core
-      const module = new WebAssembly.Module(new Uint8Array(memory.buffer, code, length))
-      const { exports } = new WebAssembly.Instance(module, { env: { memory, table, op: jit_op } })
-      const at = new Uint32Array(memory.buffer, slots, count)
-      for (let i = 0; i < count; i++) table.set(at[i]!, exports[i] as () => void)
-      return 1
+    // Compiled pages (installJit): they call each other through the table.
+    jit_load: (code: number, length: number) => {
+      jitModule = new Uint8Array(core.memory.buffer, code, length).slice()
     },
+    jit_install: (slots: number, count: number) => installJit(core, jitModule, slots, count),
   }
+  let jitModule = new Uint8Array()
   // Shared, so harts can also run on threads of their own (machine.ts).
   const memory = new WebAssembly.Memory({ initial: INITIAL_MEMORY, maximum: MAX_MEMORY, shared: true })
   const exports = new WebAssembly.Instance(coreModule(), { env: { ...env, memory } }).exports
@@ -182,8 +193,10 @@ function createHarts(bus: Bus, count: number, { resetVector = 0, readTime, break
     // functions, which run hot right away: optimize them much sooner.
     v8?.setFlagsFromString('--wasm-tiering-budget=20000')
     const { threshold, batch } = { ...JIT_DEFAULTS, ...jit }
-    // Each hart compiles on its own, into its own slots.
-    for (const ptr of ptrs) core.jit_init(ptr, core.__indirect_function_table.grow(core.jit_slots()), threshold, batch)
+    // The harts share the compiled code: one slot per page.
+    const table = core.jit_table_new(0)
+    const tableBase = core.__indirect_function_table.grow(core.jit_slots())
+    for (const ptr of ptrs) core.jit_init(ptr, table, tableBase, threshold, batch)
   }
   const ramView = ram && new RAM(new Uint8Array(core.memory.buffer, offset, ram.size))
   const jitOptions = ram && jit ? { ...JIT_DEFAULTS, ...jit } : false
@@ -221,6 +234,8 @@ export class CPU {
   private readonly jit: Hart['jit']
   /** The stack for threads running this hart (allocated the first time). */
   private threadStack = 0
+  /** The JIT's table for the threads' instances (allocated the first time). */
+  private threadTable = 0
 
   /**
    * `count` harts (mhartid 0..count-1) sharing one core: its RAM, if
@@ -254,8 +269,9 @@ export class CPU {
    */
   thread(): HartThread {
     this.threadStack ||= this.core.stack_alloc(THREAD_STACK)
+    if (this.jit) this.threadTable ||= this.core.jit_table_new(1)
     const stackTop = this.threadStack + THREAD_STACK
-    return { module: coreModule(), memory: this.core.memory, hart: this.hart, stackTop, jit: this.jit }
+    return { module: coreModule(), memory: this.core.memory, hart: this.hart, stackTop, jit: this.jit, table: this.threadTable }
   }
 
   /**

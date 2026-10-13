@@ -25,6 +25,8 @@ export interface HartThreadData {
   index: number
   stackTop: number
   jit: false | { threshold: number; batch: number }
+  /** The JIT's table for this thread's instance (with jit). */
+  table: number
   /** Int32Array of Control. */
   control: SharedArrayBuffer
   /** Float64Array: the realtime clock's epoch (ms, absolute), mtime's offset from it (µs). */
@@ -67,8 +69,8 @@ interface Core {
   run(hart: number, maxSteps: number): number
   set_interrupt_pending(hart: number, bit: number, pending: number): void
   jit_slots(): number
-  jit_init(hart: number, tableBase: number, threshold: number, batch: number): void
-  jit_op(hart: number, index: number, pc: bigint): number
+  jit_init(hart: number, table: number, tableBase: number, threshold: number, batch: number): void
+  jit_op(hart: number, a: bigint, b: bigint, pc: bigint): number
   __indirect_function_table: WebAssembly.Table
   __stack_pointer: WebAssembly.Global
 }
@@ -161,6 +163,7 @@ function start(data: HartThreadData, post: (message: unknown) => void): never {
   }
 
   const { memory } = data
+  let jitModule = new Uint8Array()
   const env = {
     memory,
     bus_read: (_hart: number, addr: number, width: number) =>
@@ -172,10 +175,13 @@ function start(data: HartThreadData, post: (message: unknown) => void): never {
     },
     // mtime, as the main thread's CLINT has it (machine.ts: now()).
     read_time: mtime,
-    // As in cpu.ts: compiled pages, into this instance's function table.
-    jit_install: (code: number, length: number, slots: number, count: number) => {
-      const module = new WebAssembly.Module(new Uint8Array(memory.buffer, code, length))
-      const { exports } = new WebAssembly.Instance(module, { env: { memory, table, op: core.jit_op } })
+    // As in cpu.ts: compiled pages (this thread's, or other threads' from
+    // the core's log), into this instance's function table.
+    jit_load: (code: number, length: number) => {
+      jitModule = new Uint8Array(memory.buffer, code, length).slice()
+    },
+    jit_install: (slots: number, count: number) => {
+      const { exports } = new WebAssembly.Instance(new WebAssembly.Module(jitModule), { env: { memory, table, op: core.jit_op } })
       const at = new Uint32Array(memory.buffer, slots, count)
       for (let i = 0; i < count; i++) table.set(at[i]!, exports[i] as () => void)
       return 1
@@ -184,7 +190,7 @@ function start(data: HartThreadData, post: (message: unknown) => void): never {
   const core = new WebAssembly.Instance(data.module, { env }).exports as unknown as Core
   const table = core.__indirect_function_table
   core.__stack_pointer.value = data.stackTop
-  if (data.jit) core.jit_init(data.hart, table.grow(core.jit_slots()), data.jit.threshold, data.jit.batch)
+  if (data.jit) core.jit_init(data.hart, data.table, table.grow(core.jit_slots()), data.jit.threshold, data.jit.batch)
 
   for (;;) {
     // (Read before running: a wake-up while it runs isn't missed.)
