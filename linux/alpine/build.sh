@@ -23,7 +23,7 @@
 #
 # Runs in a Podman container (linux/podman.sh, linux/alpine/Containerfile);
 # set NATIVE=1 to run directly on an Alpine host (with bash, curl, cpio,
-# e2fsprogs).
+# e2fsprogs, mkfontscale).
 #
 # Environment:
 #   ALPINE_BRANCH     Alpine's release branch (default v3.24)
@@ -61,7 +61,7 @@ step() { echo; echo "==> $*"; }
 if [ -z "${RISC_EMULATOR_BUILD_CONTAINER:-}" ] && [ "${NATIVE:-}" != 1 ]; then
   exec bash "$ROOT/linux/podman.sh" alpine "$@"
 fi
-for tool in curl apk cpio gzip mkfs.ext4 e2fsck sha256sum; do
+for tool in curl apk cpio gzip mkfs.ext4 e2fsck sha256sum mkfontdir; do
   command -v "$tool" >/dev/null || die "missing $tool"
 done
 
@@ -88,6 +88,10 @@ mapfile -t packages < <(sed 's/#.*//' "$ALPINE_DIR/packages" | tr -s ' \t' '\n' 
 "${APK[@]}" --root opensbi --initdb add opensbi >>apk.log 2>&1 || { cat apk.log; die "apk add opensbi failed"; }
 cp opensbi/usr/share/opensbi/generic/firmware/fw_dynamic.bin .
 kernel_version=$(ls root/lib/modules)
+# X draws on the framebuffer, in software: Mesa's 3D drivers, and LLVM, which
+# X's packages bring along (180 MB, most of the desktop), are never used.
+# (Nor is GLX, X's 3D, which would load them: off in xorg.conf.d.)
+rm -rf root/usr/lib/libLLVM.so.* root/usr/lib/libgallium-*.so root/usr/lib/dri root/usr/lib/gbm
 echo "    ${#packages[@]} packages, $(apk --root root info 2>/dev/null | wc -l) with what they need; kernel $kernel_version"
 
 step "Setting the system up"
@@ -99,6 +103,11 @@ grep -qw /sbin/nlplug-findfs root/etc/mkinitfs/features.d/base.files || echo /sb
 sed -i 's/^root:[^:]*:/root::/' root/etc/shadow
 sed -i 's/^tty[0-9]::/#&/' root/etc/inittab
 echo 'hvc0::respawn:/sbin/getty -n -l /usr/local/sbin/autologin 0 hvc0 vt100' >>root/etc/inittab
+# The screen (tty1), if there is one, too; /etc/profile.d/desktop.sh then
+# starts X there.
+echo 'tty1::respawn:/sbin/getty -n -l /usr/local/sbin/autologin 0 tty1 linux' >>root/etc/inittab
+# X's fonts, indexed (fonts.dir), as their install scripts would.
+for fonts in root/usr/share/fonts/*/; do mkfontdir "$fonts"; done
 for runlevel in "${RUNLEVELS[@]}"; do
   level=${runlevel%%:*}
   for service in ${runlevel#*:}; do
@@ -107,7 +116,7 @@ for runlevel in "${RUNLEVELS[@]}"; do
   done
 done
 cp -a "$ALPINE_DIR/overlay/." root/
-chown -R 0:0 root/etc root/usr/local
+chown -R 0:0 root/etc root/usr/local root/root
 
 step "Making the initramfs"
 modules=root/lib/modules/$kernel_version

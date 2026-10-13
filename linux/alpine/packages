@@ -8,6 +8,21 @@ linux-lts             # the kernel and its modules
 linux-firmware-none   # no firmware: the machine has no hardware that needs any
 e2fsprogs             # checks the root file system at boot
 
+# A desktop on the machine's screen (?display in the page), a light one: X on
+# the framebuffer, the keyboard and the mouse through evdev (devices named in
+# /etc/X11/xorg.conf.d: there's no udev here, which libinput needs), twm and
+# xterm, with X's own fonts. (build.sh leaves out the 3D drivers they bring
+# along.)
+xorg-server
+xf86-video-fbdev
+xf86-input-evdev
+xinit
+twm
+xterm
+font-misc-misc
+font-cursor-misc
+font-alias
+
 # To try things with (there may be no network to apk add more)
 htop
 mc

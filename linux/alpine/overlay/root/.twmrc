@@ -1,0 +1,36 @@
+# twm, light and simple: windows go where they fit, by themselves; X's own
+# fonts. A click on the desktop: a menu.
+RandomPlacement
+NoGrabServer
+DecorateTransients
+TitleFont "-misc-fixed-bold-r-normal--13-*-*-*-*-*-*-*"
+MenuFont "-misc-fixed-medium-r-normal--13-*-*-*-*-*-*-*"
+IconFont "-misc-fixed-medium-r-normal--13-*-*-*-*-*-*-*"
+ResizeFont "-misc-fixed-medium-r-normal--13-*-*-*-*-*-*-*"
+BorderWidth 1
+
+Color {
+    BorderColor "#5f87af"
+    TitleBackground "#5f87af"
+    TitleForeground "white"
+    MenuBackground "#eeeeee"
+    MenuForeground "black"
+    MenuTitleBackground "#5f87af"
+    MenuTitleForeground "white"
+}
+
+Button1 = : root : f.menu "desktop"
+Button3 = : root : f.menu "desktop"
+Button1 = : title : f.move
+Button3 = : title : f.lower
+
+menu "desktop" {
+    "Alpine"    f.title
+    "Terminal"  f.exec "xterm &"
+    "Raise"     f.raise
+    "Lower"     f.lower
+    "Close"     f.delete
+    ""          f.nop
+    "Restart"   f.restart
+    "Exit"      f.quit
+}

@@ -1,3 +1,4 @@
 #!/bin/sh
-# The console (hvc0) logs in as root by itself (/etc/inittab).
+# The console (hvc0), and the screen (tty1), log in as root by themselves
+# (/etc/inittab).
 exec /bin/login -f root

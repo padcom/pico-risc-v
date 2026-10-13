@@ -9,6 +9,12 @@
 #     M-mode, and U-Boot (u-boot-qemu), which runs in S-mode, provides UEFI
 #     and starts GRUB from the disk
 #
+#   - the packages in linux/debian/packages (a desktop: X and Xfce, for the
+#     machine's screen), from Debian's repositories, installed with apt in
+#     Debian itself: the last step boots the disk in the emulator, with the
+#     network (linux/debian/install.ts, on this host: it needs Node.js and
+#     the emulator, which npm run build builds)
+#
 # Booting goes OpenSBI → U-Boot → GRUB → Linux → systemd, as on a RISC-V
 # board; kernel updates from apt take effect like on any Debian machine.
 #
@@ -21,8 +27,9 @@
 #   to use, disk.raw; tests and benchmarks boot this one, unchanged),
 #   fw_dynamic.bin (OpenSBI), u-boot.bin, VERSIONS
 #
-# Runs in a Podman container (linux/podman.sh, linux/debian/Containerfile);
-# set NATIVE=1 to run directly on a Linux host with curl, xz, e2fsprogs,
+# All but the last step run in a Podman container (linux/podman.sh,
+# linux/debian/Containerfile); set NATIVE=1 to run them directly on a Linux
+# host with curl, xz, e2fsprogs,
 # sfdisk, python3 and apt (Debian/Ubuntu).
 #
 # Environment:
@@ -60,8 +67,22 @@ MASKED=(
 die() { echo "error: $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }
 
+# The last step, on this host: the packages, then the fingerprint of what
+# the image was built from (`npm start` rebuilds when it changes; written
+# last, so an unfinished build is rebuilt).
+install_packages() {
+  step "Installing linux/debian/packages in Debian, in the emulator"
+  (cd "$ROOT" && npm run build --silent && node linux/debian/install.ts "$OUT_DIR/pristine.raw")
+  echo "packages: $(sed 's/#.*//' "$DEBIAN_DIR/packages" | xargs)" >>"$OUT_DIR/VERSIONS"
+  bash "$ROOT/linux/inputs-hash.sh" >"$OUT_DIR/.inputs-hash"
+  step "Debian ready in images/debian ($(du -h "$OUT_DIR/pristine.raw" | cut -f1) used of $SIZE):"
+  sed 's/^/    /' "$OUT_DIR/VERSIONS"
+}
+
 if [ -z "${RISC_EMULATOR_BUILD_CONTAINER:-}" ] && [ "${NATIVE:-}" != 1 ]; then
-  exec bash "$ROOT/linux/podman.sh" "$@"
+  bash "$ROOT/linux/podman.sh" "$@"
+  install_packages
+  exit
 fi
 for tool in curl xz debugfs e2fsck sfdisk python3 apt-get dpkg-deb sha512sum; do
   command -v "$tool" >/dev/null || die "missing $tool"
@@ -209,7 +230,6 @@ cp fw_dynamic.bin u-boot.bin VERSIONS "$OUT_DIR/"
 # (Checked again where it landed: the project directory may be a shared folder,
 # e.g. in Podman's VM on macOS.)
 e2fsck -fn "$OUT_DIR/pristine.raw?offset=$offset" >/dev/null || die "images/debian/pristine.raw has errors after copying it there"
-# What this was built from; `npm start` rebuilds when it changes.
-bash "$ROOT/linux/inputs-hash.sh" >"$OUT_DIR/.inputs-hash"
-step "Debian ready in images/debian ($(du -h "$OUT_DIR/pristine.raw" | cut -f1) used of $SIZE):"
-sed 's/^/    /' "$OUT_DIR/VERSIONS"
+# (Built anew: not up to date until the last step is done.)
+rm -f "$OUT_DIR/.inputs-hash"
+if [ "${NATIVE:-}" = 1 ]; then install_packages; fi

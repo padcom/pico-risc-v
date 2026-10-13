@@ -67,7 +67,7 @@ Debian machine; the next boot uses the new one.
 
 `linux/debian/build.sh` (`npm run debian:build`; `npm start` runs it when
 `images/debian/` is missing or anything in `linux/debian/` changed) does it
-in a Podman container, in a few minutes:
+in a Podman container, then in the emulator, in under 10 minutes:
 
 1. Downloads the nocloud image from cloud.debian.org (the latest build of
    Debian 13; about 300 MB) and checks it against Debian's SHA-512
@@ -102,10 +102,17 @@ in a Podman container, in a few minutes:
      hardware database: 24 MB that the kernel unpacks without decompressing
 4. Grows the disk to 8 GB (`DEBIAN_DISK_SIZE`); the root file system grows
    into it on the first boot.
+5. Installs the packages in `linux/debian/packages`, a desktop (X and Xfce,
+   for the machine's screen), with apt in Debian itself: it boots the disk
+   in the emulator, on this machine, with the network (that first boot),
+   and tidies up after apt (its package lists, the logs, the machine id,
+   which each machine then makes its own). About 3 minutes; it needs
+   Node.js and builds the emulator (`npm run build`) first.
+   (`linux/debian/install.ts`.)
 
 The results are in `images/debian/`: `pristine.raw` (the disk as built),
 `fw_dynamic.bin`, `u-boot.bin`, and `VERSIONS`, which says which image and
-packages they came from. The disk is sparse: about 1 GB on your disk.
+packages they came from. The disk is sparse: about 1.7 GB on your disk.
 
 ## The disk
 
@@ -199,14 +206,17 @@ terminal. Debian must have been set up once (`npm start` does it).
 - `?harts=2`, `?memory=512` change the machine; `?image=examples/build/hello.bin`
   boots a bare-metal program instead of Debian.
 - `?display` gives the machine a screen, 1024×768 (`?display=800x600`,
-  another size), shown above the terminal: a framebuffer, as boot firmware
-  leaves one set up, which Linux has as `/dev/fb0`, its own console (`tty1`)
-  on it. Debian gets it from U-Boot, through UEFI (`efifb`); Alpine's kernel
-  from the device tree (`simpledrm`). (GRUB then writes to the screen, not
-  the serial port.) With it come a keyboard and a mouse (virtio input
-  devices, `/dev/input/`): click the screen, and the keys go there, by their
-  place on the keyboard (Linux's keyboard layout says what they type); the
-  mouse is an absolute one, a tablet, so the guest's pointer is where yours is.
+  another size), shown above the terminal, and Debian starts its desktop,
+  Xfce, on it: root is logged in on the screen (`tty1`) by itself, and
+  `startx` runs (in about 15 seconds; closing the session leaves a shell
+  there). The screen is a framebuffer, as boot firmware leaves one set up,
+  which Linux has as `/dev/fb0`: Debian gets it from U-Boot, through UEFI
+  (`efifb`); Alpine's kernel from the device tree (`simpledrm`). (GRUB then
+  writes to the screen, not the serial port.) X draws on it in software:
+  there's no 3D. With it come a keyboard and a mouse (virtio input devices,
+  `/dev/input/`): click the screen, and the keys go there, by their place on
+  the keyboard (Linux's keyboard layout says what they type); the mouse is
+  an absolute one, a tablet, so the guest's pointer is where yours is.
 
 The harts' threads share memory (`SharedArrayBuffer`), which browsers only
 allow on a cross-origin isolated page: the server sends the headers for
@@ -216,7 +226,7 @@ connect.
 ## Alpine Linux, and a static web site: `npm run site`
 
 Besides Debian there's [Alpine Linux](https://alpinelinux.org/), much
-smaller (a 110 MB disk) and quicker to boot (a shell in about 10 seconds),
+smaller (a 140 MB disk) and quicker to boot (a shell in about 10 seconds),
 mainly for the emulator as a static web site, where there's no server to
 read a big disk from or to give the guest a network.
 
@@ -226,7 +236,12 @@ file system for riscv64, with the packages in `linux/alpine/packages` on top
 (to change what's on the disk, edit that list), and Alpine's kernel and
 OpenSBI. There's no bootloader: the emulator starts the kernel itself, with a
 small initramfs made by the build (BusyBox and the modules it takes to mount
-the disk). The console logs in as root by itself.
+the disk). The console logs in as root by itself. With a screen (`?display`)
+Alpine starts a light desktop on it: X with twm and an xterm (a click on the
+desktop opens twm's menu: another terminal, closing windows, quitting X).
+There's no udev, so X is told where the keyboard and the mouse are
+(`/etc/X11/xorg.conf.d`), and Mesa's 3D drivers, which X's packages bring
+along (180 MB, with LLVM), are left out.
 
 - In the page: `npm run web`, then <http://localhost:8080/?distribution=alpine>
   (with the network, as Debian).
@@ -237,7 +252,7 @@ the disk). The console logs in as root by itself.
     --bootargs 'console=ttyS0 root=/dev/vda quiet' --net images/alpine/fw_dynamic.bin
   ```
 
-`npm run site` puts the whole of it in `site/`, about 60 MB, for any plain
+`npm run site` puts the whole of it in `site/`, about 70 MB, for any plain
 web server, GitHub Pages say: the page, the emulator, and Alpine, its disk in
 gzipped 1 MiB chunks (all-zero ones left out), which the page fetches only as
 Alpine reads them. What Alpine writes, the browser keeps, as with `npm run

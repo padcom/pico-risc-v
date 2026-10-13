@@ -1,0 +1,16 @@
+# What linux/debian/build.sh installs into Debian, besides what the cloud
+# image has: with apt, in the emulator (linux/debian/install.ts), without
+# recommended packages (one per line).
+
+# A desktop on the machine's screen (?display in the page): X, on the
+# framebuffer, with the keyboard and the mouse through libinput...
+xserver-xorg-core
+xserver-xorg-video-fbdev
+xserver-xorg-input-libinput
+xinit
+xauth
+# ...and Xfce, with its terminal; startx starts it (x-session-manager)
+xfce4
+xfce4-terminal
+dbus-x11
+fonts-dejavu-core
