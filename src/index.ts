@@ -14,5 +14,6 @@ export { type BlockStorage, MemoryStorage, SnapshotStorage } from './block-stora
 export { Plic } from './plic.js'
 export { type Chain, type GuestMemory, type Segment, Virtqueue, VirtioMmioDevice } from './virtio.js'
 export { VirtioBlock } from './virtio-blk.js'
+export { Input, TABLET_MAX, VirtioInput } from './virtio-input.js'
 export { type NetworkBackend, VirtioNet } from './virtio-net.js'
 export { GoldfishRtc } from './goldfish-rtc.js'

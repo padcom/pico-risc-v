@@ -9,6 +9,8 @@ import { GoldfishRtc } from './goldfish-rtc.js'
 import { Plic } from './plic.js'
 import { VirtioBlock } from './virtio-blk.js'
 import { VirtioConsole } from './virtio-console.js'
+import { Input, TABLET_MAX, VirtioInput } from './virtio-input.js'
+import { LINUX_KEYS } from './keymap.js'
 
 describe('PLIC', () => {
   function plic() {
@@ -363,6 +365,119 @@ describe('virtio console', () => {
     h.offer(0, 0x9000, 16, true) // a receive buffer: the input waiting goes there
     expect([h.used(0).idx, h.used(0).length]).toEqual([1, 2])
     expect(new TextDecoder().decode(h.ram.subarray(0x9000, 0x9002))).toBe('hi')
+  })
+})
+
+describe('virtio input', () => {
+  /** A driver for the event queue (0) and the status queue (1), 4 descriptors each. */
+  function inputHarness(make: typeof VirtioInput.keyboard) {
+    const ram = new Uint8Array(1 << 16)
+    const view = new DataView(ram.buffer)
+    let irq = false
+    const dev = make((addr, length) => ram.subarray(addr, addr + length), high => (irq = high))
+    const queue = (index: number) => ({ desc: 0x1000 + 0x3000 * index, avail: 0x2000 + 0x3000 * index, used: 0x3000 + 0x3000 * index })
+    const avail = [0, 0]
+    /** Set the device up (again), with empty queues. */
+    const init = () => {
+      ram.fill(0)
+      avail.fill(0)
+      dev.write32(0x070, 1 | 2)
+      dev.write32(0x024, 1)
+      dev.write32(0x020, 1) // VIRTIO_F_VERSION_1
+      dev.write32(0x070, 1 | 2 | 8)
+      for (const index of [0, 1]) {
+        const q = queue(index)
+        dev.write32(0x030, index)
+        dev.write32(0x038, 4)
+        dev.write32(0x080, q.desc)
+        dev.write32(0x090, q.avail)
+        dev.write32(0x0a0, q.used)
+        dev.write32(0x044, 1)
+      }
+      dev.write32(0x070, 1 | 2 | 8 | 4)
+    }
+    init()
+    /** Make buffer `slot` (8 bytes at 0x8000 + 8·slot) available in a queue. */
+    const offer = (index: number, slot: number) => {
+      const q = queue(index)
+      view.setUint32(q.desc + 16 * slot, 0x8000 + 8 * slot, true)
+      view.setUint32(q.desc + 16 * slot + 8, 8, true)
+      view.setUint16(q.desc + 16 * slot + 12, index === 0 ? 2 : 0, true)
+      view.setUint16(q.avail + 4 + 2 * (avail[index]! % 4), slot, true)
+      view.setUint16(q.avail + 2, ++avail[index]!, true)
+      dev.write32(0x050, index) // QueueNotify
+    }
+    const used = (index: number) => view.getUint16(queue(index).used + 2, true)
+    /** The event in buffer `slot`: type, code, value. */
+    const event = (slot: number) => [view.getUint16(0x8000 + 8 * slot, true), view.getUint16(0x8002 + 8 * slot, true), view.getInt32(0x8004 + 8 * slot, true)]
+    /** What the config space answers to select, subsel: its bytes. */
+    const config = (select: number, subsel = 0) => {
+      dev.write8(0x100, select)
+      dev.write8(0x101, subsel)
+      return Array.from({ length: dev.read8(0x102) }, (_, i) => dev.read8(0x108 + i))
+    }
+    return { dev, init, offer, used, event, config, irq: () => irq }
+  }
+  const bits = (bitmap: number[]) => bitmap.flatMap((byte, i) => [...Array(8).keys()].filter(bit => byte & (1 << bit)).map(bit => 8 * i + bit))
+
+  it('answers what Linux asks a keyboard: its name, keys, and that the guest repeats them', () => {
+    const h = inputHarness(VirtioInput.keyboard)
+    expect(h.dev.read32(0x008)).toBe(18) // device ID: input
+    expect(String.fromCharCode(...h.config(0x01))).toBe('risc-emulator keyboard')
+    expect(h.config(0x03).slice(0, 2)).toEqual([6, 0]) // BUS_VIRTUAL
+    expect(h.config(0x02)).toEqual([]) // no serial
+    const keys = bits(h.config(0x11, Input.EV_KEY))
+    expect(keys).toContain(1) // KEY_ESC
+    expect(keys).toContain(LINUX_KEYS.KeyA)
+    expect(Math.max(...keys)).toBeLessThan(Input.BTN_LEFT) // keys, no buttons
+    expect(h.config(0x11, Input.EV_REP).length).toBeGreaterThan(0)
+    expect(h.config(0x11, Input.EV_ABS)).toEqual([])
+  })
+
+  it('answers what Linux asks a tablet: buttons, wheels, and its axes with their range', () => {
+    const h = inputHarness(VirtioInput.tablet)
+    expect(String.fromCharCode(...h.config(0x01))).toBe('risc-emulator tablet')
+    expect(bits(h.config(0x11, Input.EV_KEY))).toEqual([Input.BTN_LEFT, Input.BTN_RIGHT, Input.BTN_MIDDLE])
+    expect(bits(h.config(0x11, Input.EV_REL))).toEqual([Input.REL_HWHEEL, Input.REL_WHEEL])
+    expect(bits(h.config(0x11, Input.EV_ABS))).toEqual([Input.ABS_X, Input.ABS_Y])
+    expect(h.config(0x11, Input.EV_REP)).toEqual([])
+    const abs = new DataView(Uint8Array.from(h.config(0x12, Input.ABS_Y)).buffer)
+    expect([abs.getUint32(0, true), abs.getUint32(4, true)]).toEqual([0, TABLET_MAX]) // min, max
+    expect(h.config(0x12, 2)).toEqual([]) // no such axis
+  })
+
+  it('puts events into the guest\'s buffers, a SYN_REPORT after each lot, keeping them until there are buffers', () => {
+    const h = inputHarness(VirtioInput.tablet)
+    h.offer(0, 0)
+    h.dev.send([Input.EV_ABS, Input.ABS_X, 1234], [Input.EV_KEY, Input.BTN_LEFT, 1])
+    expect([h.used(0), h.irq()]).toEqual([1, true])
+    expect(h.event(0)).toEqual([Input.EV_ABS, Input.ABS_X, 1234])
+    h.dev.write32(0x064, 1)
+    for (const slot of [1, 2, 3]) h.offer(0, slot)
+    expect(h.used(0)).toBe(3)
+    expect([h.event(1), h.event(2)]).toEqual([[Input.EV_KEY, Input.BTN_LEFT, 1], [Input.EV_SYN, Input.SYN_REPORT, 0]])
+    h.dev.send([Input.EV_REL, Input.REL_WHEEL, -1])
+    expect(h.used(0)).toBe(4)
+    expect(h.event(3)).toEqual([Input.EV_REL, Input.REL_WHEEL, -1])
+  })
+
+  it('takes the guest\'s status messages (keyboard LEDs), and forgets events on a reset', () => {
+    const h = inputHarness(VirtioInput.keyboard)
+    h.offer(1, 0)
+    expect(h.used(1)).toBe(1)
+    h.dev.send([Input.EV_KEY, LINUX_KEYS.Enter!, 1]) // (no buffers for it)
+    h.dev.write32(0x070, 0) // reset
+    h.init()
+    h.offer(0, 0)
+    expect(h.used(0)).toBe(0)
+    h.dev.send([Input.EV_KEY, LINUX_KEYS.Enter!, 0])
+    expect(h.event(0)).toEqual([Input.EV_KEY, LINUX_KEYS.Enter, 0])
+  })
+
+  it('maps the browser\'s keys to Linux\'s by their place on the keyboard', () => {
+    expect([LINUX_KEYS.Escape, LINUX_KEYS.KeyQ, LINUX_KEYS.KeyA, LINUX_KEYS.Enter, LINUX_KEYS.Space]).toEqual([1, 16, 30, 28, 57])
+    expect([LINUX_KEYS.ArrowUp, LINUX_KEYS.ArrowDown, LINUX_KEYS.ControlRight, LINUX_KEYS.MetaLeft, LINUX_KEYS.F12]).toEqual([103, 108, 97, 125, 88])
+    expect(new Set(Object.values(LINUX_KEYS)).size).toBe(Object.keys(LINUX_KEYS).length) // no two the same
   })
 })
 

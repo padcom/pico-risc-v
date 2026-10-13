@@ -202,8 +202,11 @@ terminal. Debian must have been set up once (`npm start` does it).
   another size), shown above the terminal: a framebuffer, as boot firmware
   leaves one set up, which Linux has as `/dev/fb0`, its own console (`tty1`)
   on it. Debian gets it from U-Boot, through UEFI (`efifb`); Alpine's kernel
-  from the device tree (`simpledrm`). There's no keyboard or mouse for it yet.
-  (GRUB then writes to the screen, not the serial port.)
+  from the device tree (`simpledrm`). (GRUB then writes to the screen, not
+  the serial port.) With it come a keyboard and a mouse (virtio input
+  devices, `/dev/input/`): click the screen, and the keys go there, by their
+  place on the keyboard (Linux's keyboard layout says what they type); the
+  mouse is an absolute one, a tablet, so the guest's pointer is where yours is.
 
 The harts' threads share memory (`SharedArrayBuffer`), which browsers only
 allow on a cross-origin isolated page: the server sends the headers for

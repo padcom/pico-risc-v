@@ -9,6 +9,7 @@ import { LinuxSession } from '../test/linux-session.js'
 import { SnapshotStorage } from './block-storage.js'
 import { FileStorage } from './file-storage.js'
 import { UserNetwork } from './net/user-network.js'
+import { Input } from './virtio-input.js'
 
 /** Set up by linux/debian/build.sh (npm start runs it). */
 const FIRMWARE = new URL('../images/debian/fw_dynamic.bin', import.meta.url)
@@ -26,7 +27,7 @@ const BUDGET = 5_000_000_000
  */
 describe.skipIf(![FIRMWARE, UBOOT, DISK].every(existsSync))('Debian 13 riscv64 cloud image', () => {
   it(
-    'boots on 4 harts with nothing failed; CPUs, randomness, floating point, network (DHCP, ping, DNS, HTTP), date, screen; keeps writes across a reboot',
+    'boots on 4 harts with nothing failed; CPUs, randomness, floating point, network (DHCP, ping, DNS, HTTP), date, screen, keyboard and mouse; keeps writes across a reboot',
     { timeout: 1_800_000 },
     async () => {
       // "The outside world": an HTTP server and a DNS server on this host.
@@ -127,6 +128,25 @@ describe.skipIf(![FIRMWARE, UBOOT, DISK].every(existsSync))('Debian 13 riscv64 c
         const pixels = new Uint8Array(1024 * 768 * 4)
         s.machine.screen!.draw(pixels)
         expect([...pixels.subarray(-4)]).toEqual([255, 0, 0, 255])
+
+        // The keyboard and the mouse (a tablet): what we send them, Linux's
+        // programs read, as events (struct input_event: 24 bytes, the last 8
+        // type, code, value). od waits for a key press (and SYN_REPORT), and a
+        // move and a click.
+        const events = (name: string) => `$(grep -A5 '"risc-emulator ${name}"' /proc/bus/input/devices | grep -o 'event[0-9]*')`
+        s.type(
+          `grep -A5 '"risc-emulator' /proc/bus/input/devices | grep -E '^[NH]:'; ` +
+            `od -An -tu2 -w24 -N48 /dev/input/${events('keyboard')} >/tmp/keyboard & ` +
+            `od -An -tu2 -w24 -N96 /dev/input/${events('tablet')} >/tmp/tablet & sleep 1; echo "done-$((3+3))"\n`,
+        )
+        await s.waitForAsync('done-6', BUDGET, 600_000)
+        expect(s.screen).toMatch(/N: Name="risc-emulator keyboard"\r\nH: Handlers=sysrq kbd event\d/)
+        expect(s.screen).toMatch(/N: Name="risc-emulator tablet"\r\nH: Handlers=mouse0 js0 event\d/)
+        s.machine.keyboard!.send([Input.EV_KEY, 30, 1]) // KEY_A
+        s.machine.tablet!.send([Input.EV_ABS, Input.ABS_X, 16384], [Input.EV_ABS, Input.ABS_Y, 100], [Input.EV_KEY, Input.BTN_LEFT, 1])
+        s.type(`wait; awk '{ print "event", $9, $10, $11 }' /tmp/keyboard /tmp/tablet; echo "done-$((3+4))"\n`)
+        await s.waitForAsync('done-7', BUDGET, 600_000)
+        expect(s.screen.match(/^event .*(?=\r$)/gm)).toEqual(['event 1 30 1', 'event 0 0 0', 'event 3 0 16384', 'event 3 1 100', 'event 1 272 1', 'event 0 0 0'])
 
         // A write survives a reboot (in the snapshot: the image file is untouched).
         s.type('echo "persisted-$((6*7))" > /root/note.txt; sync; reboot\n')

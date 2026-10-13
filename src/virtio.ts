@@ -164,6 +164,8 @@ export abstract class VirtioMmioDevice extends WordDevice {
   protected abstract deviceFeatures(word: number): number
   /** A 32-bit word of the device's config space. */
   protected abstract readConfig(offset: number): number
+  /** The driver writes a word of the config space (narrower writes come as the whole word, changed). */
+  protected writeConfig(_offset: number, _value: number): void {}
   /** The driver made buffers available in queue `index`. */
   protected abstract queueNotified(index: number): void
 
@@ -260,6 +262,7 @@ export abstract class VirtioMmioDevice extends WordDevice {
   }
 
   protected writeWord(offset: number, value: number): void {
+    if (offset >= Reg.Config) return this.writeConfig(offset - Reg.Config, value)
     const q = this.queue
     switch (offset) {
       case Reg.DeviceFeaturesSel: this.deviceFeaturesSel = value; break

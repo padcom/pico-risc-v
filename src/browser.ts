@@ -33,7 +33,9 @@
  *   persist=0            don't keep the disk's changes (a throwaway session)
  *   memory=<MiB>         default 1024 for Debian, boot.json's, 64 for an image
  *   display=<w>x<h>      a screen (1024x768 if just display), shown above
- *                        the terminal; Linux has it as /dev/fb0
+ *                        the terminal; Linux has it as /dev/fb0. With it
+ *                        come a keyboard, which has the keys while the
+ *                        screen has the focus (click it), and a mouse
  *
  * How the machine stopped ends up in the page's `data-result` attribute,
  * and everything it printed in `window.emulatorOutput` (for tests).
@@ -43,10 +45,11 @@ import { Terminal } from '@xterm/xterm'
 import { type BlockStorage, SnapshotStorage } from './block-storage.js'
 import { ChunkedStorage, gunzip } from './chunked-storage.js'
 import { setCoreModule } from './cpu.js'
-import type { Framebuffer } from './framebuffer.js'
+import { LINUX_KEYS } from './keymap.js'
 import { HttpStorage } from './http-storage.js'
 import { IndexedDbStore } from './indexeddb-store.js'
 import { Machine, type RunResult } from './machine.js'
+import { Input, TABLET_MAX } from './virtio-input.js'
 import { WebSocketNetwork } from './websocket-network.js'
 
 /** How to boot a distribution (images/<distribution>/boot.json; files relative to it). */
@@ -150,7 +153,7 @@ try {
     })
     machine.boot(firmware, { load: [{ offset: KERNEL_OFFSET, data: kernel }], next: { offset: KERNEL_OFFSET }, initrd })
   }
-  if (machine.screen) show(machine.screen)
+  if (machine.screen) show(machine)
   terminal.onData(data => machine.type(data))
   // The terminal's size, and changes to it (fit() follows the window).
   machine.resize(terminal.cols, terminal.rows)
@@ -180,8 +183,13 @@ function parseDisplay(value: string): { width: number; height: number } {
   return { width: Number(width), height: Number(height) }
 }
 
-/** Show the screen on the page's canvas, a frame at a time (when it changed). */
-function show(screen: Framebuffer): void {
+/**
+ * Show the screen on the page's canvas, a frame at a time (when it changed),
+ * and pass the keys pressed while it has the focus to the keyboard, what the
+ * mouse does over it to the tablet.
+ */
+function show(machine: Machine): void {
+  const screen = machine.screen!
   const canvas = document.getElementById('screen') as HTMLCanvasElement
   canvas.width = screen.width
   canvas.height = screen.height
@@ -194,6 +202,61 @@ function show(screen: Framebuffer): void {
     requestAnimationFrame(frame)
   }
   frame()
+
+  const keyboard = machine.keyboard!
+  const tablet = machine.tablet!
+  // Keys held down: let go of when the screen loses the focus (their keyup goes elsewhere).
+  const held = new Set<number>()
+  canvas.addEventListener('keydown', event => {
+    const key = LINUX_KEYS[event.code]
+    if (key === undefined) return
+    event.preventDefault()
+    // (The guest repeats keys itself.)
+    if (event.repeat || held.has(key)) return
+    held.add(key)
+    keyboard.send([Input.EV_KEY, key, 1])
+  })
+  canvas.addEventListener('keyup', event => {
+    const key = LINUX_KEYS[event.code]
+    if (key === undefined || !held.delete(key)) return
+    event.preventDefault()
+    keyboard.send([Input.EV_KEY, key, 0])
+  })
+  canvas.addEventListener('blur', () => {
+    for (const key of held) keyboard.send([Input.EV_KEY, key, 0])
+    held.clear()
+  })
+
+  const BUTTONS = [Input.BTN_LEFT, Input.BTN_MIDDLE, Input.BTN_RIGHT] // by MouseEvent.button
+  const at = (event: MouseEvent): [number, number, number][] => {
+    const box = canvas.getBoundingClientRect()
+    const scale = (value: number, size: number) => Math.round(Math.min(Math.max(value / size, 0), 1) * TABLET_MAX)
+    return [
+      [Input.EV_ABS, Input.ABS_X, scale(event.clientX - box.left, box.width)],
+      [Input.EV_ABS, Input.ABS_Y, scale(event.clientY - box.top, box.height)],
+    ]
+  }
+  canvas.addEventListener('pointermove', event => tablet.send(...at(event)))
+  canvas.addEventListener('pointerdown', event => {
+    const button = BUTTONS[event.button]
+    if (button === undefined) return
+    event.preventDefault()
+    canvas.focus()
+    canvas.setPointerCapture(event.pointerId) // (a drag goes on outside it)
+    tablet.send(...at(event), [Input.EV_KEY, button, 1])
+  })
+  canvas.addEventListener('pointerup', event => {
+    const button = BUTTONS[event.button]
+    if (button !== undefined) tablet.send(...at(event), [Input.EV_KEY, button, 0])
+  })
+  canvas.addEventListener('contextmenu', event => event.preventDefault())
+  canvas.addEventListener('wheel', event => {
+    event.preventDefault()
+    const notches: [number, number, number][] = []
+    if (event.deltaY) notches.push([Input.EV_REL, Input.REL_WHEEL, -Math.sign(event.deltaY)])
+    if (event.deltaX) notches.push([Input.EV_REL, Input.REL_HWHEEL, Math.sign(event.deltaX)])
+    if (notches.length) tablet.send(...notches)
+  }, { passive: false })
 }
 
 /**

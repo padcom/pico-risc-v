@@ -13,6 +13,7 @@ import { Syscon } from './syscon.js'
 import { Terminal } from './terminal.js'
 import { VirtioBlock } from './virtio-blk.js'
 import { VirtioConsole } from './virtio-console.js'
+import { VirtioInput } from './virtio-input.js'
 import { type NetworkBackend, VirtioNet } from './virtio-net.js'
 
 /**
@@ -24,6 +25,8 @@ import { type NetworkBackend, VirtioNet } from './virtio-net.js'
  *   0x1000_1000 - 0x1000_1fff   virtio block device (if a disk is attached), PLIC source 1
  *   0x1000_2000 - 0x1000_2fff   virtio network card (if a network is attached), PLIC source 2
  *   0x1000_3000 - 0x1000_3fff   virtio console (unless turned off), PLIC source 5
+ *   0x1000_4000 - 0x1000_4fff   virtio keyboard (with a screen), PLIC source 6
+ *   0x1000_5000 - 0x1000_5fff   virtio tablet (with a screen), PLIC source 7
  *   0x1100_0000 - 0x1100_ffff   CLINT (timer + software interrupt)
  *   0x1110_0000 - 0x1110_0fff   Syscon (power-off / reboot)
  *   0x8000_0000 - ...           RAM; execution starts at its first byte,
@@ -38,6 +41,8 @@ export const MemoryMap = {
   VIRTIO_DISK: 0x1000_1000,
   VIRTIO_NET: 0x1000_2000,
   VIRTIO_CONSOLE: 0x1000_3000,
+  VIRTIO_KEYBOARD: 0x1000_4000,
+  VIRTIO_TABLET: 0x1000_5000,
   CLINT: 0x1100_0000,
   SYSCON: 0x1110_0000,
   RAM: 0x8000_0000,
@@ -100,7 +105,8 @@ export interface MachineOptions {
   harts?: number
   /**
    * A screen, `width` × `height` pixels: a framebuffer at the top of RAM
-   * (not part of the RAM the OS is told about), see Framebuffer.
+   * (not part of the RAM the OS is told about), see Framebuffer. With
+   * it come a keyboard and a mouse (a tablet), see VirtioInput.
    */
   display?: { width: number; height: number }
 }
@@ -189,6 +195,9 @@ export class Machine {
   readonly nic: VirtioNet | undefined
   /** The screen, if the machine has one (MachineOptions.display). */
   readonly screen: Framebuffer | undefined
+  /** The screen's keyboard and mouse (an absolute one: a tablet), if it has one. */
+  readonly keyboard: VirtioInput | undefined
+  readonly tablet: VirtioInput | undefined
   private readonly network: NetworkBackend | undefined
   /** The harts, by mhartid. */
   readonly cpus: CPU[]
@@ -285,6 +294,8 @@ export class Machine {
     this.network = network
     this.nic = network && new VirtioNet(network, mac, dma, high => this.plic.setLevel(NET_IRQ, high))
     this.console = console ? new VirtioConsole(dma, high => this.plic.setLevel(CONSOLE_IRQ, high), output ?? (() => {})) : undefined
+    this.keyboard = display && VirtioInput.keyboard(dma, high => this.plic.setLevel(KEYBOARD_IRQ, high))
+    this.tablet = display && VirtioInput.tablet(dma, high => this.plic.setLevel(TABLET_IRQ, high))
 
     this.bus
       .map(MemoryMap.RAM, ramSize, this.ram)
@@ -296,6 +307,8 @@ export class Machine {
     if (this.disk) this.bus.map(MemoryMap.VIRTIO_DISK, VirtioBlock.SIZE, this.disk)
     if (this.nic) this.bus.map(MemoryMap.VIRTIO_NET, VirtioNet.SIZE, this.nic)
     if (this.console) this.bus.map(MemoryMap.VIRTIO_CONSOLE, VirtioConsole.SIZE, this.console)
+    if (this.keyboard) this.bus.map(MemoryMap.VIRTIO_KEYBOARD, VirtioInput.SIZE, this.keyboard)
+    if (this.tablet) this.bus.map(MemoryMap.VIRTIO_TABLET, VirtioInput.SIZE, this.tablet)
   }
 
   /**
@@ -374,6 +387,8 @@ export class Machine {
     this.disk?.reset()
     this.nic?.reset()
     this.console?.reset()
+    this.keyboard?.reset()
+    this.tablet?.reset()
     // All harts start at the start of RAM (firmware picks one to boot).
     for (const cpu of this.cpus) {
       cpu.setRegister(10, cpu.id) // a0: hart id
@@ -753,6 +768,26 @@ export class Machine {
                 },
               },
             }),
+            ...(this.keyboard && {
+              [`virtio_mmio@${hex(MemoryMap.VIRTIO_KEYBOARD)}`]: {
+                props: {
+                  compatible: 'virtio,mmio',
+                  reg: reg(MemoryMap.VIRTIO_KEYBOARD, VirtioInput.SIZE),
+                  'interrupt-parent': PLIC_PHANDLE,
+                  interrupts: KEYBOARD_IRQ,
+                },
+              },
+            }),
+            ...(this.tablet && {
+              [`virtio_mmio@${hex(MemoryMap.VIRTIO_TABLET)}`]: {
+                props: {
+                  compatible: 'virtio,mmio',
+                  reg: reg(MemoryMap.VIRTIO_TABLET, VirtioInput.SIZE),
+                  'interrupt-parent': PLIC_PHANDLE,
+                  interrupts: TABLET_IRQ,
+                },
+              },
+            }),
             ...(this.disk && {
               [`virtio_mmio@${hex(MemoryMap.VIRTIO_DISK)}`]: {
                 props: {
@@ -778,6 +813,8 @@ const NET_IRQ = 2
 const CONSOLE_IRQ = 5
 const RTC_IRQ = 3
 const TERMINAL_IRQ = 4
+const KEYBOARD_IRQ = 6
+const TABLET_IRQ = 7
 
 /**
  * Start a thread running a hart (hart-worker.ts): `message` hears from it
