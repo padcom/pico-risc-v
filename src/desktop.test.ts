@@ -96,7 +96,8 @@ describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => exi
         )
         await s.waitForAsync('done-2', BUDGET, 600_000)
         expect(s.screen).toMatch(/N: Name="risc-emulator keyboard"\r\nH: Handlers=sysrq kbd event\d/)
-        expect(s.screen).toMatch(/N: Name="risc-emulator tablet"\r\nH: Handlers=mouse0 js0 event\d/)
+        // (Its handlers in the order Linux's input handlers took it, which varies.)
+        expect(s.screen).toMatch(/N: Name="risc-emulator tablet"\r\nH: Handlers=mouse0 (js0 event\d|event\d js0)/)
         s.machine.keyboard!.send([Input.EV_KEY, 42, 1]) // KEY_LEFTSHIFT
         s.machine.keyboard!.send([Input.EV_KEY, 42, 0])
         s.machine.tablet!.send([Input.EV_ABS, Input.ABS_X, 16384], [Input.EV_ABS, Input.ABS_Y, 16384], [Input.EV_KEY, Input.BTN_LEFT, 1])

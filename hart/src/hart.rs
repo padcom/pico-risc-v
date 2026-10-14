@@ -175,6 +175,11 @@ pub struct Hart {
     /// (the data translation context, and the TLB's epoch).
     pub(crate) jit_tlb: [JitTlbEntry; TLB_SIZE],
     pub(crate) jit_ctx: u64,
+    /// For jit_op, from compiled code: the memory group (if not 0) whose
+    /// first access it is doing (jit.rs: `Emitter::group_slow_path`); then
+    /// whether the group's range is in the JIT TLB now, and its host offset.
+    pub(crate) jit_group: u64,
+    pub(crate) jit_group_ok: [u32; 2],
     pub(crate) jit: Jit,
     /// What the harts share about compiled code (jit.rs).
     pub(crate) jits: &'static JitShared,
@@ -255,6 +260,8 @@ impl Hart {
             gigapages: [0; 8],
             megapages: [0; 64],
             jit_ctx: 0,
+            jit_group: 0,
+            jit_group_ok: [0; 2],
             jit: Jit::new(),
             jits: &NO_JIT,
             chain: Vec::new(),

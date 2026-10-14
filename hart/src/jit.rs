@@ -42,7 +42,10 @@
 //!   accesses off the same value (a register, or what it was plus a
 //!   constant: a stack frame, a structure, the two sides of a copy) share
 //!   one check, by the first of them, for all of their range
-//!   (`memory_groups`): the others just add the page's offset.
+//!   (`memory_groups`): the others just add the page's offset. When it
+//!   fails, jit_op checks again after the first access (which may have put
+//!   the page in the TLB), so the rest needn't go through it too; that also
+//!   takes a range on two pages that follow each other in RAM.
 //! - Each compiled function is named after its page's physical address
 //!   ("pa_80a3f000"), as profilers (node --cpu-prof) show it.
 //! - Whatever isn't compiled (floating point, atomics, CSRs, system
@@ -826,6 +829,7 @@ impl Hart {
         let op = Op::unpack(a, b);
         let next = pc.wrapping_add(op.len as u64);
         let addr = self.x[op.rs1 as usize].wrapping_add(op.imm as i64 as u64);
+        let group = core::mem::take(&mut self.jit_group);
         let result = self.execute_op(&op, pc, next);
         // Code was written, by this instruction or another hart since this
         // one last looked (run_block then forgets chains, which may lead to
@@ -843,6 +847,15 @@ impl Hart {
                     self.jit_fill(addr, false);
                 } else if op.kind.is_store() {
                     self.jit_fill(addr, true);
+                }
+                if group != 0 {
+                    // A memory group's first access: its range, from where
+                    // the group starts (`group`: from that, span, access).
+                    let start = addr.wrapping_sub(op.imm as i64 as u64).wrapping_add(group as i32 as i64 as u64);
+                    self.jit_group_ok = match self.jit_range(start, (group >> 32) as u16 as u64, (group >> 48) as u32) {
+                        Some(host) => [1, host],
+                        None => [0, 0],
+                    };
                 }
                 0
             }
@@ -900,6 +913,35 @@ impl Hart {
             self.jit_tlb.fill(JIT_TLB_EMPTY);
         }
         self.jit_ctx = self.jit_ctx & ((1 << EPOCH_SHIFT) - 1) | epoch << EPOCH_SHIFT;
+    }
+
+    /// Whether the JIT TLB has bytes `addr..addr + span` on a page, or on two
+    /// in a row that are in a row in RAM too (the same host offset), for
+    /// `access` (1 loads, 2 stores, 3 both; stores: without code): their
+    /// host offset if so. For a memory group whose check failed (see
+    /// `Emitter::group_slow_path`), after its first access: its page may be
+    /// there now, and a range that keeps crossing into the next page (a
+    /// stack frame, say) would otherwise always fail. (Pages that aren't in
+    /// a row in RAM still do: taking either's offset, as each access would
+    /// then have to, costs all the code more than it saves.)
+    fn jit_range(&self, addr: u64, span: u64, access: u32) -> Option<u32> {
+        let last = addr.wrapping_add(span.max(1) - 1);
+        if last >> 12 != addr >> 12 && last >> 12 != (addr >> 12).wrapping_add(1) {
+            return None;
+        }
+        let host = self.jit_tlb[(addr >> 12) as usize & (TLB_SIZE - 1)].host;
+        for page in [addr, last] {
+            let e = &self.jit_tlb[(page >> 12) as usize & (TLB_SIZE - 1)];
+            let tag = page & !0xfff | self.jit_ctx;
+            if e.host != host || access & 1 != 0 && e.load != tag || access & 2 != 0 && e.store != tag {
+                return None;
+            }
+            let offset = (page as u32).wrapping_add(host).wrapping_sub(self.ram as u32) >> 12;
+            if access & 2 != 0 && self.code.lines[offset as usize].load(Relaxed) != 0 {
+                return None;
+            }
+        }
+        Some(host)
     }
 
     /// `jit_ctx` after a change of translation (the epoch stays).
@@ -1283,6 +1325,8 @@ struct Emitter<'a> {
     pc: u32,
     retired: u32,
     ctx: u32,
+    group: u32,
+    group_ok: u32,
     tlb: u32,
     chain_base: u32,
     chain_ctx: u32,
@@ -1312,6 +1356,8 @@ impl<'a> Emitter<'a> {
             pc: at(&hart.pc),
             retired: at(&hart.retired),
             ctx: at(&hart.jit_ctx),
+            group: at(&hart.jit_group),
+            group_ok: at(hart.jit_group_ok.as_ptr().cast()),
             tlb: at(hart.jit_tlb.as_ptr().cast()),
             chain_base: at((&hart.chain_base as *const u32).cast()),
             chain_ctx: at(&hart.chain_ctx),
@@ -1525,6 +1571,24 @@ impl<'a> Emitter<'a> {
         (self.loaded, self.dirty) = (loaded, dirty);
     }
 
+    /// The slow path of a memory group's first access (its check failed):
+    /// jit_op also checks the group's range again, once it's done the access
+    /// (`Hart::jit_group`), and the check's locals take what it found, for
+    /// the rest of the group. (No more than that, in straight-line code: a
+    /// branch here, in every group, makes all of the code slower to compile.)
+    fn group_slow_path(&mut self, k: u32, offset: i64, op: &Op, slot: u32, check: Check) {
+        let access = check.loads as u64 | (check.stores as u64) << 1;
+        self.hart();
+        self.i64c((check.from as u32 as u64 | (check.span as u64) << 32 | access << 48) as i64);
+        self.mem(I64_STORE, self.group);
+        self.slow_path(k, offset, op);
+        for i in 0..2 {
+            self.hart();
+            self.mem(I32_LOAD, self.group_ok + 4 * i);
+            self.local(LOCAL_SET, GROUP + 2 * slot + i);
+        }
+    }
+
     /// Compute a load's or store's address into ADDR, look its page up in
     /// the JIT TLB (ENTRY: the entry's offset), and push whether it hit.
     fn tlb_lookup(&mut self, op: &Op, width: i64, store: bool) {
@@ -1666,7 +1730,10 @@ impl<'a> Emitter<'a> {
             self.local(LOCAL_GET, HOST);
             self.mem(opcode, 0);
             self.o(ELSE);
-            self.slow_path(k, offset, op);
+            match check {
+                Some(check) => self.group_slow_path(k, offset, op, slot, check),
+                None => self.slow_path(k, offset, op),
+            }
             let rd = op.rd as u32;
             if rd == SINK as u32 {
                 self.i64c(0);
@@ -1714,7 +1781,10 @@ impl<'a> Emitter<'a> {
             self.local(LOCAL_GET, B);
             self.mem(opcode, 0);
             self.o(ELSE);
-            self.slow_path(k, offset, op);
+            match check {
+                Some(check) => self.group_slow_path(k, offset, op, slot, check),
+                None => self.slow_path(k, offset, op),
+            }
             self.close();
         } else {
             self.store_value(k, offset, op, width, opcode);

@@ -268,6 +268,56 @@ describe.each([
   })
 })
 
+describe.each([
+  ['interpreter', false],
+  ['JIT', { threshold: 1, batch: 1 }],
+] as const)('loads and stores across a page boundary (%s)', (_, jit) => {
+  // t1 = RAM + 0x3000 - 8: 0(t1) on one page, 8(t1) on the next (one memory
+  // group for the JIT, its range on both), 100 times; s1 sums what it reads.
+  const start = [
+    a.auipc(5, 0), a.lui(6, 0x3000), a.add(6, 6, 5), a.addi(6, 6, -8), // t1
+    a.addi(9, 0, 0), a.addi(12, 0, 100), a.addi(13, 0, 1), // s1 = 0, a2 = 100, a3 = 1
+  ]
+  const powerOff = [a.lui(5, MemoryMap.SYSCON), a.lui(6, 0x5000), a.addi(6, 6, 0x555), a.sw(6, 5, 0)]
+  const run = (program: number[], at0x3040: number[] = []) => {
+    const m = new Machine({ ramSize: 1024 * 1024, clock: 'virtual', jit })
+    const image = new Uint8Array(0x3040 + 4 * at0x3040.length)
+    image.set(toBytes(program))
+    image.set(toBytes(at0x3040), 0x3040)
+    m.boot(image)
+    expect(m.run(100_000)).toBe('poweroff')
+    return m.cpu.x[9]
+  }
+
+  it('reads what it wrote on both pages', () => {
+    const loop = [
+      a.sd(13, 6, 0), a.addi(14, 13, 1000), a.sd(14, 6, 8), // 0(t1) = a3, 8(t1) = a3 + 1000
+      a.ld(15, 6, 0), a.ld(16, 6, 8), a.add(9, 9, 15), a.add(9, 9, 16),
+      a.addi(13, 13, 1), a.addi(12, 12, -1),
+    ]
+    const program = [...start, ...loop, a.bne(12, 0, -4 * loop.length), ...powerOff]
+    expect(run(program)).toBe(5050 + 5050 + 100 * 1000)
+  })
+
+  it('sees code it writes on the second page: a function there, rewritten each time before it is called', () => {
+    // The same group also writes 0x48(t1): the function's first two
+    // instructions (at RAM + 0x3040), addi a0, zero, a3; ret. (Its 8(t1),
+    // data on the function's page, puts that page in the JIT's TLB.)
+    const RET = 0x8067 // jalr zero, 0(ra)
+    const loop = [
+      a.sd(13, 6, 0), a.sd(13, 6, 8), a.slli(14, 13, 20), a.ori(14, 14, 0x513), a.or(14, 14, 7), a.sd(14, 6, 0x48),
+      a.jal(1, 0), // (the call: its offset below)
+      a.add(9, 9, 10), a.ld(15, 6, 0), a.add(9, 9, 15), // s1 += what it returned, + 0(t1)
+      a.addi(13, 13, 1), a.addi(12, 12, -1),
+    ]
+    const program = [...start, a.lui(7, RET & ~0xfff), a.addi(7, 7, RET & 0xfff), a.slli(7, 7, 32), ...loop]
+    const call = program.length - loop.length + 6
+    program[call] = a.jal(1, 0x3040 - 4 * call)
+    program.push(a.bne(12, 0, -4 * loop.length), ...powerOff)
+    expect(run(program, [a.addi(10, 0, 0), a.jalr(0, 1, 0)])).toBe(5050 + 5050)
+  })
+})
+
 describe('Syscon', () => {
   it('reports power-off and reboot commands', () => {
     const seen: string[] = []
