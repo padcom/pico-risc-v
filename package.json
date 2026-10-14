@@ -38,5 +38,11 @@
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0"
+  },
+  "optionalDependencies": {
+    "@kmamal/sdl": "^0.11.13"
+  },
+  "allowScripts": {
+    "@kmamal/sdl": true
   }
 }

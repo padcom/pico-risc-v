@@ -5,7 +5,7 @@
  *
  *   node dist/cli.js [--memory <MiB>] [--harts <n>] [--kernel <file> [--initrd <file>]] [--disk <file> [--snapshot]]
  *                    [--net [--forward <host port>:<guest port>]...] [--bootargs <string>]
- *                    [--display [--vnc <port>]] [--virtual-clock] <image>
+ *                    [--display] [--vnc <port>] [--virtual-clock] <image>
  *
  * The machine has RV64GC CPUs: one, or --harts of them (up to 8; each takes
  * about 115 MB for its caches), each running on a thread of its own (with
@@ -27,15 +27,18 @@
  * port 22 (e.g. ssh -p 2222 root@localhost).
  *
  * --display gives the machine a screen (1024×768), with a keyboard and a
- * mouse, which VNC viewers on this machine show and use: macOS's Screen
- * Sharing (vnc://localhost:5900; any password), TigerVNC, ... --vnc picks
- * another port than 5900.
+ * mouse, and opens a window that shows it and takes the keys and the mouse
+ * (closing it quits). It takes the optional package @kmamal/sdl (SDL, which
+ * npm installs where it can). --vnc <port> shows the screen to VNC viewers
+ * on this machine too (or instead, without --display): macOS's Screen
+ * Sharing (vnc://localhost:5900 with --vnc 5900; any password), TigerVNC...
  *
  * Press Ctrl-A then X to quit (Ctrl-A Ctrl-A sends a literal Ctrl-A).
  */
 import { readFileSync } from 'node:fs'
 import { parseArgs } from 'node:util'
 import { type BlockStorage, SnapshotStorage } from './block-storage.js'
+import { openWindow } from './display-window.js'
 import { FileStorage } from './file-storage.js'
 import { Machine } from './machine.js'
 import { UserNetwork } from './net/user-network.js'
@@ -49,7 +52,7 @@ const KERNEL_OFFSET = 0x200000
 
 function usage(): never {
   console.error(
-    'usage: risc-emulator [--memory <MiB>] [--harts <n>] [--kernel <file> [--initrd <file>]] [--disk <file> [--snapshot]] [--net [--forward <host port>:<guest port>]...] [--bootargs <string>] [--display [--vnc <port>]] [--virtual-clock] <image>',
+    'usage: risc-emulator [--memory <MiB>] [--harts <n>] [--kernel <file> [--initrd <file>]] [--disk <file> [--snapshot]] [--net [--forward <host port>:<guest port>]...] [--bootargs <string>] [--display] [--vnc <port>] [--virtual-clock] <image>',
   )
   process.exit(2)
 }
@@ -102,8 +105,8 @@ const forwards = values.forward.map(spec => {
 })
 if (forwards.length && !values.net) usage()
 if (values.initrd && !values.kernel) usage()
-const vncPort = Number(values.vnc ?? 5900)
-if ((values.vnc !== undefined && !values.display) || !Number.isInteger(vncPort) || vncPort < 0 || vncPort > 65535) usage()
+const vncPort = values.vnc === undefined ? undefined : Number(values.vnc)
+if (vncPort !== undefined && (!Number.isInteger(vncPort) || vncPort < 0 || vncPort > 65535)) usage()
 
 const network = values.net ? new UserNetwork() : undefined
 for (const { host, guest } of forwards) {
@@ -120,7 +123,7 @@ const machine = new Machine({
   disk,
   network,
   bootargs: values.bootargs,
-  display: values.display ? { width: 1024, height: 768 } : undefined,
+  display: values.display || vncPort !== undefined ? { width: 1024, height: 768 } : undefined,
   clock: values['virtual-clock'] ? 'virtual' : 'realtime',
   output: byte => {
     // (Threads run on their own: flush soon, rather than after a slice.)
@@ -138,12 +141,18 @@ machine.boot(
     : {},
 )
 
-if (machine.screen) {
-  // (Can't listen there, say another emulator does: no screen, but run.)
-  const vnc = new VncServer({ screen: machine.screen, keyboard: machine.keyboard!, tablet: machine.tablet! })
-  await vnc.listen(vncPort).then(
+const display = machine.screen && { screen: machine.screen, keyboard: machine.keyboard!, tablet: machine.tablet! }
+if (display && vncPort !== undefined) {
+  // (Can't listen there, say another emulator does: no VNC, but run.)
+  await new VncServer(display).listen(vncPort).then(
     port => process.stderr.write(`[risc-emulator] the screen: vnc://localhost:${port} (VNC; any password)\n`),
     (e: Error) => process.stderr.write(`[risc-emulator] can't show the screen on localhost:${vncPort}: ${e.message}\n`),
+  )
+}
+if (display && values.display) {
+  // (No window, say without the package or a desktop to open it on: run anyway.)
+  await openWindow(display, 'risc-emulator', () => quit(0, '[risc-emulator] the window was closed')).catch((e: Error) =>
+    process.stderr.write(`[risc-emulator] can't open a window for the screen (${e.message}); --vnc <port> shows it to VNC viewers\n`),
   )
 }
 

@@ -62,13 +62,20 @@ Options after `--` go to the emulator: `npm start -- --snapshot` (see
 
 `npm start -- --display` gives the machine a screen, with a keyboard and a
 mouse, and Debian starts its desktop (Xfce) on it, as in the page
-(`?display`, below). It's shown by VNC: open `vnc://localhost:5900` in
-macOS's Screen Sharing (it asks for a password: any will do), or another
-VNC viewer (TigerVNC, say); `--vnc 5901` picks another port. The emulator
-is the VNC server, for this machine only (localhost), and sends what changes
-on the screen; the viewer's keys go to the guest as a US keyboard's. (A
-`disk.raw` from before the desktop was added has no X: see `linux/debian/packages`
-for what to `apt install`, or start over from `pristine.raw`.)
+(`?display`, below). It opens in a window of its own (SDL, through the
+`@kmamal/sdl` package, which `npm install` installs where it can); the keys
+go to the guest by their place on the keyboard, so Debian's keyboard layout
+says what they type; closing the window quits the emulator.
+
+`--vnc 5900` shows the screen to VNC viewers on this machine too (or
+instead, without `--display`): open `vnc://localhost:5900` in macOS's Screen
+Sharing (it asks for a password: any will do), or another VNC viewer
+(TigerVNC, say). The emulator is the VNC server, for this machine only
+(localhost); the viewer's keys go to the guest as a US keyboard's.
+
+(A `disk.raw` from before the desktop was added has no X: see
+`linux/debian/packages` for what to `apt install`, or start over from
+`pristine.raw`.)
 
 Since the kernel boots from the disk, `apt upgrade` updates it as on any
 Debian machine; the next boot uses the new one.

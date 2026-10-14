@@ -23,3 +23,30 @@ export const LINUX_KEYS: Readonly<Record<string, number>> = {
   Insert: 110, Delete: 111, NumpadEqual: 117, Pause: 119, NumpadComma: 121, IntlYen: 124,
   MetaLeft: 125, MetaRight: 126, ContextMenu: 127,
 }
+
+/**
+ * KeyboardEvent.code of USB keyboard scancodes (HID usage page 7), as SDL has
+ * them (SDL_Scancode): keys by place too.
+ */
+const USB_CODES: Readonly<Record<number, string>> = {
+  ...Object.fromEntries([...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'].map((letter, i) => [4 + i, `Key${letter}`])),
+  ...Object.fromEntries([...'1234567890'].map((digit, i) => [30 + i, `Digit${digit}`])),
+  40: 'Enter', 41: 'Escape', 42: 'Backspace', 43: 'Tab', 44: 'Space', 45: 'Minus', 46: 'Equal',
+  47: 'BracketLeft', 48: 'BracketRight', 49: 'Backslash', 50: 'Backslash', // (non-US #: where \ is)
+  51: 'Semicolon', 52: 'Quote', 53: 'Backquote', 54: 'Comma', 55: 'Period', 56: 'Slash', 57: 'CapsLock',
+  ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [58 + i, `F${i + 1}`])),
+  70: 'PrintScreen', 71: 'ScrollLock', 72: 'Pause', 73: 'Insert', 74: 'Home', 75: 'PageUp', 76: 'Delete',
+  77: 'End', 78: 'PageDown', 79: 'ArrowRight', 80: 'ArrowLeft', 81: 'ArrowDown', 82: 'ArrowUp', 83: 'NumLock',
+  84: 'NumpadDivide', 85: 'NumpadMultiply', 86: 'NumpadSubtract', 87: 'NumpadAdd', 88: 'NumpadEnter',
+  ...Object.fromEntries([...'1234567890'].map((digit, i) => [89 + i, `Numpad${digit}`])),
+  99: 'NumpadDecimal', 100: 'IntlBackslash', 101: 'ContextMenu', 103: 'NumpadEqual', 133: 'NumpadComma',
+  135: 'IntlRo', 137: 'IntlYen',
+  224: 'ControlLeft', 225: 'ShiftLeft', 226: 'AltLeft', 227: 'MetaLeft',
+  228: 'ControlRight', 229: 'ShiftRight', 230: 'AltRight', 231: 'MetaRight',
+}
+
+/** Linux's key code of a USB keyboard scancode, if it's a key Linux has here. */
+export function linuxKeyOfScancode(scancode: number): number | undefined {
+  const code = USB_CODES[scancode]
+  return code === undefined ? undefined : LINUX_KEYS[code]
+}
