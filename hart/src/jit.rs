@@ -38,7 +38,13 @@
 //!   memory, per access type and translation context. A miss, a device, an
 //!   access across a page, or a store to a page holding code that some hart
 //!   decoded (compiled code checks: that can change any time) goes through
-//!   `jit_op` (the interpreter), which then refills the TLB.
+//!   `jit_op` (the interpreter), which then refills the TLB. A block's
+//!   accesses off the same value (a register, or what it was plus a
+//!   constant: a stack frame, a structure, the two sides of a copy) share
+//!   one check, by the first of them, for all of their range
+//!   (`memory_groups`): the others just add the page's offset.
+//! - Each compiled function is named after its page's physical address
+//!   ("pa_80a3f000"), as profilers (node --cpu-prof) show it.
 //! - Whatever isn't compiled (floating point, atomics, CSRs, system
 //!   instructions, MULH*) also runs through `jit_op` (passed the decoded
 //!   instruction). Only `jit_op` can reach devices, so it also ends the
@@ -700,7 +706,7 @@ impl Hart {
         let count = self.jit.slots.len();
         if count > 0 {
             let mut code = core::mem::take(&mut self.jit.module);
-            build_module(&mut code, &bodies, count);
+            build_module(&mut code, &bodies, count, self.ram_base, &self.jit.pages);
             // SAFETY: imports implemented in JavaScript; they only read the buffers.
             let ok = unsafe {
                 jit_load(code.as_ptr(), code.len() as u32);
@@ -947,7 +953,9 @@ fn end_section(out: &mut Vec<u8>, start: usize) {
 /// A module of `count` compiled pages (`bodies`: the code section's
 /// entries), importing the memory, the function table and `jit_op` as
 /// "env" "memory" / "table" / "op", exporting the functions as "0", "1", ...
-fn build_module(out: &mut Vec<u8>, bodies: &[u8], count: usize) {
+/// and naming each after the physical address of its page (`pages`, in RAM
+/// at `ram_base`), as profilers show it: "pa_80a3f000".
+fn build_module(out: &mut Vec<u8>, bodies: &[u8], count: usize, ram_base: u64, pages: &[u32]) {
     out.clear();
     out.extend_from_slice(b"\0asm\x01\0\0\0");
     // Types: 0 = (i32 hart, i64 page, i32 entry, i32 budget, i32 steps,
@@ -980,6 +988,23 @@ fn build_module(out: &mut Vec<u8>, bodies: &[u8], count: usize) {
     let s = begin_section(out, 10);
     uleb(out, count as u64);
     out.extend_from_slice(bodies);
+    end_section(out, s);
+    // The "name" custom section: its function names (subsection 1).
+    let s = begin_section(out, 0);
+    out.extend_from_slice(&[4, b'n', b'a', b'm', b'e', 1]);
+    let names = out.len();
+    out.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0]);
+    uleb(out, count as u64);
+    for (i, &page) in pages.iter().enumerate().take(count) {
+        uleb(out, i as u64 + 1); // (after the import)
+        out.push(11);
+        out.extend_from_slice(b"pa_");
+        let pa = ram_base + ((page as u64) << 12);
+        for shift in (0..8).rev() {
+            out.push(b"0123456789abcdef"[(pa >> (4 * shift)) as usize & 15]);
+        }
+    }
+    end_section(out, names + 5);
     end_section(out, s);
 }
 
@@ -1076,6 +1101,11 @@ const PC_OUT: u32 = 41;
 const ENTRY: u32 = 42; // i32
 const FETCH: u32 = 43; // i32
 const HOST: u32 = 44; // i32
+/// Then, for each memory group (`memory_groups`) of the block being compiled,
+/// two i32: whether its check passed, and its page's host offset.
+const GROUP: u32 = 45;
+/// Memory groups per block, at most (the rest go the regular way).
+const MAX_GROUPS: usize = 8;
 
 /// Whether the instructions `ops`, from `start` (in the page), jump to `start`.
 fn loops_to(ops: &[Op], start: i64) -> bool {
@@ -1086,6 +1116,120 @@ fn loops_to(ops: &[Op], start: i64) -> bool {
         offset += op.len as i64;
         to_start
     })
+}
+
+/// How many bytes a load or store accesses (None: not one compiled as such).
+fn access_width(kind: Kind) -> Option<i64> {
+    use Kind::*;
+    match kind {
+        Lb | Lbu | Sb => Some(1),
+        Lh | Lhu | Sh => Some(2),
+        Lw | Lwu | Sw => Some(4),
+        Ld | Sd => Some(8),
+        _ => None,
+    }
+}
+
+/// The check a group's first access does, for all of them: bytes
+/// `x[rs1] + from` to that plus `span`, on one page the JIT TLB has, for
+/// loads and/or stores (then holding no code).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Check {
+    from: i64,
+    span: i64,
+    loads: bool,
+    stores: bool,
+}
+
+/// A load or store in a memory group: its locals (GROUP + 2 * slot...), and
+/// for the group's first access, the check.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Member {
+    slot: u32,
+    check: Option<Check>,
+}
+
+/// The loads and stores of a block (`ops`) that can share one translation
+/// check: those whose addresses are the same value plus different
+/// constants, 256 bytes' worth at most. (If the check fails, they go
+/// through jit_op, which refills the TLB: as it does when it misses, or
+/// when the range crosses into another page, which a narrow one rarely
+/// does. Doing the regular lookup instead takes more code than it saves.) Within the block, a register written
+/// by ADDI (MV) holds another's value plus a constant: the value that one
+/// had then, which stays the same whatever happens to the register after
+/// (the code computes each access's address from its own register anyway).
+/// Groups of one aren't groups; MAX_GROUPS per block, in the order they
+/// start.
+fn memory_groups(ops: &[Op]) -> Vec<Option<Member>> {
+    // x[r] = x[b] (as it was after its v-th other write in the block; 0:
+    // at its start) + c.
+    let mut form: [(u8, u32, i64); 32] = core::array::from_fn(|r| (r as u8, 0, 0));
+    let mut version = [0u32; 32];
+    struct Group {
+        base: (u8, u32),
+        min: i64,
+        end: i64,
+        loads: bool,
+        stores: bool,
+        count: u32,
+        first: usize,
+        first_c: i64,
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    let mut of = vec![None; ops.len()];
+    for (k, op) in ops.iter().enumerate() {
+        if let Some(width) = access_width(op.kind) {
+            let (b, v, c) = form[op.rs1 as usize];
+            let at = c.wrapping_add(op.imm as i64);
+            let g = groups.iter().position(|g| g.base == (b, v)).unwrap_or_else(|| {
+                groups.push(Group { base: (b, v), min: at, end: at, loads: false, stores: false, count: 0, first: k, first_c: c });
+                groups.len() - 1
+            });
+            let group = &mut groups[g];
+            group.min = group.min.min(at);
+            group.end = group.end.max(at.wrapping_add(width));
+            group.count += 1;
+            if op.kind.is_load() {
+                group.loads = true;
+            } else {
+                group.stores = true;
+            }
+            of[k] = Some(g);
+        }
+        let rd = op.rd as usize;
+        if rd != 0 && rd < 32 && registers(op).1 & 1 << rd != 0 {
+            form[rd] = if op.kind == Kind::Addi {
+                let (b, v, c) = form[op.rs1 as usize];
+                (b, v, c.wrapping_add(op.imm as i64))
+            } else {
+                version[rd] += 1;
+                (rd as u8, version[rd], 0)
+            };
+        }
+    }
+    let mut slots = vec![None; groups.len()];
+    let mut used = 0;
+    for (g, group) in groups.iter().enumerate() {
+        if group.count >= 2 && group.end - group.min <= 256 && used < MAX_GROUPS {
+            slots[g] = Some(used as u32);
+            used += 1;
+        }
+    }
+    of.iter()
+        .enumerate()
+        .map(|(k, g)| {
+            let g = (*g)?;
+            let slot = slots[g]?;
+            let group = &groups[g];
+            let check = (group.first == k).then(|| Check {
+                from: group.min - group.first_c,
+                span: group.end - group.min,
+                loads: group.loads,
+                stores: group.stores,
+            });
+            Some(Member { slot, check })
+        })
+        .collect()
 }
 
 /// The registers an instruction reads and writes (bit r: x[r]).
@@ -1128,6 +1272,8 @@ struct Emitter<'a> {
     depth: u32,
     top: u32,
     self_loop: Option<SelfLoop>,
+    /// The memory groups of the block being compiled, by instruction.
+    members: Vec<Option<Member>>,
     chain: u32,
     exit: u32,
     helper_exit: u32,
@@ -1158,6 +1304,7 @@ impl<'a> Emitter<'a> {
             depth: 0,
             top: 0,
             self_loop: None,
+            members: Vec::new(),
             chain: 0,
             exit: 0,
             helper_exit: 0,
@@ -1420,7 +1567,122 @@ impl<'a> Emitter<'a> {
         self.o(I32_ADD);
     }
 
+    /// A memory group's check (its first access does it, for all, see
+    /// `memory_groups`): whether its range is on a page the JIT TLB has (for
+    /// what the group does: loads, stores), into its first local, and if so,
+    /// the page's host offset into its second.
+    fn group_check(&mut self, op: &Op, slot: u32, check: Check) {
+        let (ok, host) = (GROUP + 2 * slot, GROUP + 2 * slot + 1);
+        self.reg(op.rs1 as u32);
+        if check.from != 0 {
+            self.i64c(check.from);
+            self.o(I64_ADD);
+        }
+        self.local(LOCAL_TEE, ADDR);
+        self.i64c(7);
+        self.o(I64_SHR_U);
+        self.o(I32_WRAP_I64);
+        self.i32c(((TLB_SIZE - 1) << 5) as i32);
+        self.o(I32_AND);
+        self.hart();
+        self.o(I32_ADD);
+        self.local(LOCAL_SET, ENTRY);
+        if check.loads {
+            self.range_tag(0, check.span);
+        }
+        if check.stores {
+            self.range_tag(8, check.span);
+            if check.loads {
+                self.o(I32_AND);
+            }
+        }
+        self.open(IF, I32);
+        self.local(LOCAL_GET, ENTRY);
+        self.mem(I32_LOAD, self.tlb + 16);
+        self.local(LOCAL_SET, host);
+        if check.stores {
+            // No code on the page (Code::lines of its RAM page is 0).
+            self.local(LOCAL_GET, ADDR);
+            self.o(I32_WRAP_I64);
+            self.local(LOCAL_GET, host);
+            self.o(I32_ADD);
+            self.i32c(self.ram as i32);
+            self.o(I32_SUB);
+            self.i32c(12);
+            self.o(I32_SHR_U);
+            self.i32c(3);
+            self.o(I32_SHL);
+            self.mem(I64_LOAD, self.code_lines);
+            self.o(I64_EQZ);
+        } else {
+            self.i32c(1);
+        }
+        self.o(ELSE);
+        self.i32c(0);
+        self.close();
+        self.local(LOCAL_SET, ok);
+    }
+
+    /// Push whether ENTRY's tag (at `at`: loads 0, stores 8) is the page of
+    /// ADDR's range of `span` bytes (its last byte's: one across pages misses).
+    fn range_tag(&mut self, at: u32, span: i64) {
+        self.local(LOCAL_GET, ENTRY);
+        self.mem(I64_LOAD, self.tlb + at);
+        self.local(LOCAL_GET, ADDR);
+        if span > 1 {
+            self.i64c(span - 1);
+            self.o(I64_ADD);
+        }
+        self.i64c(!0xfff);
+        self.o(I64_AND);
+        self.local(LOCAL_GET, CTX);
+        self.o(I64_OR);
+        self.o(I64_EQ);
+    }
+
+    /// Into HOST: where a grouped access goes in linear memory, if its group's
+    /// check passed (its address plus the page's host offset).
+    fn group_host(&mut self, op: &Op, slot: u32) {
+        self.reg(op.rs1 as u32);
+        if op.imm != 0 {
+            self.i64c(op.imm as i64);
+            self.o(I64_ADD);
+        }
+        self.o(I32_WRAP_I64);
+        self.local(LOCAL_GET, GROUP + 2 * slot + 1);
+        self.o(I32_ADD);
+        self.local(LOCAL_SET, HOST);
+    }
+
     fn load(&mut self, k: u32, offset: i64, op: &Op, width: i64, opcode: u8) {
+        if let Some(Member { slot, check }) = self.members.get(k as usize).copied().flatten() {
+            // In a group: straight there if its check passed.
+            if let Some(check) = check {
+                self.group_check(op, slot, check);
+            }
+            self.group_host(op, slot);
+            self.local(LOCAL_GET, GROUP + 2 * slot);
+            self.open(IF, I64);
+            self.local(LOCAL_GET, HOST);
+            self.mem(opcode, 0);
+            self.o(ELSE);
+            self.slow_path(k, offset, op);
+            let rd = op.rd as u32;
+            if rd == SINK as u32 {
+                self.i64c(0);
+            } else {
+                self.hart();
+                self.mem(I64_LOAD, self.x + 8 * rd);
+            }
+            self.close();
+        } else {
+            self.load_value(k, offset, op, width, opcode);
+        }
+        self.set_reg(op.rd as u32);
+    }
+
+    /// Push what a load loads, the regular way: through the JIT TLB, or jit_op.
+    fn load_value(&mut self, k: u32, offset: i64, op: &Op, width: i64, opcode: u8) {
         self.tlb_lookup(op, width, false);
         self.open(IF, I64);
         self.host_address();
@@ -1435,12 +1697,32 @@ impl<'a> Emitter<'a> {
             self.mem(I64_LOAD, self.x + 8 * rd);
         }
         self.close();
-        self.set_reg(rd);
     }
 
     fn store(&mut self, k: u32, offset: i64, op: &Op, width: i64, opcode: u8) {
         self.reg(op.rs2 as u32);
         self.local(LOCAL_SET, B);
+        if let Some(Member { slot, check }) = self.members.get(k as usize).copied().flatten() {
+            // In a group: straight there if its check passed.
+            if let Some(check) = check {
+                self.group_check(op, slot, check);
+            }
+            self.group_host(op, slot);
+            self.local(LOCAL_GET, GROUP + 2 * slot);
+            self.open(IF, EMPTY);
+            self.local(LOCAL_GET, HOST);
+            self.local(LOCAL_GET, B);
+            self.mem(opcode, 0);
+            self.o(ELSE);
+            self.slow_path(k, offset, op);
+            self.close();
+        } else {
+            self.store_value(k, offset, op, width, opcode);
+        }
+    }
+
+    /// A store of B, the regular way: through the JIT TLB, or jit_op.
+    fn store_value(&mut self, k: u32, offset: i64, op: &Op, width: i64, opcode: u8) {
         self.tlb_lookup(op, width, true);
         // A hit, on a page without code (Code::lines of its RAM page is 0).
         self.open(IF, I32);
@@ -1591,8 +1873,9 @@ impl<'a> Emitter<'a> {
         let cases = &hart.jit.cases;
         let case_at = &hart.jit.case_at[..];
         let n = cases.len() as u32;
-        // Locals: 36 i64 (x1..x31, ADDR, A, B, CTX, PC_OUT), 3 i32 (ENTRY, FETCH, HOST).
-        self.out.extend_from_slice(&[2, 36, I64, 3, I32]);
+        // Locals: 36 i64 (x1..x31, ADDR, A, B, CTX, PC_OUT), 3 i32 (ENTRY,
+        // FETCH, HOST), then the memory groups' (GROUP...).
+        self.out.extend_from_slice(&[2, 36, I64, 3 + 2 * MAX_GROUPS as u8, I32]);
         self.hart();
         self.mem(I64_LOAD, self.ctx);
         self.local(LOCAL_SET, CTX);
@@ -1631,6 +1914,7 @@ impl<'a> Emitter<'a> {
             // (written back at every way out of it, as if all it writes were
             // changed: they're all in their locals) kept there.
             let ops = &hart.ops[block.start as usize..(block.start + length) as usize];
+            self.members = memory_groups(ops);
             if loops_to(ops, start_offset) {
                 let (reads, writes) = ops.iter().fold((0, 0), |(r, w), op| {
                     let (reads, writes) = registers(op);
@@ -1882,5 +2166,96 @@ impl<'a> Emitter<'a> {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocks::decode;
+
+    /// Ops from 32-bit encodings.
+    fn ops(code: &[u32]) -> Vec<Op> {
+        code.iter().map(|&inst| decode(inst, 4, inst)).collect()
+    }
+
+    // Encodings: I-type (addi, loads), S-type (stores).
+    fn i(opcode: u32, funct3: u32, rd: u32, rs1: u32, imm: i32) -> u32 {
+        ((imm as u32 & 0xfff) << 20) | rs1 << 15 | funct3 << 12 | rd << 7 | opcode
+    }
+    fn s(funct3: u32, rs1: u32, rs2: u32, imm: i32) -> u32 {
+        let imm = imm as u32 & 0xfff;
+        (imm >> 5) << 25 | rs2 << 20 | rs1 << 15 | funct3 << 12 | (imm & 0x1f) << 7 | 0x23
+    }
+    fn addi(rd: u32, rs1: u32, imm: i32) -> u32 {
+        i(0x13, 0, rd, rs1, imm)
+    }
+    fn ld(rd: u32, rs1: u32, imm: i32) -> u32 {
+        i(0x03, 3, rd, rs1, imm)
+    }
+    fn lw(rd: u32, rs1: u32, imm: i32) -> u32 {
+        i(0x03, 2, rd, rs1, imm)
+    }
+    fn sd(rs1: u32, rs2: u32, imm: i32) -> u32 {
+        s(3, rs1, rs2, imm)
+    }
+    fn add(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        rs2 << 20 | rs1 << 15 | rd << 7 | 0x33
+    }
+    const A0: u32 = 10;
+    const A1: u32 = 11;
+    const A3: u32 = 13;
+    const A4: u32 = 14;
+    const A5: u32 = 15;
+    const A6: u32 = 16;
+    const SP: u32 = 2;
+
+    fn member(slot: u32) -> Option<Member> {
+        Some(Member { slot, check: None })
+    }
+    fn first(slot: u32, from: i64, span: i64, loads: bool, stores: bool) -> Option<Member> {
+        Some(Member { slot, check: Some(Check { from, span, loads, stores }) })
+    }
+
+    #[test]
+    fn groups_accesses_off_one_register() {
+        // Saving and restoring on the stack: one group each way.
+        let code = ops(&[sd(SP, A0, 8), sd(SP, A1, 16), ld(A3, SP, 8), lw(A4, SP, 20)]);
+        assert_eq!(memory_groups(&code), vec![first(0, 8, 16, true, true), member(0), member(0), member(0)]);
+    }
+
+    #[test]
+    fn follows_registers_that_are_others_plus_a_constant() {
+        // glibc's memcpy loop: the stores through a0 and a3, each a5 (a0 - 16) plus
+        // something; the loads through a1, moved along.
+        let code = ops(&[
+            addi(A5, A0, -16),
+            ld(A6, A1, 16),
+            addi(A3, A5, 24),
+            sd(A0, A4, 0),
+            ld(A4, A1, 24),
+            addi(A0, A5, 32),
+            sd(A3, A6, 0),
+            addi(A1, A1, 64),
+            ld(A6, A1, -32),
+            sd(A0, A4, 0),
+        ]);
+        let groups = memory_groups(&code);
+        // Loads: a1 + 16, + 24, + 32 (after a1 += 64: -32): one group, checked
+        // from the first (at a1 + 16).
+        assert_eq!(groups[1], first(0, 16, 24, true, false));
+        assert_eq!((groups[4], groups[8]), (member(0), member(0)));
+        // Stores: a0 + 0, a0 + 8 (a3), a0 + 16 (a0, moved): one group.
+        assert_eq!(groups[3], first(1, 0, 24, false, true));
+        assert_eq!((groups[6], groups[9]), (member(1), member(1)));
+    }
+
+    #[test]
+    fn leaves_out_what_it_cant_tell() {
+        // A register written otherwise starts a new group (a1 + a1 isn't a1 plus
+        // anything); one access alone isn't a group; nor are accesses farther
+        // apart than 256 bytes.
+        let code = ops(&[ld(A3, A1, 0), add(A1, A1, A1), ld(A4, A1, 0), ld(A5, A0, 0), ld(A6, A0, 256)]);
+        assert_eq!(memory_groups(&code), vec![None, None, None, None, None]);
     }
 }

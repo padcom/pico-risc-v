@@ -204,7 +204,7 @@ impl Kind {
 }
 
 /// Decode a 32-bit instruction (`len` 4) or a compressed one's expansion (`len` 2, `raw` its bits).
-fn decode(inst: u32, len: u8, raw: u32) -> Op {
+pub(crate) fn decode(inst: u32, len: u8, raw: u32) -> Op {
     let rd = ((inst >> 7) & 0x1f) as u8;
     let rs1 = ((inst >> 15) & 0x1f) as u8;
     let rs2 = ((inst >> 20) & 0x1f) as u8;

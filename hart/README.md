@@ -141,6 +141,8 @@ run executes exactly the same instructions:
 | ...compiled code running on into the next block, whole blocks | 3815 MIPS | 4150 MIPS | 754 MIPS, 16 s |
 | ...loops of one block compiled as loops | 4605 MIPS | 5085 MIPS | 756 MIPS, 16 s |
 | ...compiled code shared by the harts | 5140 MIPS | 5665 MIPS | 801 MIPS, 15 s |
+| (the same, Debian's image rebuilt with the desktop: 11.2 billion instructions) | 5115 MIPS | 5675 MIPS | 864 MIPS, 12.9 s |
+| ...loads and stores off one value sharing one translation check | 5085 MIPS | 5660 MIPS | 912 MIPS, 12.2 s |
 
 Measured on an Apple Silicon Mac with Node 26. Earlier, when the core also
 did RV32 (see the git history), the TypeScript CPU it replaced ran the
