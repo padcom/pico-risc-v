@@ -203,8 +203,12 @@ clock.
 
 `npm run web` serves the emulator as a web page: open
 <http://localhost:8080/> and the same Debian boots in the page, on 4 harts
-(Web Workers) with 1 GiB of RAM, in an [xterm.js](https://xtermjs.org/)
-terminal. Debian must have been set up once (`npm start` does it).
+(Web Workers) with 1 GiB of RAM, to its desktop (Xfce) on the machine's
+screen, which fills the page. The status bar's buttons switch between the
+screen and the terminal (an [xterm.js](https://xtermjs.org/) one: the
+serial port, where the boot messages are, and the console, logged in as
+root), or show the screen full screen (Esc leaves). Debian must have been
+set up once (`npm start` does it).
 
 - **The disk** is `pristine.raw`, read from the server a piece at a time as
   Debian needs it. What Debian writes, the browser keeps (in IndexedDB,
@@ -222,11 +226,11 @@ terminal. Debian must have been set up once (`npm start` does it).
   machine get a network (not other web sites open in the browser).
 - `?harts=2`, `?memory=512` change the machine; `?image=examples/build/hello.bin`
   boots a bare-metal program instead of Debian.
-- `?display` gives the machine a screen, 1024×768 (`?display=800x600`,
-  another size), shown above the terminal, and Debian starts its desktop,
-  Xfce, on it: root is logged in on the screen (`tty1`) by itself, and
-  `startx` runs (in about 15 seconds; closing the session leaves a shell
-  there). The screen is a framebuffer, as boot firmware leaves one set up,
+- **The screen** is 1024×768 (`?display=800x600`: another size;
+  `?display=0`: none, the terminal only, as for `?image=`, unless it says
+  `?display`). Debian starts its desktop, Xfce, on it: root is logged in on
+  the screen (`tty1`) by itself, and `startx` runs (in about 15 seconds;
+  closing the session leaves a shell there). The screen is a framebuffer, as boot firmware leaves one set up,
   which Linux has as `/dev/fb0`: Debian gets it from U-Boot, through UEFI
   (`efifb`); Alpine's kernel from the device tree (`simpledrm`). (GRUB then
   writes to the screen, not the serial port.) X draws on it in software:
@@ -253,8 +257,8 @@ file system for riscv64, with the packages in `linux/alpine/packages` on top
 (to change what's on the disk, edit that list), and Alpine's kernel and
 OpenSBI. There's no bootloader: the emulator starts the kernel itself, with a
 small initramfs made by the build (BusyBox and the modules it takes to mount
-the disk). The console logs in as root by itself. With a screen (`?display`)
-Alpine starts a light desktop on it: X with twm and an xterm (a click on the
+the disk). The console logs in as root by itself. On the screen (in the
+page, by default) Alpine starts a light desktop: X with twm and an xterm (a click on the
 desktop opens twm's menu: another terminal, closing windows, quitting X).
 There's no udev, so X is told where the keyboard and the mouse are
 (`/etc/X11/xorg.conf.d`), and Mesa's 3D drivers, which X's packages bring

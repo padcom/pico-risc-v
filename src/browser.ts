@@ -32,10 +32,15 @@
  *   harts=<n>            default 4
  *   persist=0            don't keep the disk's changes (a throwaway session)
  *   memory=<MiB>         default 1024 for Debian, boot.json's, 64 for an image
- *   display=<w>x<h>      a screen (1024x768 if just display), shown above
- *                        the terminal; Linux has it as /dev/fb0. With it
- *                        come a keyboard, which has the keys while the
- *                        screen has the focus (click it), and a mouse
+ *   display=<w>x<h>      the screen's size (default 1024x768); display=0:
+ *                        no screen, the terminal only (as for an image,
+ *                        unless it says display). Linux has the screen as
+ *                        /dev/fb0, the distributions their desktops on it.
+ *                        With it come a keyboard, which has the keys while
+ *                        the screen has the focus (click it), and a mouse.
+ *                        The page shows the screen or the terminal (the
+ *                        buttons in the status bar), the screen fitted to
+ *                        the page, or full screen
  *
  * How the machine stopped ends up in the page's `data-result` attribute,
  * and everything it printed in `window.emulatorOutput` (for tests).
@@ -45,6 +50,7 @@ import { Terminal } from '@xterm/xterm'
 import { type BlockStorage, SnapshotStorage } from './block-storage.js'
 import { ChunkedStorage, gunzip } from './chunked-storage.js'
 import { setCoreModule } from './cpu.js'
+import { fit as fitArea } from './fit.js'
 import { LINUX_KEYS } from './keymap.js'
 import { HttpStorage } from './http-storage.js'
 import { IndexedDbStore } from './indexeddb-store.js'
@@ -78,7 +84,8 @@ const distribution = params.get('distribution') ?? page.distribution ?? 'debian'
 const harts = Number(params.get('harts') ?? 4)
 const relay = params.get('relay')
 const persist = params.get('persist') !== '0'
-const display = params.has('display') ? parseDisplay(params.get('display')!) : undefined
+// A screen by default; for a bare-metal program, only when asked for.
+const display = params.get('display') === '0' || (image && !params.has('display')) ? undefined : parseDisplay(params.get('display') ?? '')
 /** How often the disk's changes are saved, besides when the guest flushes it (ms). */
 const SAVE_INTERVAL = 2000
 /** Where npm run relay is, by default. */
@@ -175,7 +182,7 @@ try {
   throw error
 }
 
-/** `display`'s value: <width>x<height>, 1024x768 if none. */
+/** `display`'s value: <width>x<height>, 1024x768 if none (or just `display`). */
 function parseDisplay(value: string): { width: number; height: number } {
   if (!value) return { width: 1024, height: 768 }
   const [, width, height] = /^(\d+)x(\d+)$/.exec(value) ?? []
@@ -184,24 +191,55 @@ function parseDisplay(value: string): { width: number; height: number } {
 }
 
 /**
- * Show the screen on the page's canvas, a frame at a time (when it changed),
- * and pass the keys pressed while it has the focus to the keyboard, what the
- * mouse does over it to the tablet.
+ * Show the screen on the page's canvas (in its view, which it fills keeping
+ * its shape; the terminal's view is the other one: the status bar's buttons
+ * switch, or the screen goes full screen), a frame at a time (when it
+ * changed), and pass the keys pressed while it has the focus to the
+ * keyboard, what the mouse does over it to the tablet.
  */
 function show(machine: Machine): void {
   const screen = machine.screen!
   const canvas = document.getElementById('screen') as HTMLCanvasElement
+  const screenView = document.getElementById('screen-view')!
+  const terminalView = document.getElementById('terminal')!
   canvas.width = screen.width
   canvas.height = screen.height
-  canvas.hidden = false
-  fit.fit() // (the terminal has less room now)
   const context = canvas.getContext('2d')!
   const image = context.createImageData(screen.width, screen.height)
+  let stale = true
   const frame = () => {
-    if (screen.draw(image.data)) context.putImageData(image, 0, 0)
+    // (Not drawn while it isn't shown; then all of it, once it is again.)
+    if (!screenView.hidden && (screen.draw(image.data) || stale)) {
+      context.putImageData(image, 0, 0)
+      stale = false
+    }
     requestAnimationFrame(frame)
   }
   frame()
+
+  // The views: the screen, or the terminal.
+  const buttons = { screen: document.getElementById('show-screen')!, terminal: document.getElementById('show-terminal')! }
+  const view = (which: 'screen' | 'terminal') => {
+    screenView.hidden = which !== 'screen'
+    terminalView.hidden = which !== 'terminal'
+    buttons.screen.setAttribute('aria-pressed', String(which === 'screen'))
+    buttons.terminal.setAttribute('aria-pressed', String(which === 'terminal'))
+    if (which === 'screen') {
+      stale = true
+      canvas.focus()
+    } else {
+      fit.fit() // (the terminal's size: it couldn't tell while hidden)
+      terminal.focus()
+    }
+  }
+  buttons.screen.addEventListener('click', () => view('screen'))
+  buttons.terminal.addEventListener('click', () => view('terminal'))
+  document.getElementById('fullscreen')!.addEventListener('click', () => {
+    view('screen')
+    void screenView.requestFullscreen?.().then(() => canvas.focus())
+  })
+  document.getElementById('view-switch')!.hidden = false
+  view('screen')
 
   const keyboard = machine.keyboard!
   const tablet = machine.tablet!
@@ -229,11 +267,13 @@ function show(machine: Machine): void {
 
   const BUTTONS = [Input.BTN_LEFT, Input.BTN_MIDDLE, Input.BTN_RIGHT] // by MouseEvent.button
   const at = (event: MouseEvent): [number, number, number][] => {
+    // (Where the screen is in the canvas element: it keeps its shape, with bars.)
     const box = canvas.getBoundingClientRect()
+    const area = fitArea(screen.width, screen.height, box.width, box.height)
     const scale = (value: number, size: number) => Math.round(Math.min(Math.max(value / size, 0), 1) * TABLET_MAX)
     return [
-      [Input.EV_ABS, Input.ABS_X, scale(event.clientX - box.left, box.width)],
-      [Input.EV_ABS, Input.ABS_Y, scale(event.clientY - box.top, box.height)],
+      [Input.EV_ABS, Input.ABS_X, scale(event.clientX - box.left - area.x, area.width)],
+      [Input.EV_ABS, Input.ABS_Y, scale(event.clientY - box.top - area.y, area.height)],
     ]
   }
   canvas.addEventListener('pointermove', event => tablet.send(...at(event)))

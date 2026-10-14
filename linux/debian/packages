@@ -14,3 +14,5 @@ xfce4
 xfce4-terminal
 dbus-x11
 fonts-dejavu-core
+# SVG images (GdkPixbuf's loader): Xfce's wallpaper, and icons, are SVGs
+librsvg2-common

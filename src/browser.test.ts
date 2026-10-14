@@ -6,6 +6,7 @@ import { extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { fit } from './fit.js'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 
@@ -90,7 +91,7 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
       relay?.kill()
     })
 
-    it('boots Alpine to its shell, on 4 harts, isolated by the service worker, with a network through the relay', { timeout: 120_000 }, async () => {
+    it('boots Alpine to its shell and its desktop, on 4 harts, isolated by the service worker, with a network through the relay', { timeout: 180_000 }, async () => {
       const browser = await chromium.launch()
       try {
         const page = await browser.newPage()
@@ -107,6 +108,49 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
         expect(await page.evaluate(() => document.getElementById('status')!.textContent)).toBe('running on 4 harts')
         // The address from the relay's NAT, by DHCP.
         expect(await page.evaluate(() => document.getElementById('network')!.textContent)).toBe(`network: through ${relayUrl}`)
+
+        // The page shows the screen first; the status bar's buttons switch.
+        const shown = () =>
+          page.evaluate(() => ({
+            screen: !document.getElementById('screen-view')!.hidden,
+            terminal: !document.getElementById('terminal')!.hidden,
+            pressed: document.getElementById('show-screen')!.getAttribute('aria-pressed'),
+          }))
+        expect(await shown()).toEqual({ screen: true, terminal: false, pressed: 'true' })
+        await page.click('#show-terminal')
+        expect(await shown()).toEqual({ screen: false, terminal: true, pressed: 'false' })
+        await page.click('#show-screen')
+        expect(await shown()).toEqual({ screen: true, terminal: false, pressed: 'true' })
+
+        // The mouse lands where it's clicked, though the screen is scaled to the
+        // page: holding its button down on the desktop (3/4 of the way across
+        // and down), twm's menu is right there, in the canvas (its title at the
+        // pointer, its items below, on #eeeeee: ~/.twmrc).
+        const box = (await page.locator('#screen').boundingBox())!
+        const area = fit(1024, 768, box.width, box.height)
+        const at = { x: box.x + area.x + 0.75 * area.width, y: box.y + area.y + 0.75 * area.height }
+        const menu = () =>
+          page.evaluate(() => {
+            const pixels = document.querySelector<HTMLCanvasElement>('#screen')!.getContext('2d')!.getImageData(768 - 20, 576 + 30, 40, 60).data
+            let items = 0
+            for (let i = 0; i < pixels.length; i += 4) if (pixels[i] === 0xee && pixels[i + 1] === 0xee && pixels[i + 2] === 0xee) items++
+            return items
+          })
+        let opened = false
+        for (let i = 0, deadline = Date.now() + 90_000; !opened && Date.now() < deadline; i++) {
+          // (Until X and twm are up: again and again, a pixel apart, as Linux
+          // passes on a position only when it changes, and X only listens
+          // once it's up.)
+          await page.mouse.move(at.x + (i % 2), at.y + (i % 2))
+          await page.mouse.down()
+          await page.waitForTimeout(1500)
+          opened = (await menu()) > 40 * 60 * 0.5
+          await page.mouse.up()
+        }
+        expect(opened).toBe(true)
+
+        // (The keys go to the terminal once it's shown.)
+        await page.click('#show-terminal')
         await page.keyboard.type('ip -4 addr show eth0 | grep -o "inet [0-9./]*"\n')
         await until('inet 10.0.2.15/24')
         expect(await output()).toContain('inet 10.0.2.15/24')
@@ -127,7 +171,8 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
           expect(await output()).toContain(text)
         }
         const disk = () => page.evaluate(() => document.getElementById('disk')!.textContent)
-        await page.goto(url)
+        // (No screen: no desktop to start, the terminal only. Reloads keep it so.)
+        await page.goto(`${url}?display=0`)
         await until('alpine:~# ')
         expect(await disk()).toBe('disk: changes kept in this browser · start over')
         await page.keyboard.type('echo "kept-$((6*7))" > /root/note.txt; sync; echo synced-$((0+1))\n')

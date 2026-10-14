@@ -120,6 +120,8 @@ describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => exi
         expect(s.screen).toContain("Using input driver 'libinput' for 'risc-emulator keyboard'")
         expect(s.screen).toContain("Using input driver 'libinput' for 'risc-emulator tablet'")
         await until(s, 'the panel', () => lit(pixels(s), 0, 20) > (WIDTH * 20) / 2)
+        // The wallpaper (an SVG: librsvg2-common draws it), not black.
+        await until(s, 'the wallpaper', () => lit(pixels(s), 300, 500) > (WIDTH * 200) / 2)
 
         // A VNC viewer (npm start --display) gets the screen as it is, and
         // what it does gets to X: a right-click on the desktop opens Xfce's
