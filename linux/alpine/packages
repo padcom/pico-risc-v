@@ -19,6 +19,7 @@ xf86-input-evdev
 xinit
 twm
 xterm
+xrandr
 font-misc-misc
 font-cursor-misc
 font-alias

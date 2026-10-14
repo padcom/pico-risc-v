@@ -9,6 +9,8 @@ xserver-xorg-video-fbdev
 xserver-xorg-input-libinput
 xinit
 xauth
+# xrandr: X takes the screen's new size when it changes (overlay: udev's rule)
+x11-xserver-utils
 # ...and Xfce, with its terminal; startx starts it (x-session-manager)
 xfce4
 xfce4-terminal

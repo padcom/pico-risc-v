@@ -23,7 +23,7 @@ describe('VNC server', () => {
     const keys: number[][] = []
     const pointer: number[][] = []
     const device = (events: number[][]) => ({ send: (...sent: number[][]) => events.push(...sent) }) as unknown as VirtioInput
-    server = new VncServer({ screen, keyboard: device(keys), tablet: device(pointer) }, 'test')
+    server = new VncServer({ output: screen, keyboard: device(keys), tablet: device(pointer), setDisplaySize: () => {} }, 'test')
     const port = await server.listen(0)
     return { screen, keys, pointer, port }
   }
@@ -138,6 +138,33 @@ describe('VNC server', () => {
       [Input.EV_REL, Input.REL_WHEEL, 1],
       ...at(0, 0),
     ])
+  })
+
+  it('tells a viewer that can be told (DesktopSize) that the screen got another size, then sends it all', async () => {
+    let screen = new Framebuffer(WIDTH, HEIGHT, new Uint8Array(Framebuffer.size(WIDTH, HEIGHT)))
+    const input = { send: () => {} } as unknown as VirtioInput
+    server = new VncServer({ get output() { return screen }, keyboard: input, tablet: input, setDisplaySize: () => {} }, 'test')
+    const port = await server.listen(0)
+    client = await RfbClient.connect(port)
+    const other = await RfbClient.connect(port) // (one that can't be told)
+    try {
+      client.setEncodings([0, -223])
+      other.setEncodings([0])
+      await client.update(false)
+      await other.update(false)
+      screen = new Framebuffer(120, 40, new Uint8Array(Framebuffer.size(120, 40)))
+      screen.pixels.fill(0x777777)
+      const [resized] = await client.update(true)
+      expect([resized!.w, resized!.h, client.width, client.height]).toEqual([120, 40, 120, 40])
+      const all = await client.update(true)
+      expect(all.map(({ x, y, w, h }) => [x, y, w, h])).toEqual([[0, 0, 120, 40]])
+      // The other keeps its size, and gets what fits (100 × 40).
+      const fits = await other.update(true)
+      expect([other.width, other.height]).toEqual([WIDTH, HEIGHT])
+      expect(fits.every(({ x, w, y, h }) => x + w <= 100 && y + h <= 40)).toBe(true)
+    } finally {
+      other.close()
+    }
   })
 
   it('knows the keys of keysyms: characters, shifted ones, and keys that type none', () => {

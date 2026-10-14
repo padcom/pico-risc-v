@@ -1,16 +1,9 @@
 import { randomBytes } from 'node:crypto'
 import { appendFileSync } from 'node:fs'
 import { createServer, type Server, type Socket } from 'node:net'
-import type { Framebuffer } from './framebuffer.js'
+import type { Display } from './display.js'
 import { linuxKey } from './keysyms.js'
-import { Input, TABLET_MAX, type VirtioInput } from './virtio-input.js'
-
-/** What a VNC server shows and passes input to (a Machine with a screen). */
-export interface Display {
-  screen: Framebuffer
-  keyboard: VirtioInput
-  tablet: VirtioInput
-}
+import { Input, TABLET_MAX } from './virtio-input.js'
 
 /**
  * With RISC_EMULATOR_VNC_LOG=<file>, what viewers and the server say to
@@ -21,6 +14,9 @@ let connections = 0
 function log(connection: number, message: string): void {
   if (LOG) appendFileSync(LOG, `${new Date().toISOString()} #${connection} ${message}\n`)
 }
+
+/** RFB's DesktopSize pseudo-encoding: a viewer that sends it can be told the screen's size changed. */
+const DESKTOP_SIZE = -223
 
 /** How often to look for changes on the screen to send (ms). */
 const FRAME = 30
@@ -93,8 +89,13 @@ class Client {
   private format = NATIVE
   /** A FramebufferUpdateRequest to answer: incremental (only what changed), or all of it. */
   private request: 'incremental' | 'full' | undefined
-  /** The screen as the viewer has it (what was last sent). */
-  private readonly sent: Uint32Array
+  /** The screen as the viewer has it: its size, and what was last sent. */
+  private width = 0
+  private height = 0
+  private sent = new Uint32Array(0)
+  /** Whether the viewer can be told the screen's size changed (DesktopSize); then, whether all of it is to be sent. */
+  private desktopSize = false
+  private all = false
   /** Mouse buttons held (RFB's button mask). */
   private buttons = 0
   /** Keys held: the KEY_* each keysym pressed. */
@@ -108,7 +109,6 @@ class Client {
     private readonly display: Display,
     private readonly name: string,
   ) {
-    this.sent = new Uint32Array(display.screen.width * display.screen.height)
     socket.setNoDelay(true)
     log(this.id, `connected from ${socket.remoteAddress}:${socket.remotePort}`)
     socket.on('data', (data: Buffer) => {
@@ -138,8 +138,37 @@ class Client {
   /** Send what changed, if the viewer asked for it. */
   update(): void {
     if (this.request !== 'incremental' || this.socket.writableLength) return
-    const rects = this.changes()
+    if (this.resized()) return
+    const rects = this.all ? [[0, 0, this.width, this.height] as [number, number, number, number]] : this.changes()
     if (rects.length) this.send(rects)
+  }
+
+  /**
+   * The screen's size changed: tell a viewer that can be told (a DesktopSize
+   * update, answering its request), which then gets all of it. (One that
+   * can't keeps its size: it gets what fits.) Returns whether it was told.
+   */
+  private resized(): boolean {
+    const screen = this.display.output
+    if (!this.desktopSize || !screen || (screen.width === this.width && screen.height === this.height)) return false
+    log(this.id, `DesktopSize ${screen.width}x${screen.height}`)
+    this.size(screen.width, screen.height)
+    const update = Buffer.alloc(16)
+    update.writeUInt16BE(1, 2) // one rectangle,
+    update.writeUInt16BE(this.width, 8)
+    update.writeUInt16BE(this.height, 10)
+    update.writeInt32BE(DESKTOP_SIZE, 12) // the new size
+    this.request = undefined
+    this.all = true
+    this.socket.write(update)
+    return true
+  }
+
+  /** The viewer's screen is `width` × `height` now (nothing on it sent yet). */
+  private size(width: number, height: number): void {
+    this.width = width
+    this.height = height
+    this.sent = new Uint32Array(width * height)
   }
 
   /** Take one thing from the input; false if it isn't all there yet. */
@@ -191,11 +220,12 @@ class Client {
       case 'init': {
         if (!take(1)) return false // shared flag
         log(this.id, 'ClientInit; sending ServerInit')
-        const { width, height } = this.display.screen
+        const screen = this.display.output
+        this.size(screen?.width ?? 1024, screen?.height ?? 768)
         const name = Buffer.from(this.name)
         const init = Buffer.alloc(24)
-        init.writeUInt16BE(width, 0)
-        init.writeUInt16BE(height, 2)
+        init.writeUInt16BE(this.width, 0)
+        init.writeUInt16BE(this.height, 2)
         writeFormat(init, 4, NATIVE)
         init.writeUInt32BE(name.length, 20)
         this.socket.write(Buffer.concat([init, name]))
@@ -228,7 +258,9 @@ class Client {
         if (!head) return false
         const m = take(4 + 4 * head.readUInt16BE(2))
         if (!m) return false
-        log(this.id, `SetEncodings ${Array.from({ length: head.readUInt16BE(2) }, (_, i) => m.readInt32BE(4 + 4 * i)).join(' ')}`)
+        const encodings = Array.from({ length: head.readUInt16BE(2) }, (_, i) => m.readInt32BE(4 + 4 * i))
+        log(this.id, `SetEncodings ${encodings.join(' ')}`)
+        this.desktopSize = encodings.includes(DESKTOP_SIZE)
         return true
       }
       case 3: {
@@ -238,7 +270,7 @@ class Client {
         if (this.updates++ < 5) log(this.id, `FramebufferUpdateRequest ${m[1] ? 'incremental' : 'full'} ${m.readUInt16BE(2)},${m.readUInt16BE(4)} ${m.readUInt16BE(6)}x${m.readUInt16BE(8)}`)
         if (m[1]) this.request ??= 'incremental'
         else this.request = 'full'
-        if (this.request === 'full') this.send([[0, 0, this.display.screen.width, this.display.screen.height]])
+        if (this.request === 'full' && !this.resized()) this.send([[0, 0, this.width, this.height]])
         return true
       }
       case 4: {
@@ -273,7 +305,7 @@ class Client {
       this.keys.set(keysym, key)
       // (Held down, viewers send it again and again: Linux takes a press of a
       // key that's down as nothing, and repeats it itself.)
-      this.display.keyboard.send([Input.EV_KEY, key, 1])
+      this.display.keyboard?.send([Input.EV_KEY, key, 1])
     } else {
       // The key it pressed; or the one it would be on, pressed under another
       // keysym ("!" with Shift, released as "1" after Shift).
@@ -285,13 +317,13 @@ class Client {
         this.keys.delete(sym)
         held = true
       }
-      if (held) this.display.keyboard.send([Input.EV_KEY, key, 0])
+      if (held) this.display.keyboard?.send([Input.EV_KEY, key, 0])
     }
   }
 
   /** RFB's buttons (mask bits): left, middle, right, then wheel up, down, left, right. */
   private pointer(mask: number, x: number, y: number): void {
-    const { width, height } = this.display.screen
+    const { width, height } = this
     const scale = (value: number, size: number) => Math.round((Math.min(value, size - 1) / Math.max(size - 1, 1)) * TABLET_MAX)
     const events: [number, number, number][] = [
       [Input.EV_ABS, Input.ABS_X, scale(x, width)],
@@ -308,19 +340,31 @@ class Client {
     if (pressed & 0x20) events.push([Input.EV_REL, Input.REL_HWHEEL, -1])
     if (pressed & 0x40) events.push([Input.EV_REL, Input.REL_HWHEEL, 1])
     this.buttons = mask
-    this.display.tablet.send(...events)
+    this.display.tablet?.send(...events)
   }
 
   /** The viewer is gone: let go of what it held. */
   private letGo(): void {
-    for (const key of this.keys.values()) this.display.keyboard.send([Input.EV_KEY, key, 0])
+    for (const key of this.keys.values()) this.display.keyboard?.send([Input.EV_KEY, key, 0])
     this.keys.clear()
     if (this.buttons & 7) this.pointer(0, 0, 0)
   }
 
+  /**
+   * The screen's pixels, rows `stride` apart, and how much of it the viewer
+   * has (all, unless it couldn't be told the size changed).
+   */
+  private view(): { pixels: Uint32Array; stride: number; width: number; height: number } | undefined {
+    const screen = this.display.output
+    if (!screen) return undefined
+    return { pixels: screen.pixels, stride: screen.width, width: Math.min(this.width, screen.width), height: Math.min(this.height, screen.height) }
+  }
+
   /** The tiles that changed since they were sent, as rectangles (runs of them in a row). */
   private changes(): [x: number, y: number, w: number, h: number][] {
-    const { width, height, pixels } = this.display.screen
+    const view = this.view()
+    if (!view) return []
+    const { width, height, pixels, stride } = view
     const rects: [number, number, number, number][] = []
     const tiles = Math.ceil(width / TILE)
     for (let top = 0; top < height; top += TILE) {
@@ -329,7 +373,7 @@ class Client {
       // (One past the last tile: ends a run that goes to the right edge.)
       for (let tile = 0; tile <= tiles; tile++) {
         const left = tile * TILE
-        const changed = tile < tiles && differs(pixels, this.sent, width, left, top, Math.min(TILE, width - left), h)
+        const changed = tile < tiles && differs(pixels, stride, this.sent, this.width, left, top, Math.min(TILE, width - left), h)
         if (changed) run ??= left
         else if (run !== undefined) {
           rects.push([run, top, left - run, h])
@@ -342,7 +386,12 @@ class Client {
 
   /** A FramebufferUpdate with these rectangles (raw), which the viewer then has. */
   private send(rects: [x: number, y: number, w: number, h: number][]): void {
-    const { width, pixels } = this.display.screen
+    const view = this.view()
+    if (!view) return
+    const { pixels, stride } = view
+    // (Only what the screen has: the viewer's may be bigger, if it couldn't be told.)
+    rects = rects.map(([x, y, w, h]) => [x, y, Math.max(0, Math.min(w, view.width - x)), Math.max(0, Math.min(h, view.height - y))])
+    this.all = false
     const parts: Buffer[] = [Buffer.from([0, 0, rects.length >> 8, rects.length & 0xff])]
     for (const [x, y, w, h] of rects) {
       const header = Buffer.alloc(12)
@@ -353,9 +402,9 @@ class Client {
       header.writeInt32BE(0, 8) // raw
       const data = Buffer.alloc(w * h * this.format.bytes)
       for (let row = 0; row < h; row++) {
-        const from = (y + row) * width + x
+        const from = (y + row) * stride + x
         const line = pixels.subarray(from, from + w)
-        this.sent.set(line, from)
+        this.sent.set(line, (y + row) * this.width + x)
         encode(line, data, row * w * this.format.bytes, this.format)
       }
       parts.push(header, data)
@@ -365,10 +414,10 @@ class Client {
   }
 }
 
-/** Whether a w × h tile at (x, y) differs between `a` and `b` (screens `width` wide). */
-function differs(a: Uint32Array, b: Uint32Array, width: number, x: number, y: number, w: number, h: number): boolean {
+/** Whether a w × h tile at (x, y) differs between `a` and `b` (rows `aStride`, `bStride` pixels apart). */
+function differs(a: Uint32Array, aStride: number, b: Uint32Array, bStride: number, x: number, y: number, w: number, h: number): boolean {
   for (let row = y; row < y + h; row++) {
-    for (let i = row * width + x, end = i + w; i < end; i++) if (a[i] !== b[i]) return true
+    for (let i = row * aStride + x, j = row * bStride + x, end = i + w; i < end; i++, j++) if (a[i] !== b[j]) return true
   }
   return false
 }

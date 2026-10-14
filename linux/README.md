@@ -65,7 +65,8 @@ mouse, and Debian starts its desktop (Xfce) on it, as in the page
 (`?display`, below). It opens in a window of its own (SDL, through the
 `@kmamal/sdl` package, which `npm install` installs where it can); the keys
 go to the guest by their place on the keyboard, so Debian's keyboard layout
-says what they type; closing the window quits the emulator.
+says what they type; resizing the window resizes the desktop (see the
+screen, below); closing the window quits the emulator.
 
 `--vnc 5900` shows the screen to VNC viewers on this machine too (or
 instead, without `--display`): open `vnc://localhost:5900` in macOS's Screen
@@ -226,15 +227,22 @@ set up once (`npm start` does it).
   machine get a network (not other web sites open in the browser).
 - `?harts=2`, `?memory=512` change the machine; `?image=examples/build/hello.bin`
   boots a bare-metal program instead of Debian.
-- **The screen** is 1024×768 (`?display=800x600`: another size;
-  `?display=0`: none, the terminal only, as for `?image=`, unless it says
-  `?display`). Debian starts its desktop, Xfce, on it: root is logged in on
-  the screen (`tty1`) by itself, and `startx` runs (in about 15 seconds;
-  closing the session leaves a shell there). The screen is a framebuffer, as boot firmware leaves one set up,
+- **The screen** is as big as the page's room for it, and follows it: resize
+  the window (or go full screen) and the desktop takes the new size, a
+  moment after you stop (`?display=800x600`: a fixed size; `?display=0`:
+  none, the terminal only, as for `?image=`, unless it says `?display`).
+  Debian starts its desktop, Xfce, on it: root is logged in on the screen
+  (`tty1`) by itself, and `startx` runs (in about 15 seconds; closing the
+  session leaves a shell there). The boot (U-Boot, GRUB, the kernel's
+  messages) shows on a framebuffer, as boot firmware leaves one set up,
   which Linux has as `/dev/fb0`: Debian gets it from U-Boot, through UEFI
   (`efifb`); Alpine's kernel from the device tree (`simpledrm`). (GRUB then
-  writes to the screen, not the serial port.) X draws on it in software:
-  there's no 3D. With it come a keyboard and a mouse (virtio input devices,
+  writes to the screen, not the serial port.) X runs on a GPU (virtio-gpu,
+  2D: Linux's `virtio_gpu`, X's `modesetting` driver), whose display can
+  change size: the emulator tells Linux the size it wants, Linux tells
+  userspace (a hotplug event), and X switches to it (`xrandr --auto`: on
+  Debian udev runs it, `/etc/udev/rules.d/90-emulator-resize.rules`).
+  X draws in software (there's no 3D), and draws the pointer itself. With it come a keyboard and a mouse (virtio input devices,
   `/dev/input/`): click the screen, and the keys go there, by their place on
   the keyboard (Linux's keyboard layout says what they type); the mouse is
   an absolute one, a tablet, so the guest's pointer is where yours is.
@@ -260,9 +268,10 @@ small initramfs made by the build (BusyBox and the modules it takes to mount
 the disk). The console logs in as root by itself. On the screen (in the
 page, by default) Alpine starts a light desktop: X with twm and an xterm (a click on the
 desktop opens twm's menu: another terminal, closing windows, quitting X).
-There's no udev, so X is told where the keyboard and the mouse are
-(`/etc/X11/xorg.conf.d`), and Mesa's 3D drivers, which X's packages bring
-along (180 MB, with LLVM), are left out.
+There's no udev, so X is told where the keyboard, the mouse and the GPU
+are (`/etc/X11/xorg.conf.d`; the GPU's card when X starts), and its session
+looks for another screen size every 2 seconds (`~/.xinitrc`); Mesa's 3D
+drivers, which X's packages bring along (180 MB, with LLVM), are left out.
 
 - In the page: `npm run web`, then <http://localhost:8080/?distribution=alpine>
   (with the network, as Debian).

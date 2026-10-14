@@ -91,7 +91,7 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
       relay?.kill()
     })
 
-    it('boots Alpine to its shell and its desktop, on 4 harts, isolated by the service worker, with a network through the relay', { timeout: 180_000 }, async () => {
+    it('boots Alpine to its shell and its desktop, which follows the size of the page, on 4 harts, isolated by the service worker, with a network through the relay', { timeout: 240_000 }, async () => {
       const browser = await chromium.launch()
       try {
         const page = await browser.newPage()
@@ -126,12 +126,19 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
         // page: holding its button down on the desktop (3/4 of the way across
         // and down), twm's menu is right there, in the canvas (its title at the
         // pointer, its items below, on #eeeeee: ~/.twmrc).
-        const box = (await page.locator('#screen').boundingBox())!
-        const area = fit(1024, 768, box.width, box.height)
-        const at = { x: box.x + area.x + 0.75 * area.width, y: box.y + area.y + 0.75 * area.height }
+        // (The screen's size: the page's room for it, once X is on the GPU.)
+        const canvas = () => page.evaluate(() => [document.querySelector<HTMLCanvasElement>('#screen')!.width, document.querySelector<HTMLCanvasElement>('#screen')!.height])
+        const where = async () => {
+          const box = (await page.locator('#screen').boundingBox())!
+          const [width, height] = await canvas()
+          const area = fit(width!, height!, box.width, box.height)
+          return { x: box.x + area.x + 0.75 * area.width, y: box.y + area.y + 0.75 * area.height }
+        }
         const menu = () =>
           page.evaluate(() => {
-            const pixels = document.querySelector<HTMLCanvasElement>('#screen')!.getContext('2d')!.getImageData(768 - 20, 576 + 30, 40, 60).data
+            const screen = document.querySelector<HTMLCanvasElement>('#screen')!
+            const [x, y] = [Math.round(0.75 * screen.width), Math.round(0.75 * screen.height)]
+            const pixels = screen.getContext('2d')!.getImageData(x - 20, y + 30, 40, 60).data
             let items = 0
             for (let i = 0; i < pixels.length; i += 4) if (pixels[i] === 0xee && pixels[i + 1] === 0xee && pixels[i + 2] === 0xee) items++
             return items
@@ -141,6 +148,7 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
           // (Until X and twm are up: again and again, a pixel apart, as Linux
           // passes on a position only when it changes, and X only listens
           // once it's up.)
+          const at = await where()
           await page.mouse.move(at.x + (i % 2), at.y + (i % 2))
           await page.mouse.down()
           await page.waitForTimeout(1500)
@@ -148,6 +156,22 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
           await page.mouse.up()
         }
         expect(opened).toBe(true)
+
+        // The screen follows the page's room for it: a smaller window, a smaller
+        // screen (the width a multiple of 8, as Linux makes modes).
+        const sizes = () =>
+          page.evaluate(() => {
+            const canvas = document.querySelector<HTMLCanvasElement>('#screen')!
+            const room = document.getElementById('screen-view')!
+            return { screen: [canvas.width, canvas.height], room: [Math.floor(room.clientWidth / 8) * 8, room.clientHeight] }
+          })
+        await page.setViewportSize({ width: 900, height: 600 })
+        let fitted = false
+        for (const deadline = Date.now() + 60_000; !fitted && Date.now() < deadline; await page.waitForTimeout(500)) {
+          const { screen, room } = await sizes()
+          fitted = screen[0] === room[0] && screen[1] === room[1]
+        }
+        expect(await sizes()).toMatchObject({ screen: (await sizes()).room })
 
         // (The keys go to the terminal once it's shown.)
         await page.click('#show-terminal')

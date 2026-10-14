@@ -10,6 +10,7 @@ import { Plic } from './plic.js'
 import { VirtioBlock } from './virtio-blk.js'
 import { VirtioConsole } from './virtio-console.js'
 import { Input, TABLET_MAX, VirtioInput } from './virtio-input.js'
+import { VirtioGpu } from './virtio-gpu.js'
 import { LINUX_KEYS } from './keymap.js'
 
 describe('PLIC', () => {
@@ -478,6 +479,120 @@ describe('virtio input', () => {
     expect([LINUX_KEYS.Escape, LINUX_KEYS.KeyQ, LINUX_KEYS.KeyA, LINUX_KEYS.Enter, LINUX_KEYS.Space]).toEqual([1, 16, 30, 28, 57])
     expect([LINUX_KEYS.ArrowUp, LINUX_KEYS.ArrowDown, LINUX_KEYS.ControlRight, LINUX_KEYS.MetaLeft, LINUX_KEYS.F12]).toEqual([103, 108, 97, 125, 88])
     expect(new Set(Object.values(LINUX_KEYS)).size).toBe(Object.keys(LINUX_KEYS).length) // no two the same
+  })
+})
+
+describe('virtio GPU', () => {
+  /** A driver for its control queue (0, 4 descriptors): a command (request, response) at a time. */
+  function gpuHarness(width = 1024, height = 768) {
+    const ram = new Uint8Array(1 << 20)
+    const view = new DataView(ram.buffer)
+    let irq = false
+    const memory = (addr: number, length: number) => ram.subarray(addr, addr + length)
+    const gpu = new VirtioGpu(memory, memory, high => (irq = high), width, height)
+    const q = { desc: 0x1000, avail: 0x2000, used: 0x3000 }
+    gpu.write32(0x070, 1 | 2)
+    gpu.write32(0x024, 1)
+    gpu.write32(0x020, 1) // VIRTIO_F_VERSION_1
+    gpu.write32(0x070, 1 | 2 | 8)
+    gpu.write32(0x030, 0)
+    gpu.write32(0x038, 4)
+    gpu.write32(0x080, q.desc)
+    gpu.write32(0x090, q.avail)
+    gpu.write32(0x0a0, q.used)
+    gpu.write32(0x044, 1)
+    gpu.write32(0x070, 1 | 2 | 8 | 4)
+    let avail = 0
+    /** Send a command (32-bit fields after the header's type, flags...); returns the response. */
+    const command = (type: number, fields: number[], { fence = 0, extra = new Uint8Array(0) } = {}) => {
+      const request = new Uint8Array(24 + 4 * fields.length + extra.length)
+      const r = new DataView(request.buffer)
+      r.setUint32(0, type, true)
+      if (fence) {
+        r.setUint32(4, 1, true) // VIRTIO_GPU_FLAG_FENCE
+        r.setBigUint64(8, BigInt(fence), true)
+      }
+      fields.forEach((v, i) => r.setUint32(24 + 4 * i, v, true))
+      request.set(extra, 24 + 4 * fields.length)
+      ram.set(request, 0x8000)
+      ram.fill(0xaa, 0x9000, 0x9000 + 512)
+      const descriptor = (i: number, addr: number, length: number, flags: number, next: number) => {
+        view.setUint32(q.desc + 16 * i, addr, true)
+        view.setUint32(q.desc + 16 * i + 8, length, true)
+        view.setUint16(q.desc + 16 * i + 12, flags, true)
+        view.setUint16(q.desc + 16 * i + 14, next, true)
+      }
+      descriptor(0, 0x8000, request.length, 1, 1) // NEXT
+      descriptor(1, 0x9000, 512, 2, 0) // WRITE
+      view.setUint16(q.avail + 4 + 2 * (avail % 4), 0, true)
+      view.setUint16(q.avail + 2, ++avail, true)
+      gpu.write32(0x050, 0)
+      return new DataView(ram.buffer, 0x9000, 512)
+    }
+    return { gpu, ram, view, command, irq: () => irq }
+  }
+  const OK = 0x1100
+
+  it('tells the driver its one display: the preferred size', () => {
+    const h = gpuHarness(1024, 768)
+    expect(h.gpu.read32(0x008)).toBe(16) // device ID: GPU
+    expect([h.gpu.read32(0x100), h.gpu.read32(0x108)]).toEqual([0, 1]) // events_read, num_scanouts
+    const info = h.command(0x0100, []) // GET_DISPLAY_INFO
+    expect(info.getUint32(0, true)).toBe(0x1101)
+    // pmodes[0]: x, y, width, height, enabled
+    expect([0, 4, 8, 12, 16].map(at => info.getUint32(24 + at, true))).toEqual([0, 0, 1024, 768, 1])
+    expect(info.getUint32(24 + 24 + 16, true)).toBe(0) // (pmodes[1]: not enabled)
+  })
+
+  it('shows what the guest draws: an image created, backed by guest memory, copied in, shown', () => {
+    const h = gpuHarness()
+    expect(h.gpu.output).toBeUndefined()
+    // A 4 × 2 image (B8G8R8X8), its backing in two pieces (16 + 16 bytes).
+    expect(h.command(0x0101, [7, 2, 4, 2]).getUint32(0, true)).toBe(OK) // RESOURCE_CREATE_2D
+    const entries = new Uint8Array(32)
+    const e = new DataView(entries.buffer)
+    e.setBigUint64(0, 0x20000n, true)
+    e.setUint32(8, 16, true)
+    e.setBigUint64(16, 0x30000n, true)
+    e.setUint32(24, 16, true)
+    expect(h.command(0x0106, [7, 2], { extra: entries }).getUint32(0, true)).toBe(OK) // RESOURCE_ATTACH_BACKING
+    for (let i = 0; i < 4; i++) h.view.setUint32(0x20000 + 4 * i, 0x100 + i, true) // row 0
+    for (let i = 0; i < 4; i++) h.view.setUint32(0x30000 + 4 * i, 0x200 + i, true) // row 1
+    // TRANSFER_TO_HOST_2D: all of it (x, y, width, height, offset (64 bits), resource).
+    expect(h.command(0x0105, [0, 0, 4, 2, 0, 0, 7, 0]).getUint32(0, true)).toBe(OK)
+    expect(h.command(0x0103, [0, 0, 4, 2, 0, 7]).getUint32(0, true)).toBe(OK) // SET_SCANOUT 0
+    const output = h.gpu.output!
+    expect([output.width, output.height]).toEqual([4, 2])
+    expect([...output.pixels]).toEqual([0x100, 0x101, 0x102, 0x103, 0x200, 0x201, 0x202, 0x203])
+    // A rectangle: (1, 1) 2 × 1, from where it is in the backing (row 1, pixel 1: byte 20).
+    h.view.setUint32(0x30004, 0xabc, true)
+    h.view.setUint32(0x30008, 0xdef, true)
+    expect(h.command(0x0105, [1, 1, 2, 1, 20, 0, 7, 0]).getUint32(0, true)).toBe(OK)
+    expect([...output.pixels]).toEqual([0x100, 0x101, 0x102, 0x103, 0x200, 0xabc, 0xdef, 0x203])
+    expect(h.command(0x0104, [0, 0, 4, 2, 7, 0]).getUint32(0, true)).toBe(OK) // RESOURCE_FLUSH
+  })
+
+  it('answers what it can not do, and fenced commands with their fence', () => {
+    const h = gpuHarness()
+    expect(h.command(0x0105, [0, 0, 1, 1, 0, 0, 9, 0]).getUint32(0, true)).toBe(0x1203) // no resource 9
+    expect(h.command(0x0101, [1, 67, 4, 4]).getUint32(0, true)).toBe(0x1205) // a format it doesn't do
+    expect(h.command(0x0103, [0, 0, 4, 4, 1, 0]).getUint32(0, true)).toBe(0x1202) // scanout 1
+    expect(h.command(0x0999, []).getUint32(0, true)).toBe(0x1200) // unknown
+    const fenced = h.command(0x0101, [3, 2, 8, 8], { fence: 42 })
+    expect([fenced.getUint32(0, true), fenced.getUint32(4, true), Number(fenced.getBigUint64(8, true))]).toEqual([OK, 1, 42])
+  })
+
+  it('tells the driver when the display gets another size (the width a multiple of 8)', () => {
+    const h = gpuHarness(1024, 768)
+    h.gpu.resize(1283, 720)
+    expect([h.irq(), h.gpu.read32(0x060), h.gpu.read32(0x100)]).toEqual([true, 2, 1]) // config change; EVENT_DISPLAY
+    const info = h.command(0x0100, [])
+    expect([info.getUint32(24 + 8, true), info.getUint32(24 + 12, true)]).toEqual([1280, 720])
+    h.gpu.write32(0x104, 1) // events_clear
+    h.gpu.write32(0x064, 3)
+    expect([h.gpu.read32(0x100), h.irq()]).toEqual([0, false])
+    h.gpu.resize(1285, 720) // (the same, rounded)
+    expect(h.irq()).toBe(false)
   })
 })
 

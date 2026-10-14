@@ -33,7 +33,7 @@ async function until(s: LinuxSession, what: string, done: () => boolean): Promis
 /** What's on the screen: RGBA. */
 function pixels(s: LinuxSession): Uint8Array {
   const rgba = new Uint8Array(WIDTH * HEIGHT * 4)
-  s.machine.screen!.draw(rgba)
+  s.machine.output!.draw(rgba)
   return rgba
 }
 
@@ -54,7 +54,7 @@ const DEBIAN_DISK = fileURLToPath(new URL('pristine.raw', DEBIAN))
  */
 describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => existsSync(new URL(f, DEBIAN))))('Debian with a screen', () => {
   it(
-    'has the screen (efifb), the keyboard and the mouse, and starts Xfce on them; a VNC viewer sees it and uses it',
+    'has the screen (efifb), the keyboard and the mouse, and starts Xfce on them (on the GPU); a VNC viewer sees it and uses it; it takes another size',
     { timeout: 1_800_000 },
     async () => {
       const file = new FileStorage(DEBIAN_DISK, { readOnly: true })
@@ -126,11 +126,11 @@ describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => exi
         // A VNC viewer (npm start --display) gets the screen as it is, and
         // what it does gets to X: a right-click on the desktop opens Xfce's
         // menu there (white, to the click's lower right), Escape closes it.
-        const vnc = new VncServer({ screen: s.machine.screen!, keyboard: s.machine.keyboard!, tablet: s.machine.tablet! })
+        const vnc = new VncServer(s.machine)
         const viewer = await RfbClient.connect(await vnc.listen(0))
         try {
           const [all] = await viewer.update(false)
-          const { pixels: screen } = s.machine.screen!
+          const { pixels: screen } = s.machine.output!
           expect(all!.data.equals(new Uint8Array(screen.buffer, screen.byteOffset, screen.byteLength))).toBe(true)
           const seen = new Uint32Array(all!.data.buffer, all!.data.byteOffset, WIDTH * HEIGHT).slice()
           /** Run the machine until `done()` with what the viewer sees, asking for updates as it goes. */
@@ -161,6 +161,12 @@ describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => exi
           vnc.close()
         }
 
+        // Another size (a window's): the GPU tells Linux, udev X (xrandr), and
+        // the screen shows the desktop that size.
+        expect(s.machine.output).not.toBe(s.machine.screen) // (X is on the GPU)
+        s.machine.setDisplaySize(1280, 720)
+        await until(s, 'the new size', () => s.machine.output?.width === 1280 && s.machine.output.height === 720)
+
         s.type('poweroff\n')
         expect(s.runToPowerOff(20_000_000_000)).toBe('poweroff')
       } finally {
@@ -178,7 +184,7 @@ const ALPINE = new URL('../images/alpine/', import.meta.url)
  * (tty1) by itself.
  */
 describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen', () => {
-  it('starts X with twm and an xterm on it, with the keyboard and the mouse (evdev)', { timeout: 600_000 }, async () => {
+  it('starts X with twm and an xterm on it (on the GPU), with the keyboard and the mouse (evdev); it takes another size', { timeout: 600_000 }, async () => {
     const config = JSON.parse(readFileSync(new URL('boot.json', ALPINE), 'utf8')) as { bootargs: string; memory: number }
     const file = new FileStorage(fileURLToPath(new URL('pristine.raw', ALPINE)), { readOnly: true })
     try {
@@ -222,6 +228,11 @@ describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen
         return title && r === 255 && g === 255 && b === 255
       }
       await until(s, 'the xterm', () => window(pixels(s)))
+
+      // Another size (a window's): X takes it (its session looks every 2 s).
+      expect(s.machine.output).not.toBe(s.machine.screen) // (X is on the GPU)
+      s.machine.setDisplaySize(1280, 720)
+      await until(s, 'the new size', () => s.machine.output?.width === 1280 && s.machine.output.height === 720)
 
       s.type('poweroff\n')
       expect(s.runToPowerOff(5_000_000_000)).toBe('poweroff')

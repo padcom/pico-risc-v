@@ -141,7 +141,7 @@ machine.boot(
     : {},
 )
 
-const display = machine.screen && { screen: machine.screen, keyboard: machine.keyboard!, tablet: machine.tablet! }
+const display = machine.screen && machine
 if (display && vncPort !== undefined) {
   // (Can't listen there, say another emulator does: no VNC, but run.)
   await new VncServer(display).listen(vncPort).then(

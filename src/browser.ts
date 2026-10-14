@@ -32,15 +32,16 @@
  *   harts=<n>            default 4
  *   persist=0            don't keep the disk's changes (a throwaway session)
  *   memory=<MiB>         default 1024 for Debian, boot.json's, 64 for an image
- *   display=<w>x<h>      the screen's size (default 1024x768); display=0:
+ *   display=<w>x<h>      the screen's size, fixed (by default it's the
+ *                        page's room for it, and follows it: the guest
+ *                        is asked for the new size, see show()); display=0:
  *                        no screen, the terminal only (as for an image,
- *                        unless it says display). Linux has the screen as
- *                        /dev/fb0, the distributions their desktops on it.
- *                        With it come a keyboard, which has the keys while
- *                        the screen has the focus (click it), and a mouse.
- *                        The page shows the screen or the terminal (the
- *                        buttons in the status bar), the screen fitted to
- *                        the page, or full screen
+ *                        unless it says display). The distributions' desktops
+ *                        run on it. With it come a keyboard, which has the
+ *                        keys while the screen has the focus (click it), and
+ *                        a mouse. The page shows the screen or the terminal
+ *                        (the buttons in the status bar), the screen fitted
+ *                        to the page, or full screen
  *
  * How the machine stopped ends up in the page's `data-result` attribute,
  * and everything it printed in `window.emulatorOutput` (for tests).
@@ -84,8 +85,12 @@ const distribution = params.get('distribution') ?? page.distribution ?? 'debian'
 const harts = Number(params.get('harts') ?? 4)
 const relay = params.get('relay')
 const persist = params.get('persist') !== '0'
-// A screen by default; for a bare-metal program, only when asked for.
+// A screen by default, as big as the page's room for it (and following it,
+// unless the page says how big); for a bare-metal program, only when asked for.
 const display = params.get('display') === '0' || (image && !params.has('display')) ? undefined : parseDisplay(params.get('display') ?? '')
+const resizable = display !== undefined && !params.get('display')
+/** How long the page's room for the screen stays the same before the guest is asked for that size (ms). */
+const SETTLE = 300
 /** How often the disk's changes are saved, besides when the guest flushes it (ms). */
 const SAVE_INTERVAL = 2000
 /** Where npm run relay is, by default. */
@@ -182,12 +187,17 @@ try {
   throw error
 }
 
-/** `display`'s value: <width>x<height>, 1024x768 if none (or just `display`). */
+/** `display`'s value: <width>x<height>; if none (or just `display`), the page's room for the screen. */
 function parseDisplay(value: string): { width: number; height: number } {
-  if (!value) return { width: 1024, height: 768 }
+  if (!value) return roomForScreen(document.getElementById('views')!)
   const [, width, height] = /^(\d+)x(\d+)$/.exec(value) ?? []
   if (!width || !height) throw new Error(`display=${value}: should be <width>x<height>, e.g. 1024x768`)
   return { width: Number(width), height: Number(height) }
+}
+
+/** A screen size for `element`'s room: its size in CSS pixels (not too small). */
+function roomForScreen(element: HTMLElement): { width: number; height: number } {
+  return { width: Math.max(640, Math.floor(element.clientWidth)), height: Math.max(400, Math.floor(element.clientHeight)) }
 }
 
 /**
@@ -195,27 +205,45 @@ function parseDisplay(value: string): { width: number; height: number } {
  * its shape; the terminal's view is the other one: the status bar's buttons
  * switch, or the screen goes full screen), a frame at a time (when it
  * changed), and pass the keys pressed while it has the focus to the
- * keyboard, what the mouse does over it to the tablet.
+ * keyboard, what the mouse does over it to the tablet. When the view's size
+ * changes (the window's, full screen), the guest is asked for that size
+ * (resizable: unless the page said how big): the GPU's display follows.
  */
 function show(machine: Machine): void {
-  const screen = machine.screen!
   const canvas = document.getElementById('screen') as HTMLCanvasElement
   const screenView = document.getElementById('screen-view')!
   const terminalView = document.getElementById('terminal')!
-  canvas.width = screen.width
-  canvas.height = screen.height
   const context = canvas.getContext('2d')!
-  const image = context.createImageData(screen.width, screen.height)
+  // What's shown: as big as what the screen shows (now).
+  let image = context.createImageData(1, 1)
   let stale = true
   const frame = () => {
+    const screen = machine.output
+    if (screen && (screen.width !== canvas.width || screen.height !== canvas.height)) {
+      canvas.width = screen.width
+      canvas.height = screen.height
+      image = context.createImageData(screen.width, screen.height)
+      stale = true
+    }
     // (Not drawn while it isn't shown; then all of it, once it is again.)
-    if (!screenView.hidden && (screen.draw(image.data) || stale)) {
+    if (screen && !screenView.hidden && (screen.draw(image.data) || stale)) {
       context.putImageData(image, 0, 0)
       stale = false
     }
     requestAnimationFrame(frame)
   }
   frame()
+  if (resizable) {
+    let settling: ReturnType<typeof setTimeout> | undefined
+    new ResizeObserver(() => {
+      if (screenView.hidden) return
+      clearTimeout(settling)
+      settling = setTimeout(() => {
+        const { width, height } = roomForScreen(screenView)
+        machine.setDisplaySize(width, height)
+      }, SETTLE)
+    }).observe(screenView)
+  }
 
   // The views: the screen, or the terminal.
   const buttons = { screen: document.getElementById('show-screen')!, terminal: document.getElementById('show-terminal')! }
@@ -269,7 +297,7 @@ function show(machine: Machine): void {
   const at = (event: MouseEvent): [number, number, number][] => {
     // (Where the screen is in the canvas element: it keeps its shape, with bars.)
     const box = canvas.getBoundingClientRect()
-    const area = fitArea(screen.width, screen.height, box.width, box.height)
+    const area = fitArea(canvas.width, canvas.height, box.width, box.height)
     const scale = (value: number, size: number) => Math.round(Math.min(Math.max(value / size, 0), 1) * TABLET_MAX)
     return [
       [Input.EV_ABS, Input.ABS_X, scale(event.clientX - box.left - area.x, area.width)],

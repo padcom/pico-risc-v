@@ -82,6 +82,15 @@ export class RfbClient {
     this.bytes = bits / 8
   }
 
+  /** SetEncodings: the encodings (and pseudo-encodings: -223 DesktopSize) it takes. */
+  setEncodings(encodings: number[]): void {
+    const m = Buffer.alloc(4 + 4 * encodings.length)
+    m[0] = 2
+    m.writeUInt16BE(encodings.length, 2)
+    encodings.forEach((e, i) => m.writeInt32BE(e, 4 + 4 * i))
+    this.socket.write(m)
+  }
+
   /** Ask for an update (all of the screen, or what changed) and read it. */
   async update(incremental: boolean): Promise<Rect[]> {
     const m = Buffer.alloc(10)
@@ -96,6 +105,12 @@ export class RfbClient {
     for (let n = head.readUInt16BE(2); n > 0; n--) {
       const r = await this.read(12)
       const [x, y, w, h] = [0, 2, 4, 6].map(at => r.readUInt16BE(at)) as [number, number, number, number]
+      if (r.readInt32BE(8) === -223) {
+        // DesktopSize: the screen is w × h now (no pixels).
+        ;[this.width, this.height] = [w, h]
+        rects.push({ x, y, w, h, data: Buffer.alloc(0) })
+        continue
+      }
       if (r.readInt32BE(8) !== 0) throw new Error('not raw')
       rects.push({ x, y, w, h, data: Buffer.from(await this.read(w * h * this.bytes)) })
     }

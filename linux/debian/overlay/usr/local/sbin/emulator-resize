@@ -1,0 +1,9 @@
+# The screen's size changed (/etc/udev/rules.d/90-emulator-resize.rules):
+# every X server running (root's: the screen logs root in) switches its
+# output to its preferred size, the new one.
+for socket in /tmp/.X11-unix/X*; do
+  [ -e "$socket" ] || continue
+  export DISPLAY=":${socket##*/X}" XAUTHORITY=/root/.Xauthority
+  output=$(xrandr 2>/dev/null | awk '/ connected/ { print $1; exit }')
+  [ -n "$output" ] && xrandr --output "$output" --auto
+done

@@ -13,6 +13,7 @@ import { Syscon } from './syscon.js'
 import { Terminal } from './terminal.js'
 import { VirtioBlock } from './virtio-blk.js'
 import { VirtioConsole } from './virtio-console.js'
+import { VirtioGpu } from './virtio-gpu.js'
 import { VirtioInput } from './virtio-input.js'
 import { type NetworkBackend, VirtioNet } from './virtio-net.js'
 
@@ -27,6 +28,7 @@ import { type NetworkBackend, VirtioNet } from './virtio-net.js'
  *   0x1000_3000 - 0x1000_3fff   virtio console (unless turned off), PLIC source 5
  *   0x1000_4000 - 0x1000_4fff   virtio keyboard (with a screen), PLIC source 6
  *   0x1000_5000 - 0x1000_5fff   virtio tablet (with a screen), PLIC source 7
+ *   0x1000_6000 - 0x1000_6fff   virtio GPU (with a screen), PLIC source 8
  *   0x1100_0000 - 0x1100_ffff   CLINT (timer + software interrupt)
  *   0x1110_0000 - 0x1110_0fff   Syscon (power-off / reboot)
  *   0x8000_0000 - ...           RAM; execution starts at its first byte,
@@ -43,6 +45,7 @@ export const MemoryMap = {
   VIRTIO_CONSOLE: 0x1000_3000,
   VIRTIO_KEYBOARD: 0x1000_4000,
   VIRTIO_TABLET: 0x1000_5000,
+  VIRTIO_GPU: 0x1000_6000,
   CLINT: 0x1100_0000,
   SYSCON: 0x1110_0000,
   RAM: 0x8000_0000,
@@ -105,8 +108,10 @@ export interface MachineOptions {
   harts?: number
   /**
    * A screen, `width` × `height` pixels: a framebuffer at the top of RAM
-   * (not part of the RAM the OS is told about), see Framebuffer. With
-   * it come a keyboard and a mouse (a tablet), see VirtioInput.
+   * (not part of the RAM the OS is told about), see Framebuffer, for the
+   * boot; and a GPU (VirtioGpu), whose display can change size
+   * (setDisplaySize()), for the OS. With them come a keyboard and a mouse
+   * (a tablet), see VirtioInput.
    */
   display?: { width: number; height: number }
 }
@@ -198,6 +203,8 @@ export class Machine {
   /** The screen's keyboard and mouse (an absolute one: a tablet), if it has one. */
   readonly keyboard: VirtioInput | undefined
   readonly tablet: VirtioInput | undefined
+  /** The screen's GPU, if it has one. */
+  readonly gpu: VirtioGpu | undefined
   private readonly network: NetworkBackend | undefined
   /** The harts, by mhartid. */
   readonly cpus: CPU[]
@@ -296,6 +303,13 @@ export class Machine {
     this.console = console ? new VirtioConsole(dma, high => this.plic.setLevel(CONSOLE_IRQ, high), output ?? (() => {})) : undefined
     this.keyboard = display && VirtioInput.keyboard(dma, high => this.plic.setLevel(KEYBOARD_IRQ, high))
     this.tablet = display && VirtioInput.tablet(dma, high => this.plic.setLevel(TABLET_IRQ, high))
+    // (The GPU only reads the images the guest draws: no need to tell the CPU.)
+    const read = (addr: number, length: number) => {
+      const offset = addr - MemoryMap.RAM
+      if (offset < 0 || offset + length > this.ram.size) throw new RangeError(`outside RAM: 0x${addr.toString(16)}+${length}`)
+      return this.ram.bytes.subarray(offset, offset + length)
+    }
+    this.gpu = display && new VirtioGpu(dma, read, high => this.plic.setLevel(GPU_IRQ, high), display.width, display.height)
 
     this.bus
       .map(MemoryMap.RAM, ramSize, this.ram)
@@ -309,6 +323,7 @@ export class Machine {
     if (this.console) this.bus.map(MemoryMap.VIRTIO_CONSOLE, VirtioConsole.SIZE, this.console)
     if (this.keyboard) this.bus.map(MemoryMap.VIRTIO_KEYBOARD, VirtioInput.SIZE, this.keyboard)
     if (this.tablet) this.bus.map(MemoryMap.VIRTIO_TABLET, VirtioInput.SIZE, this.tablet)
+    if (this.gpu) this.bus.map(MemoryMap.VIRTIO_GPU, VirtioGpu.SIZE, this.gpu)
   }
 
   /**
@@ -318,6 +333,20 @@ export class Machine {
   type(data: string | ArrayLike<number>): void {
     if (this.console?.inUse) this.console.type(data)
     else this.terminal.type(data)
+  }
+
+  /**
+   * What the screen shows: the GPU's display, once the OS shows something
+   * there, before that the framebuffer (firmware, boot messages). Its size
+   * can change (setDisplaySize()).
+   */
+  get output(): Framebuffer | undefined {
+    return this.gpu?.output ?? this.screen
+  }
+
+  /** The screen is `width` × `height` pixels now (a window's): the GPU tells the OS. */
+  setDisplaySize(width: number, height: number): void {
+    this.gpu?.resize(width, height)
   }
 
   /** The terminal is `cols` × `rows` characters (now): the console tells the guest. */
@@ -389,6 +418,7 @@ export class Machine {
     this.console?.reset()
     this.keyboard?.reset()
     this.tablet?.reset()
+    this.gpu?.reset()
     // All harts start at the start of RAM (firmware picks one to boot).
     for (const cpu of this.cpus) {
       cpu.setRegister(10, cpu.id) // a0: hart id
@@ -788,6 +818,16 @@ export class Machine {
                 },
               },
             }),
+            ...(this.gpu && {
+              [`virtio_mmio@${hex(MemoryMap.VIRTIO_GPU)}`]: {
+                props: {
+                  compatible: 'virtio,mmio',
+                  reg: reg(MemoryMap.VIRTIO_GPU, VirtioGpu.SIZE),
+                  'interrupt-parent': PLIC_PHANDLE,
+                  interrupts: GPU_IRQ,
+                },
+              },
+            }),
             ...(this.disk && {
               [`virtio_mmio@${hex(MemoryMap.VIRTIO_DISK)}`]: {
                 props: {
@@ -815,6 +855,7 @@ const RTC_IRQ = 3
 const TERMINAL_IRQ = 4
 const KEYBOARD_IRQ = 6
 const TABLET_IRQ = 7
+const GPU_IRQ = 8
 
 /**
  * Start a thread running a hart (hart-worker.ts): `message` hears from it

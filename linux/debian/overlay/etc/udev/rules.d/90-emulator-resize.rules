@@ -1,0 +1,3 @@
+# The screen's size changed (the emulator's window or page: its GPU's display
+# says so with a hotplug event): X takes the new size.
+ACTION=="change", SUBSYSTEM=="drm", ENV{HOTPLUG}=="1", RUN+="/bin/sh /usr/local/sbin/emulator-resize"

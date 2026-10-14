@@ -43,6 +43,11 @@ const enum Reg {
   QueueDriverHigh = 0x094,
   QueueDeviceLow = 0x0a0,
   QueueDeviceHigh = 0x0a4,
+  // Shared memory regions: none (lengths and bases all ones).
+  SHMLenLow = 0x0b0,
+  SHMLenHigh = 0x0b4,
+  SHMBaseLow = 0x0b8,
+  SHMBaseHigh = 0x0bc,
   ConfigGeneration = 0x0fc,
   Config = 0x100,
 }
@@ -257,6 +262,11 @@ export abstract class VirtioMmioDevice extends WordDevice {
       case Reg.InterruptStatus: return this.interruptStatus
       case Reg.Status: return this.status
       case Reg.ConfigGeneration: return this.configGeneration
+      case Reg.SHMLenLow:
+      case Reg.SHMLenHigh:
+      case Reg.SHMBaseLow:
+      case Reg.SHMBaseHigh:
+        return 0xffffffff
       default: return 0
     }
   }
