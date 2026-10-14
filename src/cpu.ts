@@ -42,7 +42,9 @@ export interface CPUOptions {
   jit?: false | { threshold?: number; batch?: number }
 }
 
-const JIT_DEFAULTS = { threshold: 2000, batch: 32 }
+// (8000: code that runs less is cheaper to interpret than to compile, as
+// a lot of booting's is; much more holds new code in the desktop's back.)
+const JIT_DEFAULTS = { threshold: 8000, batch: 32 }
 
 /** CPU state readable and writable as properties, in the core's field order (hart/src/lib.rs). */
 const FIELDS = [

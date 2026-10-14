@@ -143,6 +143,7 @@ run executes exactly the same instructions:
 | ...compiled code shared by the harts | 5140 MIPS | 5665 MIPS | 801 MIPS, 15 s |
 | (the same, Debian's image rebuilt with the desktop: 11.2 billion instructions) | 5115 MIPS | 5675 MIPS | 864 MIPS, 12.9 s |
 | ...loads and stores off one value sharing one translation check | 5085 MIPS | 5660 MIPS | 912 MIPS, 12.2 s |
+| ...pages compiled after 8000 instructions, not 2000 | 5095 MIPS | 5610 MIPS | 976 MIPS, 11.4 s |
 
 Measured on an Apple Silicon Mac with Node 26. Earlier, when the core also
 did RV32 (see the git history), the TypeScript CPU it replaced ran the
