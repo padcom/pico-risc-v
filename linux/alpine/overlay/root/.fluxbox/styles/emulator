@@ -1,0 +1,67 @@
+! Fluxbox's look (~/.fluxbox/init names it): flat, blue (#5f87af) and
+! light grey, in X's own fonts (font-misc-misc).
+background:	none
+borderWidth:	1
+borderColor:	#5f87af
+
+window.font:	-misc-fixed-bold-r-normal--13-*-*-*-*-*-*-*
+window.justify:	left
+window.title.focus:	flat
+window.title.focus.color:	#5f87af
+window.title.unfocus:	flat
+window.title.unfocus.color:	#5f87af
+window.label.focus:	parentrelative
+window.label.focus.textColor:	white
+window.label.unfocus:	parentrelative
+window.label.unfocus.textColor:	#c8d6e5
+window.button.focus:	flat
+window.button.focus.color:	#5f87af
+window.button.focus.picColor:	white
+window.button.unfocus:	flat
+window.button.unfocus.color:	#5f87af
+window.button.unfocus.picColor:	#c8d6e5
+window.button.pressed:	flat
+window.button.pressed.color:	#43698f
+window.handle.focus:	flat
+window.handle.focus.color:	#5f87af
+window.handle.unfocus:	flat
+window.handle.unfocus.color:	#5f87af
+window.grip.focus:	flat
+window.grip.focus.color:	#43698f
+window.grip.unfocus:	flat
+window.grip.unfocus.color:	#43698f
+window.frame.focusColor:	#5f87af
+window.frame.unfocusColor:	#5f87af
+window.borderWidth:	1
+window.borderColor:	#5f87af
+
+menu.title:	flat
+menu.title.color:	#5f87af
+menu.title.textColor:	white
+menu.title.font:	-misc-fixed-bold-r-normal--13-*-*-*-*-*-*-*
+menu.frame:	flat
+menu.frame.color:	#eeeeee
+menu.frame.textColor:	black
+menu.frame.disableColor:	#888888
+menu.frame.font:	-misc-fixed-medium-r-normal--13-*-*-*-*-*-*-*
+menu.hilite:	flat
+menu.hilite.color:	#5f87af
+menu.hilite.textColor:	white
+menu.borderWidth:	1
+menu.borderColor:	#5f87af
+
+toolbar:	flat
+toolbar.color:	#5f87af
+toolbar.font:	-misc-fixed-medium-r-normal--13-*-*-*-*-*-*-*
+toolbar.borderWidth:	0
+toolbar.clock:	flat
+toolbar.clock.color:	#5f87af
+toolbar.clock.textColor:	white
+toolbar.iconbar.empty:	flat
+toolbar.iconbar.empty.color:	#5f87af
+toolbar.iconbar.focused:	flat
+toolbar.iconbar.focused.color:	#43698f
+toolbar.iconbar.focused.textColor:	white
+toolbar.iconbar.unfocused:	flat
+toolbar.iconbar.unfocused.color:	#5f87af
+toolbar.iconbar.unfocused.textColor:	#dde6ee

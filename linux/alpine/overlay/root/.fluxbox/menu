@@ -1,0 +1,8 @@
+[begin] (Alpine)
+  [exec] (Terminal) {xterm}
+  [exec] (Freedoom 1) {freedoom1}
+  [exec] (Freedoom 2) {freedoom2}
+  [separator]
+  [restart] (Restart)
+  [exit] (Exit)
+[end]

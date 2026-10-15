@@ -1,0 +1,17 @@
+! Fluxbox (~/.fluxbox): one workspace; at the bottom, a toolbar with the
+! windows and a clock; no transparency (it costs, drawn on the harts).
+session.configVersion:	13
+session.menuFile:	~/.fluxbox/menu
+session.keyFile:	~/.fluxbox/keys
+session.styleFile:	~/.fluxbox/styles/emulator
+session.screen0.workspaces:	1
+session.screen0.workspaceNames:	Alpine,
+session.screen0.toolbar.tools:	iconbar, clock
+session.screen0.toolbar.placement:	BottomCenter
+session.screen0.toolbar.widthPercent:	100
+session.screen0.strftimeFormat:	%H:%M
+session.screen0.rootCommand:	
+session.screen0.window.focus.alpha:	255
+session.screen0.window.unfocus.alpha:	255
+session.screen0.menu.alpha:	255
+session.screen0.toolbar.alpha:	255

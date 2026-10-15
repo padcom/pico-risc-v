@@ -124,8 +124,8 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
 
         // The mouse lands where it's clicked, though the screen is scaled to the
         // page: holding its button down on the desktop (3/4 of the way across
-        // and down), twm's menu is right there, in the canvas (its title at the
-        // pointer, its items below, on #eeeeee: ~/.twmrc).
+        // and down), Fluxbox's menu is right there, in the canvas (its title at
+        // the pointer, its items below, on #eeeeee: ~/.fluxbox/styles/emulator).
         // (The screen's size: the page's room for it, once X is on the GPU.)
         const canvas = () => page.evaluate(() => [document.querySelector<HTMLCanvasElement>('#screen')!.width, document.querySelector<HTMLCanvasElement>('#screen')!.height])
         const where = async () => {
@@ -145,7 +145,7 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
           })
         let opened = false
         for (let i = 0, deadline = Date.now() + 90_000; !opened && Date.now() < deadline; i++) {
-          // (Until X and twm are up: again and again, a pixel apart, as Linux
+          // (Until X and Fluxbox are up: again and again, a pixel apart, as Linux
           // passes on a position only when it changes, and X only listens
           // once it's up.)
           const at = await where()

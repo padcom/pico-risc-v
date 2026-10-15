@@ -1,4 +1,4 @@
-# What startx starts: twm (~/.twmrc), and a terminal; closing that ends X.
+# What startx starts: Fluxbox (~/.fluxbox), and a terminal; closing that ends X.
 # And when the screen's size changes (the emulator's window or page: its
 # GPU's display's preferred size), X takes it (no udev here to say so: it
 # looks every 2 seconds).
@@ -11,5 +11,5 @@
     [ -n "$preferred" ] && [ "$preferred" != "$current" ] && xrandr --output "$output" --auto
   done
 ) &
-twm &
+fluxbox &
 exec xterm -geometry 100x30+40+40

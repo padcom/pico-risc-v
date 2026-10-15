@@ -226,11 +226,11 @@ const ALPINE = new URL('../images/alpine/', import.meta.url)
 
 /**
  * Alpine with a screen, as the static site boots it with ?display: a light
- * desktop (X, twm, xterm; linux/alpine/packages), started on the screen
+ * desktop (X, Fluxbox, xterm; linux/alpine/packages), started on the screen
  * (tty1) by itself.
  */
 describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen', () => {
-  it('starts X with twm and an xterm on it (on the GPU), with the keyboard and the mouse (evdev); it takes another size; it plays sound, and Freedoom', { timeout: 1_800_000 }, async () => {
+  it('starts X with Fluxbox and an xterm on it (on the GPU), with the keyboard and the mouse (evdev); it takes another size; it plays sound, and Freedoom, full screen too', { timeout: 1_800_000 }, async () => {
     const config = JSON.parse(readFileSync(new URL('boot.json', ALPINE), 'utf8')) as { bootargs: string; memory: number }
     const file = new FileStorage(fileURLToPath(new URL('pristine.raw', ALPINE)), { readOnly: true })
     try {
@@ -259,7 +259,7 @@ describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen
       await s.waitForAsync(':~# ', 20_000_000_000, 600_000)
 
       s.type(
-        'until pgrep -x twm && pgrep -x xterm; do sleep 1; done >/dev/null; ' +
+        'until pgrep -x fluxbox && pgrep -x xterm; do sleep 1; done >/dev/null; ' +
           `grep -oE "evdev: (keyboard|tablet): Configuring as [a-z]+" /var/log/Xorg.0.log; echo "done-$((0+1))"\n`,
       )
       await s.waitForAsync('done-1', BUDGET, 600_000)
@@ -267,8 +267,8 @@ describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen
       // (An absolute pointer with buttons, as evdev sees it.)
       expect(s.screen).toContain('evdev: tablet: Configuring as touchscreen')
 
-      // On the screen: the xterm (white), under twm's title bar, in its
-      // color (~/.twmrc: #5f87af), which is where it should be (the colors
+      // On the screen: the xterm (white), under Fluxbox's title bar, in its
+      // color (~/.fluxbox/styles/emulator: #5f87af), which is where it should be (the colors
       // in the right order, all the way).
       const window = (rgba: Uint8Array) => {
         const at = (x: number, y: number) => [...rgba.subarray(4 * (y * WIDTH + x), 4 * (y * WIDTH + x) + 3)]
@@ -284,6 +284,35 @@ describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen
       await until(s, 'the new size', () => s.machine.output?.width === 1280 && s.machine.output.height === 720)
 
       await playsSound(s, heard, 10)
+
+      // Doom full screen (Alt+Enter: Chocolate Doom asks the window manager,
+      // which Fluxbox does and twm didn't): once its window is up, all of the
+      // screen is Doom's, none of it the xterm's white or Fluxbox's blue.
+      const colors = () => {
+        const { width, height } = s.machine.output!
+        const rgba = new Uint8Array(width * height * 4)
+        s.machine.output!.draw(rgba)
+        let desktop = 0
+        let other = 0
+        for (let i = 0; i < rgba.length; i += 4) {
+          const [r, g, b] = [rgba[i]!, rgba[i + 1]!, rgba[i + 2]!]
+          if ((r === 255 && g === 255 && b === 255) || (r === 0x5f && g === 0x87 && b === 0xaf)) desktop++
+          else if (r || g || b) other++
+        }
+        return { desktop: desktop / (width * height), other }
+      }
+      await until(s, "the last Doom's window gone", () => colors().other < (320 * 200) / 2)
+      s.type('DISPLAY=:0 XAUTHORITY=/root/.Xauthority freedoom1 >/tmp/doom.log 2>&1 &\n')
+      await until(s, "Doom's window", () => colors().other > (320 * 200) / 2)
+      // (Its keys only once it's looking for them: a while after.)
+      s.type('sleep 5; echo "done-$((12+0))"\n')
+      await s.waitForAsync('done-12\r\n', BUDGET, 600_000)
+      s.machine.keyboard!.send([Input.EV_KEY, 56, 1]) // KEY_LEFTALT
+      s.machine.keyboard!.send([Input.EV_KEY, 28, 1]) // KEY_ENTER
+      s.machine.keyboard!.send([Input.EV_KEY, 28, 0])
+      s.machine.keyboard!.send([Input.EV_KEY, 56, 0])
+      await until(s, 'Doom, full screen', () => colors().desktop < 0.01)
+      s.type('pkill -f bin/chocolate-doom\n')
 
       s.type('poweroff\n')
       expect(s.runToPowerOff(5_000_000_000)).toBe('poweroff')

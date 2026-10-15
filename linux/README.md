@@ -255,8 +255,9 @@ set up once (`npm start` does it).
   sound back to Linux once it has played, which is what keeps programs going
   at the sound's pace.
 - **Freedoom**, a free Doom, is there to play, in both distributions:
-  `freedoom1` or `freedoom2` on the desktop (Xfce's menu: Games; twm's menu
-  on Alpine), on Chocolate Doom, in a small window (320×200: quick to draw),
+  `freedoom1` or `freedoom2` on the desktop (Xfce's menu: Games; Fluxbox's
+  menu on Alpine), on Chocolate Doom, in a small window (320×200: quick to
+  draw; Alt+Enter: full screen),
   with sound and music (Chocolate Doom's own OPL synthesizer). Keyboard only:
   the mouse is a tablet, which Doom's turning doesn't work with. Its settings
   are in `~/.local/share/chocolate-doom/`.
@@ -269,7 +270,7 @@ connect.
 ## Alpine Linux, and a static web site: `npm run site`
 
 Besides Debian there's [Alpine Linux](https://alpinelinux.org/), much
-smaller (a 230 MB disk, a third of it Freedoom) and quicker to boot (a shell in about 10 seconds),
+smaller (a 240 MB disk, a third of it Freedoom) and quicker to boot (a shell in about 10 seconds),
 mainly for the emulator as a static web site, where there's no server to
 read a big disk from or to give the guest a network.
 
@@ -280,8 +281,9 @@ file system for riscv64, with the packages in `linux/alpine/packages` on top
 OpenSBI. There's no bootloader: the emulator starts the kernel itself, with a
 small initramfs made by the build (BusyBox and the modules it takes to mount
 the disk). The console logs in as root by itself. On the screen (in the
-page, by default) Alpine starts a light desktop: X with twm and an xterm (a click on the
-desktop opens twm's menu: another terminal, closing windows, quitting X).
+page, by default) Alpine starts a light desktop: X with Fluxbox and an xterm (a click on the
+desktop opens Fluxbox's menu: another terminal, Freedoom, quitting X; X's own
+bitmap fonts are the only ones, which fontconfig is told to take).
 There's no udev, so X is told where the keyboard, the mouse and the GPU
 are (`/etc/X11/xorg.conf.d`; the GPU's card when X starts), and its session
 looks for another screen size every 2 seconds (`~/.xinitrc`); Mesa's 3D
