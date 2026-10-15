@@ -1,0 +1,101 @@
+Pico RISC-V: ChangeLog
+
+What changed, day by day, newest first: one line per commit (its short
+hash and subject; `git show <hash>` has the whole story). Every line of
+code was written by Claude (Anthropic), in Claude Code; @padcom directed.
+
+2026-10-15  Doom: a sound card, Freedoom, a day of fixes, Debian only, and a name: Pico RISC-V
+
+	* README.md, ChangeLog: the project is Pico RISC-V; how it came to be.
+	* cefee91 Debian only: Alpine is gone, and the static site (GitHub Pages)
+	          boots Debian
+	* 3339f99 Alpine: the keyboard's map from X's start (setxkbmap), so Doom's
+	          arrow keys work
+	* 831f857 Alpine: Fluxbox instead of twm, so that full screen works
+	          (Doom's Alt+Enter)
+	* aa9e147 Sound: each message goes back 50 ms before it has played (the
+	          last once it has)
+	* ad88182 Alpine: bash, for freedoom1 and freedoom2 (and the menu's
+	          Freedoom)
+	* 3f7f97d Debian: Doom without OpenGL's window
+	          (SDL_FRAMEBUFFER_ACCELERATION=0)
+	* eb3bbc5 Sound: a virtio sound card, heard in the page and the CLI's
+	          window; Freedoom on both distributions
+
+2026-10-14  Windows: VNC, an SDL window, a page-fitted screen, a resizable virtio GPU
+
+	* 6604d61 JIT: a memory group whose check failed checks again after its
+	          first access
+	* 77446ec JIT: pages are compiled after 8000 instructions, not 2000
+	* 0bab7be The screen follows the window: a virtio GPU whose display
+	          resizes
+	* 520743e JIT: loads and stores off one value share one translation check
+	* a187823 The page: the screen by default, fitted to it, a terminal a
+	          click away
+	* 97a5dc8 npm start --display: the screen in a window of its own (SDL)
+	* ce92286 VNC: macOS's Screen Sharing gets in (RFB 3.3 asks for a
+	          password)
+	* 4d9b5e1 npm start --display: the screen, through VNC
+
+2026-10-13  A face: more JIT, a framebuffer, a keyboard and a mouse, desktops
+
+	* 6ccad21 Desktops on the screen: Xfce on Debian, X with twm on Alpine
+	* 0b9bc82 A keyboard and a mouse for the screen (virtio input)
+	* 80445f9 A screen: a framebuffer in RAM, shown in the page (?display)
+	* 276150e JIT: the harts share compiled code
+	* 65675d0 JIT: a block that loops to itself is compiled as a loop
+	* 61b683b SMP: the hart threads handle the CLINT themselves
+
+2026-10-12  Speed and the browser: a JIT, multicore on threads, Debian in a web page, a static site
+
+	* 6389467 JIT: code runs on into the next block, and blocks run whole
+	          (2.8× faster)
+	* 83deb53 The page keeps its disk: changes saved in the browser, across
+	          reloads
+	* c8e318f A network for the static site: npm run relay, on this machine
+	* 5185338 Terminal size: a virtio console, which tells Linux the size and
+	          changes
+	* fc8a093 Alpine Linux, and the emulator as a static web site (GitHub
+	          Pages)
+	* 54190dd In a web browser: npm run web (Debian boots in the page, on 4
+	          harts)
+	* 6c917e8 SMP: each hart on a thread of its own (4 harts: parallel work
+	          3.3× faster)
+	* d5daddb SMP: machines with several harts (Debian boots on 4)
+	* 44d7cc4 Terminal: interrupts, so Linux's console isn't polled (1.3 →
+	          ~500 KB/s)
+	* 1bcf44b JIT: compiled pages go on in each other's code (Debian boot
+	          about 5% faster)
+	* ca30f4f JIT: hot pages compiled to WebAssembly (Debian boot 43 → 28 s)
+	* 7687d4a Port forwarding into the guest: ssh -p 2222 root@localhost
+	* 6decc2c Trim Debian's boot: 60 → 43 s to the login prompt (benchmark)
+	* 10036f2 Faster blocks; tests and benchmarks boot a pristine Debian disk
+
+2026-10-11  A real machine: MMU, virtio disk and network, the core in Rust/WebAssembly, RV64GC, Debian
+
+	* 3dd3d42 Decoded-instruction cache: run() executes whole decoded basic
+	          blocks
+	* f709d80 Debian from its cloud image: Debian's OpenSBI, U-Boot, GRUB and
+	          kernel
+	* e135a0f Debian only, RV64 only: removed the 32-bit and nommu Linux
+	          images and RV32
+	* 5dbcf84 Added setup scripts for macOS and Linux: clone, set up, npm run
+	          start:debian
+	* e9c01eb Added a Debian 13 (riscv64) disk: systemd, networking and apt on
+	          the RV64 machine
+	* 03a49fd Implemented floating point (F and D): the CPU is now RV32GC /
+	          RV64GC
+	* 20e7e88 Implemented RV64 and Sv39, and added a 64-bit Linux image
+	* 6d9f1e0 Implemented compressed instructions (RV32C) and rebuilt the
+	          Linux image with them
+	* 89895ff Ported the interpreter to Rust to gain 5x speed improvement
+	* 5aee736 Implemented virtio-net based networking and storage outside of
+	          ramfs using ext4
+	* 47143b9 Implemented MMU and MC
+
+2026-10-10  A small start: an RV32 interpreter in TypeScript, booting a tiny Linux without an MMU
+
+	* 264c41f Added option to close the Linux session after logging out
+	          (Ctrl+D)
+	* 4f7d01a Added option to compile the linux from scratch
+	* 6c5c32a Initial import
