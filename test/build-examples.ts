@@ -9,6 +9,8 @@ import { existsSync } from 'node:fs'
 export default function setup() {
   try {
     execFileSync('make', ['-C', 'examples', '--no-print-directory'], { stdio: 'inherit' })
+    // (@padcom/pico-risc-v-hart's example, with its C runtime.)
+    execFileSync('make', ['-C', 'packages/hart/examples/hello', '--no-print-directory'], { stdio: 'inherit' })
   } catch (e) {
     if (!existsSync('examples/build/hello.bin')) {
       throw new Error('Building examples failed — is the RISC-V toolchain installed? (brew install riscv64-elf-gcc)', {

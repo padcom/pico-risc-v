@@ -69,7 +69,7 @@ done
 node_ok || die "Node.js is still older than $NODE_MIN; check which node is first on PATH ($(command -v node))"
 
 step "Rust with the WebAssembly target"
-# Homebrew's rustup keeps cargo and rustc off PATH (scripts/build-wasm.ts
+# Homebrew's rustup keeps cargo and rustc off PATH (packages/hart/scripts/build-wasm.ts
 # finds them there).
 export PATH="$(brew --prefix rustup)/bin:$PATH"
 rustup toolchain list | grep -q . || rustup default stable

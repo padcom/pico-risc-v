@@ -1,0 +1,42 @@
+{
+  "name": "@padcom/pico-risc-v-relay",
+  "version": "0.1.0",
+  "description": "A network for Pico RISC-V's web page: a user-mode NAT on your machine, reached over a WebSocket. npx @padcom/pico-risc-v-relay",
+  "type": "module",
+  "bin": {
+    "pico-risc-v-relay": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "risc-v",
+    "emulator",
+    "nat",
+    "websocket",
+    "relay"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/padcom/pico-risc-v.git",
+    "directory": "packages/relay"
+  },
+  "homepage": "https://github.com/padcom/pico-risc-v/tree/main/packages/relay#readme",
+  "license": "ISC",
+  "engines": {
+    "node": ">=22.18"
+  }
+}

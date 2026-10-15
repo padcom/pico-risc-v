@@ -66,7 +66,7 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
 
     beforeAll(async () => {
       execFileSync(process.execPath, ['scripts/site.ts', '--out', 'build/test-site'], { cwd: root, stdio: 'ignore' })
-      relay = spawn(process.execPath, ['scripts/relay.ts', '--port', '0'], { cwd: root, stdio: ['ignore', 'pipe', 'inherit'] })
+      relay = spawn(process.execPath, ['packages/relay/dist/cli.js', '--port', '0'], { cwd: root, stdio: ['ignore', 'pipe', 'inherit'] })
       relayUrl = await new Promise<string>((resolve, reject) => {
         let out = ''
         relay.stdout!.on('data', (chunk: Buffer) => {
@@ -174,6 +174,8 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
           opened = await menu()
         }
         expect(opened).toBe(true)
+        // One pointer: X's, drawn on the screen; the page's is hidden over it.
+        expect(await page.evaluate(() => getComputedStyle(document.getElementById('screen')!).cursor)).toBe('none')
         await page.keyboard.press('Escape')
         for (const deadline = Date.now() + 60_000; (await menu()) && Date.now() < deadline; ) await page.waitForTimeout(500)
         expect(await menu()).toBe(false)

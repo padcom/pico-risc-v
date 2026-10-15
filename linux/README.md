@@ -277,12 +277,13 @@ browser keeps, as with `npm run web`. A plain web server doesn't send the
 headers that let the page use threads (cross-origin isolation), so the page
 registers a service worker (`web/isolate.js`) that adds them, and reloads
 once. There's no network there of its own (`apt` can't fetch anything), but
-it can use one through your machine: run `npm run relay`, and open the page
-with `?relay=ws://localhost:8081` (the page's status bar has a link for
+it can use one through your machine: run `npx @padcom/pico-risc-v-relay`
+(`packages/relay`; in a clone, `npm run relay` runs the same), and open the
+page with `?relay=ws://localhost:8081` (the page's status bar has a link for
 that). The relay runs the same user-mode NAT as `npm start` (with
 `localhost:2222` to the guest's ssh), for that page. As the NAT reaches what
 your machine does, its own services included, the relay only serves pages
-from `localhost` and this project's GitHub Pages (from the git remote), not
+from `localhost` and Pico RISC-V's GitHub Pages (`https://padcom.github.io`), not
 any web site open in the browser; `--origin <url>` allows another. (Newer
 Chrome may ask whether the page may access your local network.)
 

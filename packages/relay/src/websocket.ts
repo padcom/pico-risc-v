@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
-import type { NetworkBackend } from '../virtio-net.js'
+import type { NetworkBackend } from './network.js'
 
 /** RFC 6455: what a server adds to the client's key to show it speaks WebSocket. */
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'

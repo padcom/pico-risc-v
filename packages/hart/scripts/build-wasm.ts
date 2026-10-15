@@ -1,6 +1,6 @@
 /**
- * Compiles the CPU core (hart/, Rust) to build/hart.wasm, which src/cpu.ts
- * loads. Cargo only rebuilds what changed, so this is cheap to run often;
+ * Compiles the CPU core (core/, Rust) to build/hart.wasm, which src/cpu.ts
+ * loads (paths in this package, packages/hart). Cargo only rebuilds what changed, so this is cheap to run often;
  * build/hart.wasm is only replaced when its contents change.
  *
  * `node scripts/build-wasm.ts test [cargo test arguments]` runs the core's
@@ -18,6 +18,7 @@ import { homedir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+/** The package's directory (packages/hart). */
 const root = fileURLToPath(new URL('../', import.meta.url))
 const output = join(root, 'build', 'hart.wasm')
 
@@ -34,17 +35,17 @@ function cargo(...args: string[]): void {
   }
   // Options go before a `--` (what follows is for the test binary).
   const split = args.includes('--') ? args.indexOf('--') : args.length
-  const options = ['--quiet', '--manifest-path', join(root, 'hart', 'Cargo.toml')]
+  const options = ['--quiet', '--manifest-path', join(root, 'core', 'Cargo.toml')]
   execFileSync(cargo, [...args.slice(0, split), ...options, ...args.slice(split)], {
     stdio: 'inherit',
-    cwd: join(root, 'hart'), // (for hart/.cargo/config.toml)
+    cwd: join(root, 'core'), // (for core/.cargo/config.toml)
     env: { ...process.env, PATH },
   })
 }
 
 export function buildWasm(): void {
   cargo('build', '--release', '--target', 'wasm32-unknown-unknown')
-  const wasm = readFileSync(join(root, 'hart', 'target', 'wasm32-unknown-unknown', 'release', 'hart.wasm'))
+  const wasm = readFileSync(join(root, 'core', 'target', 'wasm32-unknown-unknown', 'release', 'hart.wasm'))
   if (existsSync(output) && readFileSync(output).equals(wasm)) return
   mkdirSync(join(root, 'build'), { recursive: true })
   writeFileSync(output, wasm)

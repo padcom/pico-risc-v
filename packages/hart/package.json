@@ -1,0 +1,45 @@
+{
+  "name": "@padcom/pico-risc-v-hart",
+  "version": "0.1.0",
+  "description": "A RISC-V (RV64GC) computer for bare-metal programs, in Node.js and browsers: compile C, run it, talk to its UART. The core of Pico RISC-V.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./hart.wasm": "./build/hart.wasm"
+  },
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts",
+    "build/hart.wasm",
+    "c",
+    "examples"
+  ],
+  "scripts": {
+    "build": "node scripts/build-wasm.ts && tsc -b && make -C examples/hello",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "risc-v",
+    "riscv",
+    "rv64",
+    "emulator",
+    "bare-metal",
+    "webassembly",
+    "jit"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/padcom/pico-risc-v.git",
+    "directory": "packages/hart"
+  },
+  "homepage": "https://github.com/padcom/pico-risc-v/tree/main/packages/hart#readme",
+  "license": "ISC",
+  "engines": {
+    "node": ">=22.18"
+  }
+}

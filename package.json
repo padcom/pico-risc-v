@@ -1,21 +1,26 @@
 {
-  "name": "risc-emulator",
+  "name": "pico-risc-v",
   "version": "0.1.0",
-  "description": "RISC-V (RV64GC) system emulator in TypeScript, with its CPU core in Rust/WebAssembly, that boots Debian",
+  "private": true,
+  "description": "Pico RISC-V: a RISC-V (RV64GC) computer in a browser tab, that boots Debian; its core and relay are packages of their own (packages/)",
   "type": "module",
+  "workspaces": [
+    "packages/hart",
+    "packages/relay"
+  ],
   "scripts": {
-    "build": "npm run build:wasm --silent && tsc -p tsconfig.build.json",
-    "build:wasm": "node scripts/build-wasm.ts",
+    "build": "npm run build:wasm --silent && tsc -b tsconfig.build.json",
+    "build:wasm": "node packages/hart/scripts/build-wasm.ts",
     "build:examples": "make -C examples",
-    "typecheck": "tsc --noEmit",
-    "test": "node scripts/build-wasm.ts test && vitest run",
-    "test:float": "bash hart/testfloat.sh",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node packages/hart/scripts/build-wasm.ts test && vitest run",
+    "test:float": "bash packages/hart/core/testfloat.sh",
     "test:watch": "vitest",
     "bench": "npm run build --silent && make -s -C examples && node scripts/bench.ts",
     "start": "node scripts/start.ts",
     "web": "node scripts/web.ts",
     "site": "node scripts/site.ts",
-    "relay": "node scripts/relay.ts",
+    "relay": "tsc -b packages/relay && node packages/relay/dist/cli.js",
     "debian:build": "bash linux/debian/build.sh",
     "emulator": "npm run build --silent && node dist/cli.js"
   },
@@ -25,18 +30,20 @@
   ],
   "author": "",
   "license": "ISC",
+  "bin": {
+    "risc-emulator": "dist/cli.js"
+  },
+  "dependencies": {
+    "@padcom/pico-risc-v-hart": "0.1.0",
+    "@padcom/pico-risc-v-relay": "0.1.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0"
+  },
   "devDependencies": {
     "@types/node": "^26.6.5",
     "playwright": "^1.64.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
-  },
-  "bin": {
-    "risc-emulator": "dist/cli.js"
-  },
-  "dependencies": {
-    "@xterm/addon-fit": "^0.11.0",
-    "@xterm/xterm": "^6.0.0"
   },
   "optionalDependencies": {
     "@kmamal/sdl": "^0.11.13"

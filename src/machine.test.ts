@@ -1,11 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { asm as a, toBytes } from './asm.js'
-import { Clint } from './clint.js'
-import { Csr, MIP_MSIP, MIP_MTIP } from './csr.js'
+import { asm as a, toBytes, Clint, Csr, MIP_MSIP, MIP_MTIP, Syscon, Terminal } from '@padcom/pico-risc-v-hart'
 import { Machine, MemoryMap } from './machine.js'
-import { Syscon } from './syscon.js'
-import { Terminal } from './terminal.js'
 
 function boot(program: string) {
   let screen = ''

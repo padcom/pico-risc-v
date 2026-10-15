@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { parseElf } from '../test/elf.js'
+import { parseElf } from '@padcom/pico-risc-v-hart'
 import { Machine, type MachineOptions, MemoryMap } from './machine.js'
 
 /**

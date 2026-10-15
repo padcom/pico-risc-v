@@ -35,7 +35,7 @@ export interface CPUOptions {
    */
   ram?: { base: number; size: number }
   /**
-   * The JIT (hart/src/jit.rs; needs `ram`): pages of code that have run
+   * The JIT (core/src/jit.rs; needs `ram`): pages of code that have run
    * `threshold` instructions are compiled to WebAssembly, `batch` of them
    * at a time. On by default; false turns it off.
    */
@@ -46,7 +46,7 @@ export interface CPUOptions {
 // a lot of booting's is; much more holds new code in the desktop's back.)
 const JIT_DEFAULTS = { threshold: 8000, batch: 32 }
 
-/** CPU state readable and writable as properties, in the core's field order (hart/src/lib.rs). */
+/** CPU state readable and writable as properties, in the core's field order (core/src/lib.rs). */
 const FIELDS = [
   'pc', 'priv', 'mstatus', 'mie', 'mip', 'mtvec', 'mscratch', 'mepc', 'mcause', 'mtval', 'medeleg', 'mideleg',
   'mcounteren', 'stvec', 'sscratch', 'sepc', 'scause', 'stval', 'satp', 'scounteren',
@@ -56,7 +56,7 @@ const WAITING = FIELDS.length
 const BREAK_ON_EBREAK = FIELDS.length + 1
 
 /**
- * What the core (hart/, Rust compiled to WebAssembly) exports. A hart is a
+ * What the core (core/, Rust compiled to WebAssembly) exports. A hart is a
  * pointer into its memory, from hart_new.
  */
 interface Core {
@@ -110,12 +110,12 @@ const THREAD_STACK = 1 << 20
 /** A number or bigint as the 64-bit pattern the core takes (negative numbers two's complement). */
 const u64 = (value: number | bigint) => BigInt.asUintN(64, typeof value === 'bigint' ? value : BigInt(Math.trunc(value)))
 
-/** The core's memory, in 64 KiB pages: what it starts with (hart/build.rs), and at most. */
+/** The core's memory, in 64 KiB pages: what it starts with (core/build.rs), and at most. */
 const INITIAL_MEMORY = 256
 const MAX_MEMORY = 65536
 
 let compiled: WebAssembly.Module | undefined
-/** The core, compiled once (by npm run build:wasm, from hart/), instantiated per CPU. */
+/** The core, compiled once (by scripts/build-wasm.ts, from core/), instantiated per CPU. */
 function coreModule(): WebAssembly.Module {
   if (!compiled && !fs) throw new Error('No core: call setCoreModule() first')
   return (compiled ??= new WebAssembly.Module(fs!.readFileSync(new URL('../build/hart.wasm', import.meta.url))))
@@ -209,7 +209,7 @@ function createHarts(bus: Bus, count: number, { resetVector = 0, readTime, break
  * RV64GC hart (IMAFDC, Zicsr, Zifencei) with machine, supervisor and user
  * privilege modes and virtual memory (Sv39).
  *
- * The instruction set is implemented in Rust (hart/), compiled to WebAssembly.
+ * The instruction set is implemented in Rust (core/), compiled to WebAssembly.
  * A CPU is a hart in an instance of that module: its own, or shared with
  * other harts (`CPU.harts()`). This class connects it to the bus and exposes
  * its state: registers as `x64` (a view of the core's register file, so

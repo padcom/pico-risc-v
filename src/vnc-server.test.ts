@@ -23,7 +23,7 @@ describe('VNC server', () => {
     const keys: number[][] = []
     const pointer: number[][] = []
     const device = (events: number[][]) => ({ send: (...sent: number[][]) => events.push(...sent) }) as unknown as VirtioInput
-    server = new VncServer({ output: screen, keyboard: device(keys), tablet: device(pointer), setDisplaySize: () => {} }, 'test')
+    server = new VncServer({ output: screen, drawsPointer: false, keyboard: device(keys), tablet: device(pointer), setDisplaySize: () => {} }, 'test')
     const port = await server.listen(0)
     return { screen, keys, pointer, port }
   }
@@ -143,7 +143,7 @@ describe('VNC server', () => {
   it('tells a viewer that can be told (DesktopSize) that the screen got another size, then sends it all', async () => {
     let screen = new Framebuffer(WIDTH, HEIGHT, new Uint8Array(Framebuffer.size(WIDTH, HEIGHT)))
     const input = { send: () => {} } as unknown as VirtioInput
-    server = new VncServer({ get output() { return screen }, keyboard: input, tablet: input, setDisplaySize: () => {} }, 'test')
+    server = new VncServer({ get output() { return screen }, drawsPointer: false, keyboard: input, tablet: input, setDisplaySize: () => {} }, 'test')
     const port = await server.listen(0)
     client = await RfbClient.connect(port)
     const other = await RfbClient.connect(port) // (one that can't be told)

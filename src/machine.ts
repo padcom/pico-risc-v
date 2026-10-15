@@ -1,16 +1,10 @@
 import type { BlockStorage } from './block-storage.js'
-import { BusError } from './bus.js'
-import { Clint } from './clint.js'
-import { CPU, type CPUOptions } from './cpu.js'
+import { BusError, Clint, CPU, type CPUOptions, type RAM, SystemBus, Syscon, Terminal } from '@padcom/pico-risc-v-hart'
 import { encodeFdt, type FdtNode } from './fdt.js'
 import { Framebuffer } from './framebuffer.js'
 import { GoldfishRtc } from './goldfish-rtc.js'
 import type { HartThreadData } from './hart-worker.js'
 import { Plic } from './plic.js'
-import type { RAM } from './ram.js'
-import { SystemBus } from './system-bus.js'
-import { Syscon } from './syscon.js'
-import { Terminal } from './terminal.js'
 import { VirtioBlock } from './virtio-blk.js'
 import { VirtioConsole } from './virtio-console.js'
 import { VirtioGpu } from './virtio-gpu.js'
@@ -352,6 +346,15 @@ export class Machine {
    */
   get output(): Framebuffer | undefined {
     return this.gpu?.output ?? this.screen
+  }
+
+  /**
+   * The guest draws its own pointer on the screen: once the OS shows
+   * something on the GPU (X does, with its pointer; the framebuffer before it
+   * has none).
+   */
+  get drawsPointer(): boolean {
+    return this.gpu?.output !== undefined
   }
 
   /** The screen is `width` × `height` pixels now (a window's): the GPU tells the OS. */

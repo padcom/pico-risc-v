@@ -1,25 +1,17 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["ES2024", "DOM", "DOM.Iterable"],
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "outDir": "dist",
-    "declaration": true,
-    "sourceMap": true,
-    "skipLibCheck": true,
-    "types": [
-      "node"
-    ],
-    "preserveConstEnums": true,
-    "rewriteRelativeImportExtensions": true
+    "noEmit": true,
+    "customConditions": [
+      "source"
+    ]
   },
   "include": [
     "src",
     "test",
     "scripts",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "packages/*/src",
+    "packages/*/scripts"
   ]
 }

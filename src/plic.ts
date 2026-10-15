@@ -1,5 +1,4 @@
-import { WordDevice } from './bus.js'
-import { MIP_MEIP, MIP_SEIP } from './csr.js'
+import { WordDevice, MIP_MEIP, MIP_SEIP } from '@padcom/pico-risc-v-hart'
 
 /**
  * Platform-Level Interrupt Controller (SiFive / RISC-V PLIC layout) for

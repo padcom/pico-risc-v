@@ -1,12 +1,6 @@
-export { type Bus, BusError, WordDevice } from './bus.js'
-export { RAM } from './ram.js'
-export { SystemBus } from './system-bus.js'
-export { CPU, type CPUOptions, type StopReason } from './cpu.js'
-export { Csr, Priv } from './csr.js'
-export { InterruptCause, Trap, TrapCause } from './trap.js'
-export { Terminal } from './terminal.js'
-export { Clint } from './clint.js'
-export { Syscon } from './syscon.js'
+// Pico RISC-V's machine (it boots Debian), on the core's building blocks:
+// @padcom/pico-risc-v-hart has those (and bare-metal programs' run()).
+export * from '@padcom/pico-risc-v-hart'
 export { Framebuffer } from './framebuffer.js'
 export { encodeFdt, type FdtNode, type FdtValue } from './fdt.js'
 export { DEFAULT_BOOTARGS, Machine, MemoryMap, TIMEBASE_HZ, type BootOptions, type MachineOptions, type RunResult } from './machine.js'

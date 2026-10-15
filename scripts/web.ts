@@ -17,13 +17,13 @@
  * Only what the page needs is served, and only to this machine (localhost).
  */
 import { execFileSync } from 'node:child_process'
-import { createReadStream, existsSync, readdirSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { extname, join, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
-import { buildWasm } from './build-wasm.ts'
+import { buildWasm } from '../packages/hart/scripts/build-wasm.ts'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const { values } = parseArgs({ options: { port: { type: 'string', default: '8080' } } })
@@ -31,7 +31,8 @@ const { values } = parseArgs({ options: { port: { type: 'string', default: '8080
 /** URL path prefixes served, and where from (relative to the project). */
 const SERVED: [string, string][] = [
   ['/dist/', 'dist/'],
-  ['/build/hart.wasm', 'build/hart.wasm'],
+  ['/hart/dist/', 'packages/hart/dist/'],
+  ['/hart/hart.wasm', 'packages/hart/build/hart.wasm'],
   ['/images/debian/', 'images/debian/'],
   ['/examples/build/', 'examples/build/'],
   ['/xterm/', 'node_modules/@xterm/xterm/'],
@@ -54,12 +55,10 @@ const ISOLATED = {
 
 // What the page loads, up to date.
 buildWasm()
-if (emulatorStale()) {
-  console.log('[web] compiling the emulator')
-  execFileSync(process.execPath, ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.build.json'], { cwd: root, stdio: 'inherit' })
-}
+// (tsc -b: only what changed, here or in packages/.)
+execFileSync(process.execPath, ['node_modules/typescript/bin/tsc', '-b', 'tsconfig.build.json'], { cwd: root, stdio: 'inherit' })
 // (Once compiled.)
-const { isLocalOrigin, serveNetworks } = await import('../dist/net/relay.js')
+const { isLocalOrigin, serveNetworks } = await import('@padcom/pico-risc-v-relay')
 if (!existsSync(join(root, 'images/debian/pristine.raw'))) {
   console.log('[web] Debian is not set up (npm start does it); bare-metal images still work: /?image=examples/build/hello.bin')
 }
@@ -114,11 +113,3 @@ function resolve(path: string): string | undefined {
 }
 
 /** dist/ is missing or older than some source file. */
-function emulatorStale(): boolean {
-  const built = join(root, 'dist/browser.js')
-  if (!existsSync(built)) return true
-  const time = statSync(built).mtimeMs
-  return readdirSync(join(root, 'src'), { recursive: true, encoding: 'utf8' })
-    .filter(f => f.endsWith('.ts') && !f.endsWith('.test.ts'))
-    .some(f => statSync(join(root, 'src', f)).mtimeMs > time)
-}

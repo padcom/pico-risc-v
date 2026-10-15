@@ -1,6 +1,21 @@
 {
-  "extends": "./tsconfig.json",
-  "compilerOptions": { "rootDir": "src" },
-  "include": ["src"],
-  "exclude": ["src/**/*.test.ts"]
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/**/*.test.ts"
+  ],
+  "references": [
+    {
+      "path": "packages/hart"
+    },
+    {
+      "path": "packages/relay"
+    }
+  ]
 }

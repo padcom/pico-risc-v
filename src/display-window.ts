@@ -29,9 +29,16 @@ export async function openWindow(display: Display, title: string, closed: () => 
   let height = 0
   let rgba = Buffer.alloc(0)
   let dirty = true
+  // One pointer over the screen: the guest's, once it draws one (SDL hides
+  // the host's over its windows only).
+  let pointer = true
+  const showPointer = (show: boolean) => {
+    if (show !== pointer) sdl.mouse.showCursor((pointer = show))
+  }
   const timer = setInterval(() => {
     const screen = display.output
     if (window.destroyed || !screen) return
+    showPointer(!display.drawsPointer)
     if (screen.width !== width || screen.height !== height) {
       ;({ width, height } = screen)
       rgba = Buffer.alloc(width * height * 4)
@@ -54,6 +61,7 @@ export async function openWindow(display: Display, title: string, closed: () => 
   window.on('expose', () => (dirty = true))
   window.on('close', () => {
     clearInterval(timer)
+    showPointer(true)
     clearTimeout(settling)
     closed()
   })

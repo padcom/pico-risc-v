@@ -1,9 +1,12 @@
 # hart: the CPU core
 
 The emulator's RISC-V hart (CPU core with its MMU), written in Rust and
-compiled to WebAssembly. Everything else (devices, the virtio disk and network,
-the NAT, the machine and CLI) is TypeScript in `src/`; `src/cpu.ts` loads
-`build/hart.wasm` and makes it look like any other TypeScript class.
+compiled to WebAssembly (`scripts/build-wasm.ts`, in this package:
+`packages/hart/`). `src/cpu.ts` loads `build/hart.wasm` and makes it look like
+any other TypeScript class; the rest of the package is the bare-metal
+computer around it (`src/computer.ts`). Pico RISC-V's Linux machine (the
+devices, the virtio disk and network, the CLI) is TypeScript in the
+repository's `src/`, the NAT in `packages/relay/`.
 
 **What's here:** RV64GC (IMAFDC with Zicsr and Zifencei), machine,
 supervisor and user modes with trap delegation, and Sv39 paging with a TLB.
@@ -14,7 +17,7 @@ An instance of the core holds one or more **harts**, which share its RAM
 (`CPU.harts()` in `src/cpu.ts`). Each has its own caches and JIT. The
 memory is a shared WebAssembly memory, so other instances of the core, on
 other threads, can run the harts too: the machine runs each hart on a
-thread of its own (`src/hart-worker.ts`), or, with the virtual clock, in
+thread of its own (the repository's `src/hart-worker.ts`), or, with the virtual clock, in
 turn on one. AMOs and SC are atomic operations on RAM (the core is built
 with WebAssembly's atomic instructions), an SC succeeds only if memory
 still holds what its LR read, and FENCE is a memory fence, so they work

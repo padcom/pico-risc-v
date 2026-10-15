@@ -14,7 +14,8 @@
  * disk is as it was left the next time; one page at a time, and a link in
  * the status bar starts over. With data-network on the page (npm run web), the
  * network card reaches the server's user-mode NAT over a WebSocket; with
- * ?relay=, that of a relay (npm run relay, on this machine, say).
+ * ?relay=, that of a relay (npx @padcom/pico-risc-v-relay, on this machine,
+ * say: packages/relay).
  *
  * Threads need a cross-origin isolated page. Where the server doesn't make
  * it one (GitHub Pages, say), data-service-worker on the page names a service
@@ -22,7 +23,8 @@
  * reloads once through it.
  *
  * Query parameters:
- *   relay=<ws url>       the network through this relay (npm run relay:
+ *   relay=<ws url>       the network through this relay (npx
+ *                        @padcom/pico-risc-v-relay:
  *                        ws://localhost:8081)
  *   image=<url>          boot this bare-metal program instead (no disk,
  *                        network), e.g. examples/build/hello.bin
@@ -49,7 +51,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import { type BlockStorage, SnapshotStorage } from './block-storage.js'
 import { ChunkedStorage, gunzip } from './chunked-storage.js'
-import { setCoreModule } from './cpu.js'
+import { setCoreModule } from '@padcom/pico-risc-v-hart'
 import { fit as fitArea } from './fit.js'
 import { LINUX_KEYS } from './keymap.js'
 import { HttpStorage } from './http-storage.js'
@@ -92,7 +94,7 @@ const resizable = display !== undefined && !params.get('display')
 const SETTLE = 300
 /** How often the disk's changes are saved, besides when the guest flushes it (ms). */
 const SAVE_INTERVAL = 2000
-/** Where npm run relay is, by default. */
+/** Where the relay (npx @padcom/pico-risc-v-relay) is, by default. */
 const LOCAL_RELAY = 'ws://localhost:8081'
 /** How long to wait for the network's WebSocket to connect (ms). */
 const RELAY_TIMEOUT = 5000
@@ -134,7 +136,7 @@ Object.defineProperty(window, 'emulatorOutput', { get: () => String.fromCharCode
 try {
   if (!crossOriginIsolated) await isolate()
   log('loading the CPU core…')
-  setCoreModule(await WebAssembly.compileStreaming(fetch('build/hart.wasm')))
+  setCoreModule(await WebAssembly.compileStreaming(fetch('hart/hart.wasm')))
 
   let machine: Machine
   if (image) {
@@ -227,6 +229,9 @@ function show(machine: Machine): void {
       image = context.createImageData(screen.width, screen.height)
       stale = true
     }
+    // One pointer on the screen: the guest's, once it draws one.
+    const cursor = machine.drawsPointer ? 'none' : ''
+    if (canvas.style.cursor !== cursor) canvas.style.cursor = cursor
     // (Not drawn while it isn't shown; then all of it, once it is again.)
     if (screen && !screenView.hidden && (screen.draw(image.data) || stale)) {
       context.putImageData(image, 0, 0)
@@ -384,7 +389,7 @@ async function connect(): Promise<WebSocketNetwork | undefined> {
     // Where to get one.
     const link = new URL(location.href)
     link.searchParams.set('relay', LOCAL_RELAY)
-    const a = Object.assign(document.createElement('a'), { href: link.href, textContent: 'through npm run relay on this machine' })
+    const a = Object.assign(document.createElement('a'), { href: link.href, textContent: 'through a relay on this machine (npx @padcom/pico-risc-v-relay)' })
     networkStatus.replaceChildren('no network: ', a)
     return undefined
   }
@@ -396,7 +401,7 @@ async function connect(): Promise<WebSocketNetwork | undefined> {
     networkStatus.textContent = relay ? `network: through ${url}` : 'network'
   }
   network.onclose = () => {
-    networkStatus.textContent = open ? `network: lost (${url})` : `no network: nothing at ${url}${relay ? ' (is npm run relay running?)' : ''}`
+    networkStatus.textContent = open ? `network: lost (${url})` : `no network: nothing at ${url}${relay ? ' (is the relay running? npx @padcom/pico-risc-v-relay)' : ''}`
   }
   const timeout = new Promise<false>(resolve => setTimeout(() => resolve(false), RELAY_TIMEOUT))
   if (await Promise.race([network.opened, timeout])) return network

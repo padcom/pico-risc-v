@@ -10,7 +10,7 @@
  * - the page (web/), without network, and with the
  *   service worker (web/isolate.js) that makes it cross-origin isolated (the
  *   harts' threads need that; a plain web server doesn't send the headers)
- * - the compiled emulator (dist/), the core (build/hart.wasm), xterm.js, the
+ * - the compiled emulator (dist/), its core (packages/hart: hart/), xterm.js, the
  *   bare-metal examples (?image=examples/build/hello.bin)
  * - Debian: the firmware (OpenSBI), U-Boot gzipped (the page unpacks it), and
  *   the disk split into gzipped chunks of CHUNK bytes, all-zero ones left out
@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { createHash } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
-import { buildWasm } from './build-wasm.ts'
+import { buildWasm } from '../packages/hart/scripts/build-wasm.ts'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const { values } = parseArgs({ options: { out: { type: 'string', default: 'site' } } })
@@ -38,7 +38,7 @@ if (!existsSync(join(DEBIAN, 'pristine.raw'))) {
 }
 buildWasm()
 console.log('[site] compiling the emulator')
-execFileSync(process.execPath, ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.build.json'], { cwd: root, stdio: 'inherit' })
+execFileSync(process.execPath, ['node_modules/typescript/bin/tsc', '-b', 'tsconfig.build.json'], { cwd: root, stdio: 'inherit' })
 
 rmSync(out, { recursive: true, force: true })
 mkdirSync(out, { recursive: true })
@@ -56,7 +56,10 @@ copy('web/isolate.js', 'isolate.js')
 for (const file of readdirSync(join(root, 'dist'), { recursive: true, encoding: 'utf8' })) {
   if (file.endsWith('.js')) copy(join('dist', file))
 }
-copy('build/hart.wasm')
+for (const file of readdirSync(join(root, 'packages/hart/dist'), { encoding: 'utf8' })) {
+  if (file.endsWith('.js')) copy(join('packages/hart/dist', file), join('hart/dist', file))
+}
+copy('packages/hart/build/hart.wasm', 'hart/hart.wasm')
 copy('node_modules/@xterm/xterm/lib/xterm.mjs', 'xterm/lib/xterm.mjs')
 copy('node_modules/@xterm/xterm/css/xterm.css', 'xterm/css/xterm.css')
 copy('node_modules/@xterm/addon-fit/lib/addon-fit.mjs', 'xterm-fit/lib/addon-fit.mjs')

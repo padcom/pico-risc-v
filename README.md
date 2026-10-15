@@ -32,25 +32,20 @@ Debian actually reads). Then:
 On GitHub Pages the machine has no network of its own: a web page can't
 open raw sockets, so `apt install` has nowhere to go. Your own machine can
 lend it one, through a small relay that runs the same user-mode NAT as the
-emulator's command line:
+emulator's command line. No clone needed, just Node.js 22.18 or newer:
 
 ```sh
-git clone https://github.com/padcom/pico-risc-v.git
-cd pico-risc-v
-npm install
-npm run relay
+npx @padcom/pico-risc-v-relay
 ```
 
-It needs Node.js 22.18 or newer, and nothing else: the relay compiles what
-it needs on first start. It listens on `ws://localhost:8081`, and only
-serves pages from `localhost` and from this project's GitHub Pages.
-
-Then open the page with the relay:
+It listens on `ws://localhost:8081`, and only serves pages from `localhost`
+and from this project's GitHub Pages (`--origin` adds others;
+[packages/relay](packages/relay) has the details). Then open the page with
+the relay:
 
 **<https://padcom.github.io/pico-risc-v/?relay=ws://localhost:8081>**
 
-(The status bar's *through npm run relay on this machine* link does the
-same.) Debian gets an address by DHCP, and `apt update` works. Newer Chrome
+(The status bar's *through a relay on this machine* link does the same.) Debian gets an address by DHCP, and `apt update` works. Newer Chrome
 may ask whether the page may access your local network: it's asking about
 the relay, so say yes. As a bonus, `ssh -p 2222 root@localhost` reaches the
 guest through the relay.
@@ -120,6 +115,28 @@ A whole computer, emulated:
   VNC server, and the web page.
 - **The guest:** Debian 13 (trixie) for riscv64, unmodified apart from a
   few settings, with Xfce, Chocolate Doom and Freedoom on top.
+
+## Packages
+
+Two parts of Pico RISC-V are packages of their own, on npm:
+
+- **[@padcom/pico-risc-v-hart](packages/hart)**: the CPU core as a
+  RISC-V computer for bare-metal programs. Compile C for it, `run()` it,
+  and get its exit code and output. Its UART goes to your terminal, to a
+  callback that sees every character as it's written, or both, and you can
+  type into it. It's a RISC-V executor for your own project, in Node.js or
+  a browser, with an example that's already compiled:
+
+  ```js
+  import { readFileSync } from 'node:fs'
+  import { captureUart, run } from '@padcom/pico-risc-v-hart'
+
+  const uart = captureUart({ onText: text => process.stdout.write(text), input: 'Ada\r' })
+  const { exitCode } = await run(readFileSync('hello.elf'), { uart })
+  ```
+
+- **[@padcom/pico-risc-v-relay](packages/relay)**: the network relay for
+  the web page, `npx @padcom/pico-risc-v-relay`.
 
 ## Who wrote it
 

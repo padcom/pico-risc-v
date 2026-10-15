@@ -8,7 +8,7 @@ import { answerA } from '../test/dns.js'
 import { LinuxSession } from '../test/linux-session.js'
 import { SnapshotStorage } from './block-storage.js'
 import { FileStorage } from './file-storage.js'
-import { UserNetwork } from './net/user-network.js'
+import { UserNetwork } from '@padcom/pico-risc-v-relay'
 
 /** Set up by linux/debian/build.sh (npm start runs it). */
 const FIRMWARE = new URL('../images/debian/fw_dynamic.bin', import.meta.url)

@@ -1,4 +1,4 @@
-import { WordDevice } from './bus.js'
+import { WordDevice } from '@padcom/pico-risc-v-hart'
 
 /**
  * Real-time clock (Google Goldfish RTC, as on QEMU's virt board): the time of

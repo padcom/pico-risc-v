@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs'
 import { FileStorage } from '../../dist/file-storage.js'
 import { Machine } from '../../dist/machine.js'
-import { UserNetwork } from '../../dist/net/user-network.js'
+import { UserNetwork } from '@padcom/pico-risc-v-relay'
 
 const DIR = new URL('../../images/debian/', import.meta.url)
 /** How long each step may take, at most (ms). */

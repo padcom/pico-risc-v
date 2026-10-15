@@ -6,6 +6,9 @@ code was written by Claude (Anthropic), in Claude Code; @padcom directed.
 
 2026-10-15  Doom: a sound card, Freedoom, a day of fixes, Debian only, and a name: Pico RISC-V
 
+	* Packages: @padcom/pico-risc-v-hart (the core, a computer for bare-metal
+	          programs: run(), a pluggable UART, a C runtime, an example) and
+	          @padcom/pico-risc-v-relay (npx); one pointer on the screen.
 	* README.md, ChangeLog: the project is Pico RISC-V; how it came to be.
 	* cefee91 Debian only: Alpine is gone, and the static site (GitHub Pages)
 	          boots Debian

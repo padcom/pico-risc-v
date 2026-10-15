@@ -260,6 +260,7 @@ describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => exi
         // Another size (a window's): the GPU tells Linux, udev X (xrandr), and
         // the screen shows the desktop that size.
         expect(s.machine.output).not.toBe(s.machine.screen) // (X is on the GPU)
+        expect(s.machine.drawsPointer).toBe(true) // (X's: front ends hide theirs)
         s.machine.setDisplaySize(1280, 720)
         await until(s, 'the new size', () => s.machine.output?.width === 1280 && s.machine.output.height === 720)
 

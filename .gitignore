@@ -4,5 +4,9 @@ examples/build/
 site/
 images/
 build/
-hart/target/
+packages/*/core/target/
+packages/*/dist/
+packages/*/build/
+packages/*/*.tsbuildinfo
 .claude/scheduled_tasks.lock
+packages/*/examples/**/*.elf

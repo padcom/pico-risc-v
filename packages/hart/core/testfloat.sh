@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Checks the FPU (hart/src/fpu.rs) against Berkeley TestFloat: builds
+# Checks the FPU (core/src/fpu.rs) against Berkeley TestFloat: builds
 # SoftFloat with its RISC-V specialization and TestFloat's testfloat_gen
 # (into build/testfloat/, pinned commits; downloaded the first time), then
-# runs hart/src/testfloat.rs, which executes a couple of million generated
+# runs core/src/testfloat.rs, which executes a couple of million generated
 # cases as instructions and compares results and exception flags.
 #
 #   npm run test:float

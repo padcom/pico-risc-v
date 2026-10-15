@@ -32,7 +32,7 @@ describe('the screen in a window', () => {
     screen.pixels.fill(0x336699)
     const input = { send: () => {} } as unknown as VirtioInput
     let closed = false
-    const window = await openWindow({ output: screen, keyboard: input, tablet: input, setDisplaySize: () => {} }, 'risc-emulator test', () => (closed = true))
+    const window = await openWindow({ output: screen, drawsPointer: false, keyboard: input, tablet: input, setDisplaySize: () => {} }, 'risc-emulator test', () => (closed = true))
     // A few frames: the screen, then a change to it.
     await new Promise(resolve => setTimeout(resolve, 100))
     screen.pixels.fill(0xff8800, 0, 320 * 100)

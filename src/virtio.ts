@@ -1,4 +1,4 @@
-import { WordDevice } from './bus.js'
+import { WordDevice } from '@padcom/pico-risc-v-hart'
 
 /**
  * Gives a device access to guest physical memory ("DMA"): a view of `length`

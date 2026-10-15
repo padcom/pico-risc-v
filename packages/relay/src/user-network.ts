@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { createSocket, type Socket as UdpSocket } from 'node:dgram'
 import { getServers } from 'node:dns'
 import { connect, createServer, type Server, type Socket } from 'node:net'
-import type { NetworkBackend } from '../virtio-net.js'
+import type { NetworkBackend } from './network.js'
 import {
   arpReply,
   BROADCAST_MAC,

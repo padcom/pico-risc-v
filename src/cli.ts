@@ -42,7 +42,7 @@ import { openWindow } from './display-window.js'
 import { FileStorage } from './file-storage.js'
 import { Machine } from './machine.js'
 import { openSpeaker } from './speaker.js'
-import { UserNetwork } from './net/user-network.js'
+import { UserNetwork } from '@padcom/pico-risc-v-relay'
 import { VncServer } from './vnc-server.js'
 
 /** Instructions per scheduling slice; small enough to keep input responsive. */

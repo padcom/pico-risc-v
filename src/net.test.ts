@@ -3,33 +3,7 @@ import { createServer as createHttpServer, request as httpRequest } from 'node:h
 import { connect, createServer, type Server } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import {
-  BROADCAST_MAC,
-  checksum,
-  ethernet,
-  ETHERTYPE_ARP,
-  ETHERTYPE_IPV4,
-  ip,
-  ipv4,
-  parseArp,
-  parseEthernet,
-  parseIpv4,
-  parseTcp,
-  parseUdp,
-  PROTO_ICMP,
-  PROTO_TCP,
-  PROTO_UDP,
-  type Tcp,
-  tcp,
-  TCP_ACK,
-  TCP_FIN,
-  TCP_PSH,
-  TCP_RST,
-  TCP_SYN,
-  udp,
-} from './net/packet.js'
-import { DNS_IP, GATEWAY_IP, GUEST_IP, UserNetwork } from './net/user-network.js'
-import { isLocalOrigin, serveNetworks } from './net/relay.js'
+import { BROADCAST_MAC, checksum, ethernet, ETHERTYPE_ARP, ETHERTYPE_IPV4, ip, ipv4, parseArp, parseEthernet, parseIpv4, parseTcp, parseUdp, PROTO_ICMP, PROTO_TCP, PROTO_UDP, type Tcp, tcp, TCP_ACK, TCP_FIN, TCP_PSH, TCP_RST, TCP_SYN, udp, DNS_IP, GATEWAY_IP, GUEST_IP, UserNetwork, isLocalOrigin, serveNetworks } from '@padcom/pico-risc-v-relay'
 import { VirtioNet } from './virtio-net.js'
 import { WebSocketNetwork } from './websocket-network.js'
 
