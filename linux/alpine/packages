@@ -21,6 +21,7 @@ xinit
 fluxbox
 xterm
 xrandr
+setxkbmap             # (~/.xinitrc: the keyboard's map from the start)
 font-misc-misc
 font-cursor-misc
 font-alias

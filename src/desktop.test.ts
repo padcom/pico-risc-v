@@ -230,7 +230,7 @@ const ALPINE = new URL('../images/alpine/', import.meta.url)
  * (tty1) by itself.
  */
 describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen', () => {
-  it('starts X with Fluxbox and an xterm on it (on the GPU), with the keyboard and the mouse (evdev); it takes another size; it plays sound, and Freedoom, full screen too', { timeout: 1_800_000 }, async () => {
+  it('starts X with Fluxbox and an xterm on it (on the GPU), with the keyboard and the mouse (evdev); it takes another size; it plays sound, and Freedoom, full screen too, with its arrow keys', { timeout: 1_800_000 }, async () => {
     const config = JSON.parse(readFileSync(new URL('boot.json', ALPINE), 'utf8')) as { bootargs: string; memory: number }
     const file = new FileStorage(fileURLToPath(new URL('pristine.raw', ALPINE)), { readOnly: true })
     try {
@@ -312,6 +312,39 @@ describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen
       s.machine.keyboard!.send([Input.EV_KEY, 28, 0])
       s.machine.keyboard!.send([Input.EV_KEY, 56, 0])
       await until(s, 'Doom, full screen', () => colors().desktop < 0.01)
+
+      // Its arrow keys (X's core map numbered as evdev does from the start,
+      // ~/.xinitrc: SDL3 goes by it, and Doom was started before any key):
+      // a game (Escape, Enter: new game, episode, skill; once more, as the
+      // menus miss one now and then, which a game doesn't mind), and Left
+      // held turns the view, all of it changes, as it doesn't standing still.
+      const wait = async (seconds: number, done: number) => {
+        s.type(`sleep ${seconds}; echo "done-$((${done}+0))"\n`)
+        await s.waitForAsync(`done-${done}\r\n`, BUDGET, 600_000)
+      }
+      const press = (code: number, value: number) => s.machine.keyboard!.send([Input.EV_KEY, code, value])
+      let done = 13
+      for (const key of [1, 28, 28, 28, 28]) {
+        press(key, 1)
+        press(key, 0)
+        await wait(2, done++)
+      }
+      const screen = () => {
+        const { width, height } = s.machine.output!
+        const rgba = new Uint8Array(width * height * 4)
+        s.machine.output!.draw(rgba)
+        return new Uint32Array(rgba.buffer)
+      }
+      const changed = (a: Uint32Array, b: Uint32Array) => a.filter((p, i) => p !== b[i]).length / a.length
+      const before = screen()
+      await wait(1, done++)
+      const still = screen()
+      press(105, 1) // KEY_LEFT
+      await wait(1, done++)
+      press(105, 0)
+      const turned = screen()
+      expect(changed(before, still)).toBeLessThan(0.2)
+      expect(changed(still, turned)).toBeGreaterThan(0.5)
       s.type('pkill -f bin/chocolate-doom\n')
 
       s.type('poweroff\n')

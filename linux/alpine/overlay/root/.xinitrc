@@ -11,5 +11,10 @@
     [ -n "$preferred" ] && [ "$preferred" != "$current" ] && xrandr --output "$output" --auto
   done
 ) &
+# The keyboard's map, X's core one too (the one programs ask which key is
+# where): until the keyboard's first key it's X's own default, numbered as
+# old X servers did, not as evdev does, and SDL3 (Doom's) goes by what it
+# sees when it starts: its arrow keys would be other keys.
+setxkbmap -rules evdev -model pc105 -layout us
 fluxbox &
 exec xterm -geometry 100x30+40+40
