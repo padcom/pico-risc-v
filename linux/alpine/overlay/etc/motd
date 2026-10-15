@@ -1,4 +1,0 @@
-Welcome to Alpine Linux, on risc-emulator: a RISC-V machine emulated in
-JavaScript and WebAssembly. apk add needs a network; `poweroff` turns it off.
-On the screen: freedoom1 (or the desktop's menu) to play Doom.
-

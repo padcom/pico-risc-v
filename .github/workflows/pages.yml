@@ -1,4 +1,4 @@
-# Publishes the emulator as a static web site on GitHub Pages: Alpine Linux
+# Publishes the emulator as a static web site on GitHub Pages: Debian
 # booting in the page (npm run site, see linux/README.md), on every push to
 # main. The repository's Pages settings must say to deploy from "GitHub
 # Actions".
@@ -22,6 +22,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    # (Building Debian's image, when it isn't in the cache, takes a while.)
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -31,9 +33,30 @@ jobs:
       - name: Rust, for WebAssembly (the CPU core)
         run: rustup target add wasm32-unknown-unknown
       - run: npm ci
-      # In a Podman container (Podman comes with GitHub's Ubuntu runners).
-      - name: Alpine Linux
-        run: npm run alpine:build
+      # Debian's image takes long to build (in a Podman container, which
+      # GitHub's Ubuntu runners have, then apt in the emulator): it's kept
+      # in the cache, and built again only when what it's built from
+      # (linux/debian/) changes. (Its disk is 8 GB, most of it holes: a tar
+      # that keeps them.)
+      - id: debian
+        name: What Debian's image is built from
+        run: echo "hash=$(bash linux/inputs-hash.sh debian)" >>"$GITHUB_OUTPUT"
+      - id: cached
+        uses: actions/cache/restore@v4
+        with:
+          path: debian.tar
+          key: debian-${{ steps.debian.outputs.hash }}
+      - name: Debian, from the cache
+        if: steps.cached.outputs.cache-hit == 'true'
+        run: tar --sparse -xf debian.tar && rm debian.tar
+      - name: Debian, built
+        if: steps.cached.outputs.cache-hit != 'true'
+        run: npm run debian:build && tar --sparse -cf debian.tar images/debian
+      - if: steps.cached.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: debian.tar
+          key: debian-${{ steps.debian.outputs.hash }}
       - name: The site
         run: npm run site
       - uses: actions/upload-pages-artifact@v3

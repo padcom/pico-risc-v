@@ -17,7 +17,6 @@
     "site": "node scripts/site.ts",
     "relay": "node scripts/relay.ts",
     "debian:build": "bash linux/debian/build.sh",
-    "alpine:build": "bash linux/alpine/build.sh",
     "emulator": "npm run build --silent && node dist/cli.js"
   },
   "keywords": [

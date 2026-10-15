@@ -53,9 +53,9 @@ then X quits the emulator at any time.
 
 The login is on a virtio console (`hvc0`), which, unlike the serial port,
 tells Linux your terminal's size, and when it changes: full-screen programs
-(htop, mc, vim) use the whole window and follow it. (Debian also keeps a
-login on the serial port, `ttyS0`, where the boot messages are: its prompt
-shows up once among them.)
+(htop, mc, vim) use the whole window and follow it. (The serial port,
+`ttyS0`, has the boot messages, and no login: both show in the same
+terminal, where two prompts would be mixed up.)
 
 Options after `--` go to the emulator: `npm start -- --snapshot` (see
 [The disk](#the-disk)), `npm start -- --memory 2048`.
@@ -208,8 +208,8 @@ clock.
 (Web Workers) with 1 GiB of RAM, to its desktop (Xfce) on the machine's
 screen, which fills the page. The status bar's buttons switch between the
 screen and the terminal (an [xterm.js](https://xtermjs.org/) one: the
-serial port, where the boot messages are, and the console, logged in as
-root), or show the screen full screen (Esc leaves). Debian must have been
+serial port, where the boot messages are, and the console, where root logs
+in), or show the screen full screen (Esc leaves). Debian must have been
 set up once (`npm start` does it).
 
 - **The disk** is `pristine.raw`, read from the server a piece at a time as
@@ -237,7 +237,7 @@ set up once (`npm start` does it).
   session leaves a shell there). The boot (U-Boot, GRUB, the kernel's
   messages) shows on a framebuffer, as boot firmware leaves one set up,
   which Linux has as `/dev/fb0`: Debian gets it from U-Boot, through UEFI
-  (`efifb`); Alpine's kernel from the device tree (`simpledrm`). (GRUB then
+  (`efifb`). (GRUB then
   writes to the screen, not the serial port.) X runs on a GPU (virtio-gpu,
   2D: Linux's `virtio_gpu`, X's `modesetting` driver), whose display can
   change size: the emulator tells Linux the size it wants, Linux tells
@@ -254,10 +254,9 @@ set up once (`npm start` does it).
   until then, what the guest plays isn't heard. The card hands each piece of
   sound back to Linux once it has played, which is what keeps programs going
   at the sound's pace.
-- **Freedoom**, a free Doom, is there to play, in both distributions:
-  `freedoom1` or `freedoom2` on the desktop (Xfce's menu: Games; Fluxbox's
-  menu on Alpine), on Chocolate Doom, in a small window (320×200: quick to
-  draw; Alt+Enter: full screen),
+- **Freedoom**, a free Doom, is there to play: `freedoom1` or `freedoom2`
+  on the desktop (Xfce's menu: Games), on Chocolate Doom, in a small window
+  (320×200: quick to draw; Alt+Enter: full screen),
   with sound and music (Chocolate Doom's own OPL synthesizer). Keyboard only:
   the mouse is a tablet, which Doom's turning doesn't work with. Its settings
   are in `~/.local/share/chocolate-doom/`.
@@ -267,68 +266,39 @@ allow on a cross-origin isolated page: the server sends the headers for
 that. `npm run web -- --port 9000` picks another port. Only this machine can
 connect.
 
-## Alpine Linux, and a static web site: `npm run site`
+## A static web site: `npm run site`
 
-Besides Debian there's [Alpine Linux](https://alpinelinux.org/), much
-smaller (a 240 MB disk, a third of it Freedoom) and quicker to boot (a shell in about 10 seconds),
-mainly for the emulator as a static web site, where there's no server to
-read a big disk from or to give the guest a network.
-
-`npm run alpine:build` (`linux/alpine/build.sh`, in a Podman container like
-Debian's) makes `images/alpine/` from what Alpine publishes: its minimal root
-file system for riscv64, with the packages in `linux/alpine/packages` on top
-(to change what's on the disk, edit that list), and Alpine's kernel and
-OpenSBI. There's no bootloader: the emulator starts the kernel itself, with a
-small initramfs made by the build (BusyBox and the modules it takes to mount
-the disk). The console logs in as root by itself. On the screen (in the
-page, by default) Alpine starts a light desktop: X with Fluxbox and an xterm (a click on the
-desktop opens Fluxbox's menu: another terminal, Freedoom, quitting X; X's own
-bitmap fonts are the only ones, which fontconfig is told to take).
-There's no udev, so X is told where the keyboard, the mouse and the GPU
-are (`/etc/X11/xorg.conf.d`; the GPU's card when X starts), and its session
-looks for another screen size every 2 seconds (`~/.xinitrc`); Mesa's 3D
-drivers, which X's packages bring along (180 MB, with LLVM), are left out.
-Alpine has Freedoom, but not Chocolate Doom: the build makes it from its
-source, for riscv64, against Alpine's SDL libraries, with Zig's C compiler
-(a cross-compiler: the container can't run riscv64 programs).
-
-- In the page: `npm run web`, then <http://localhost:8080/?distribution=alpine>
-  (with the network, as Debian).
-- In a terminal:
-  ```sh
-  npm run emulator -- --memory 512 --harts 4 --kernel images/alpine/Image \
-    --initrd images/alpine/initramfs --disk images/alpine/pristine.raw --snapshot \
-    --bootargs 'console=ttyS0 root=/dev/vda quiet' --net images/alpine/fw_dynamic.bin
-  ```
-
-`npm run site` puts the whole of it in `site/`, about 105 MB, for any plain
-web server, GitHub Pages say: the page, the emulator, and Alpine, its disk in
-gzipped 1 MiB chunks (all-zero ones left out), which the page fetches only as
-Alpine reads them. What Alpine writes, the browser keeps, as with `npm run
-web`. A plain web server doesn't send the headers that let the
-page use threads (cross-origin isolation), so the page registers a service
-worker (`web/isolate.js`) that adds them, and reloads once. There's no
-network there of its own (`apk add` can't fetch anything, which is why the
-image comes with a few tools already: htop, mc, nano, vim, ...), but it can
-use one through your machine: run `npm run relay`, and open the page with
-`?relay=ws://localhost:8081` (the page's status bar has a link for that).
-The relay runs the same user-mode NAT as `npm start` (with `localhost:2222`
-to the guest's ssh), for that page. As the NAT reaches what your machine
-does, its own services included, the relay only serves pages from
-`localhost` and this project's GitHub Pages (from the git remote), not any
-web site open in the browser; `--origin <url>` allows another. (Newer
+`npm run site` puts the page, the emulator and Debian (the disk as built,
+`images/debian/pristine.raw`) in `site/`, about 700 MB, for any plain web
+server, GitHub Pages say. The disk is in gzipped 1 MiB chunks (all-zero
+ones left out), which the page fetches only as Debian reads them: about
+85 MB to the login prompt, 170 MB to the desktop. What Debian writes, the
+browser keeps, as with `npm run web`. A plain web server doesn't send the
+headers that let the page use threads (cross-origin isolation), so the page
+registers a service worker (`web/isolate.js`) that adds them, and reloads
+once. There's no network there of its own (`apt` can't fetch anything), but
+it can use one through your machine: run `npm run relay`, and open the page
+with `?relay=ws://localhost:8081` (the page's status bar has a link for
+that). The relay runs the same user-mode NAT as `npm start` (with
+`localhost:2222` to the guest's ssh), for that page. As the NAT reaches what
+your machine does, its own services included, the relay only serves pages
+from `localhost` and this project's GitHub Pages (from the git remote), not
+any web site open in the browser; `--origin <url>` allows another. (Newer
 Chrome may ask whether the page may access your local network.)
 
 On GitHub, `.github/workflows/pages.yml` does all of it (the core, the
-emulator, Alpine's image, the site) and publishes the site on GitHub Pages
+emulator, Debian's image, the site) and publishes the site on GitHub Pages
 on every push to `main`; in the repository's settings, Pages has to deploy
-from "GitHub Actions".
+from "GitHub Actions". Debian's image takes long to build there (`apt` runs
+in the emulator), so it's kept in the workflow's cache, and built again only
+when `linux/debian/` changes. GitHub Pages takes sites up to 1 GB, and about
+100 GB of downloads a month (some 600 visits to the desktop).
 
 ## Where the setup runs
 
 `linux/podman.sh` runs `linux/debian/build.sh` in a **Podman** container
-(`linux/debian/Containerfile`, Debian 13), and `linux/alpine/build.sh` in
-one of Alpine's, so they don't depend on your system's tools:
+(`linux/debian/Containerfile`, Debian 13), so it doesn't depend on your
+system's tools:
 
 - **Linux:** Podman runs rootless, with no daemon.
 - **macOS:** Podman runs containers in its own small Linux VM, which

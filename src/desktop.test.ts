@@ -84,6 +84,58 @@ async function playsSound(s: LinuxSession, heard: number[], done: number): Promi
   expect(s.screen).toContain('I_SDL_PrecacheSounds: Precaching all sound effects')
 }
 
+/**
+ * Freedoom full screen (Alt+Enter: Chocolate Doom asks the window manager),
+ * and its arrow keys: in a game (Escape, Enter: new game, episode, skill;
+ * once more, as the menus miss one now and then, which a game doesn't mind),
+ * Left held turns the view: all of it changes, as it doesn't standing still.
+ * `done`, `done` + 1...: the numbers of the shell's "done-" lines it waits for.
+ */
+async function playsDoomFullScreen(s: LinuxSession, done: number): Promise<void> {
+  const screen = () => {
+    const { width, height } = s.machine.output!
+    const rgba = new Uint8Array(width * height * 4)
+    s.machine.output!.draw(rgba)
+    return new Uint32Array(rgba.buffer)
+  }
+  const changed = (a: Uint32Array, b: Uint32Array) => a.filter((p, i) => p !== b[i]).length / a.length
+  const wait = async (seconds: number) => {
+    s.type(`sleep ${seconds}; echo "done-$((${done}+0))"\n`)
+    await s.waitForAsync(`done-${done++}\r\n`, BUDGET, 600_000)
+  }
+  const press = (code: number) => {
+    s.machine.keyboard!.send([Input.EV_KEY, code, 1])
+    s.machine.keyboard!.send([Input.EV_KEY, code, 0])
+  }
+
+  // The desktop (a Doom before gone), then this one's window on it (320x200).
+  await wait(3)
+  const desktop = screen()
+  s.type('DISPLAY=:0 XAUTHORITY=/root/.Xauthority PATH=$PATH:/usr/games freedoom1 >/tmp/doom.log 2>&1 &\n')
+  await until(s, "Doom's window", () => changed(desktop, screen()) > (320 * 200 * 0.8) / desktop.length)
+  // (Its keys only once it's looking for them: a while after.)
+  await wait(5)
+  s.machine.keyboard!.send([Input.EV_KEY, 56, 1]) // KEY_LEFTALT
+  press(28) // KEY_ENTER
+  s.machine.keyboard!.send([Input.EV_KEY, 56, 0])
+  await until(s, 'Doom, full screen', () => changed(desktop, screen()) > 0.9)
+
+  for (const key of [1, 28, 28, 28, 28]) {
+    press(key)
+    await wait(2)
+  }
+  const before = screen()
+  await wait(1)
+  const still = screen()
+  s.machine.keyboard!.send([Input.EV_KEY, 105, 1]) // KEY_LEFT
+  await wait(1)
+  s.machine.keyboard!.send([Input.EV_KEY, 105, 0])
+  const turned = screen()
+  expect(changed(before, still)).toBeLessThan(0.2)
+  expect(changed(still, turned)).toBeGreaterThan(0.5)
+  s.type('pkill -f /chocolate-doom\n')
+}
+
 const DEBIAN = new URL('../images/debian/', import.meta.url)
 const DEBIAN_DISK = fileURLToPath(new URL('pristine.raw', DEBIAN))
 
@@ -94,7 +146,7 @@ const DEBIAN_DISK = fileURLToPath(new URL('pristine.raw', DEBIAN))
  */
 describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => existsSync(new URL(f, DEBIAN))))('Debian with a screen', () => {
   it(
-    'has the screen (efifb), the keyboard and the mouse, and starts Xfce on them (on the GPU); a VNC viewer sees it and uses it; it takes another size; it plays sound, and Freedoom',
+    'has the screen (efifb), the keyboard and the mouse, and starts Xfce on them (on the GPU); a VNC viewer sees it and uses it; it takes another size; it plays sound, and Freedoom, full screen too, with its arrow keys',
     { timeout: 3_600_000 },
     async () => {
       const file = new FileStorage(DEBIAN_DISK, { readOnly: true })
@@ -212,6 +264,7 @@ describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => exi
         await until(s, 'the new size', () => s.machine.output?.width === 1280 && s.machine.output.height === 720)
 
         await playsSound(s, heard, 10)
+        await playsDoomFullScreen(s, 12)
 
         s.type('poweroff\n')
         expect(s.runToPowerOff(20_000_000_000)).toBe('poweroff')
@@ -220,137 +273,4 @@ describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => exi
       }
     },
   )
-})
-
-const ALPINE = new URL('../images/alpine/', import.meta.url)
-
-/**
- * Alpine with a screen, as the static site boots it with ?display: a light
- * desktop (X, Fluxbox, xterm; linux/alpine/packages), started on the screen
- * (tty1) by itself.
- */
-describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen', () => {
-  it('starts X with Fluxbox and an xterm on it (on the GPU), with the keyboard and the mouse (evdev); it takes another size; it plays sound, and Freedoom, full screen too, with its arrow keys', { timeout: 1_800_000 }, async () => {
-    const config = JSON.parse(readFileSync(new URL('boot.json', ALPINE), 'utf8')) as { bootargs: string; memory: number }
-    const file = new FileStorage(fileURLToPath(new URL('pristine.raw', ALPINE)), { readOnly: true })
-    try {
-      const s = new LinuxSession(
-        [
-          readFileSync(new URL('fw_dynamic.bin', ALPINE)),
-          {
-            load: [{ offset: 0x200000, data: readFileSync(new URL('Image', ALPINE)) }],
-            next: { offset: 0x200000 },
-            initrd: readFileSync(new URL('initramfs', ALPINE)),
-          },
-        ],
-        {
-          ramSize: config.memory * 1024 * 1024,
-          harts: 4,
-          disk: new SnapshotStorage(file),
-          bootargs: config.bootargs,
-          instructionsPerMicrosecond: 100,
-          display: { width: WIDTH, height: HEIGHT },
-          sound: true,
-        },
-      )
-      const heard: number[] = []
-      s.machine.sound!.output = samples => heard.push(...samples)
-      // The console (hvc0) logs in by itself.
-      await s.waitForAsync(':~# ', 20_000_000_000, 600_000)
-
-      s.type(
-        'until pgrep -x fluxbox && pgrep -x xterm; do sleep 1; done >/dev/null; ' +
-          `grep -oE "evdev: (keyboard|tablet): Configuring as [a-z]+" /var/log/Xorg.0.log; echo "done-$((0+1))"\n`,
-      )
-      await s.waitForAsync('done-1', BUDGET, 600_000)
-      expect(s.screen).toContain('evdev: keyboard: Configuring as keyboard')
-      // (An absolute pointer with buttons, as evdev sees it.)
-      expect(s.screen).toContain('evdev: tablet: Configuring as touchscreen')
-
-      // On the screen: the xterm (white), under Fluxbox's title bar, in its
-      // color (~/.fluxbox/styles/emulator: #5f87af), which is where it should be (the colors
-      // in the right order, all the way).
-      const window = (rgba: Uint8Array) => {
-        const at = (x: number, y: number) => [...rgba.subarray(4 * (y * WIDTH + x), 4 * (y * WIDTH + x) + 3)]
-        const title = Array.from({ length: 40 }, (_, y) => at(100, 30 + y)).some(([r, g, b]) => r === 0x5f && g === 0x87 && b === 0xaf)
-        const [r, g, b] = at(300, 200)
-        return title && r === 255 && g === 255 && b === 255
-      }
-      await until(s, 'the xterm', () => window(pixels(s)))
-
-      // Another size (a window's): X takes it (its session looks every 2 s).
-      expect(s.machine.output).not.toBe(s.machine.screen) // (X is on the GPU)
-      s.machine.setDisplaySize(1280, 720)
-      await until(s, 'the new size', () => s.machine.output?.width === 1280 && s.machine.output.height === 720)
-
-      await playsSound(s, heard, 10)
-
-      // Doom full screen (Alt+Enter: Chocolate Doom asks the window manager,
-      // which Fluxbox does and twm didn't): once its window is up, all of the
-      // screen is Doom's, none of it the xterm's white or Fluxbox's blue.
-      const colors = () => {
-        const { width, height } = s.machine.output!
-        const rgba = new Uint8Array(width * height * 4)
-        s.machine.output!.draw(rgba)
-        let desktop = 0
-        let other = 0
-        for (let i = 0; i < rgba.length; i += 4) {
-          const [r, g, b] = [rgba[i]!, rgba[i + 1]!, rgba[i + 2]!]
-          if ((r === 255 && g === 255 && b === 255) || (r === 0x5f && g === 0x87 && b === 0xaf)) desktop++
-          else if (r || g || b) other++
-        }
-        return { desktop: desktop / (width * height), other }
-      }
-      await until(s, "the last Doom's window gone", () => colors().other < (320 * 200) / 2)
-      s.type('DISPLAY=:0 XAUTHORITY=/root/.Xauthority freedoom1 >/tmp/doom.log 2>&1 &\n')
-      await until(s, "Doom's window", () => colors().other > (320 * 200) / 2)
-      // (Its keys only once it's looking for them: a while after.)
-      s.type('sleep 5; echo "done-$((12+0))"\n')
-      await s.waitForAsync('done-12\r\n', BUDGET, 600_000)
-      s.machine.keyboard!.send([Input.EV_KEY, 56, 1]) // KEY_LEFTALT
-      s.machine.keyboard!.send([Input.EV_KEY, 28, 1]) // KEY_ENTER
-      s.machine.keyboard!.send([Input.EV_KEY, 28, 0])
-      s.machine.keyboard!.send([Input.EV_KEY, 56, 0])
-      await until(s, 'Doom, full screen', () => colors().desktop < 0.01)
-
-      // Its arrow keys (X's core map numbered as evdev does from the start,
-      // ~/.xinitrc: SDL3 goes by it, and Doom was started before any key):
-      // a game (Escape, Enter: new game, episode, skill; once more, as the
-      // menus miss one now and then, which a game doesn't mind), and Left
-      // held turns the view, all of it changes, as it doesn't standing still.
-      const wait = async (seconds: number, done: number) => {
-        s.type(`sleep ${seconds}; echo "done-$((${done}+0))"\n`)
-        await s.waitForAsync(`done-${done}\r\n`, BUDGET, 600_000)
-      }
-      const press = (code: number, value: number) => s.machine.keyboard!.send([Input.EV_KEY, code, value])
-      let done = 13
-      for (const key of [1, 28, 28, 28, 28]) {
-        press(key, 1)
-        press(key, 0)
-        await wait(2, done++)
-      }
-      const screen = () => {
-        const { width, height } = s.machine.output!
-        const rgba = new Uint8Array(width * height * 4)
-        s.machine.output!.draw(rgba)
-        return new Uint32Array(rgba.buffer)
-      }
-      const changed = (a: Uint32Array, b: Uint32Array) => a.filter((p, i) => p !== b[i]).length / a.length
-      const before = screen()
-      await wait(1, done++)
-      const still = screen()
-      press(105, 1) // KEY_LEFT
-      await wait(1, done++)
-      press(105, 0)
-      const turned = screen()
-      expect(changed(before, still)).toBeLessThan(0.2)
-      expect(changed(still, turned)).toBeGreaterThan(0.5)
-      s.type('pkill -f bin/chocolate-doom\n')
-
-      s.type('poweroff\n')
-      expect(s.runToPowerOff(5_000_000_000)).toBe('poweroff')
-    } finally {
-      file.close()
-    }
-  })
 })

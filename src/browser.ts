@@ -3,16 +3,14 @@
  * terminal, the harts run on Web Workers. The page is web/index.html, as npm
  * run web serves it, or as npm run site makes it, for a plain web server.
  *
- * It boots a Linux distribution from images/<distribution>/ (the page's
- * data-distribution, debian by default), on 4 harts:
- *   - debian: as npm start does (OpenSBI, U-Boot, the disk)
- *   - others (alpine): as their boot.json says (linux/alpine/build.sh writes
- *     it): firmware, kernel (unpacked here if gzipped), initrd, disk, bootargs,
- *     memory
+ * It boots Debian from images/debian/, on 4 harts, as npm start does
+ * (OpenSBI, U-Boot, the disk): the files as linux/debian/build.sh makes them
+ * (npm run web), or as images/debian/boot.json says, if there is one (npm
+ * run site writes it: U-Boot gzipped, unpacked here; the disk in chunks).
  * The disk is read from the server as Linux needs it: an image file by Range
  * requests (HttpStorage), or, if it's a manifest (.json), in chunks
  * (ChunkedStorage). What Linux writes goes to a SnapshotStorage, which this
- * browser keeps (IndexedDbStore: per distribution, for that image), so the
+ * browser keeps (IndexedDbStore: for that image), so the
  * disk is as it was left the next time; one page at a time, and a link in
  * the status bar starts over. With data-network on the page (npm run web), the
  * network card reaches the server's user-mode NAT over a WebSocket; with
@@ -24,20 +22,19 @@
  * reloads once through it.
  *
  * Query parameters:
- *   distribution=<name>  boot that one instead
  *   relay=<ws url>       the network through this relay (npm run relay:
  *                        ws://localhost:8081)
  *   image=<url>          boot this bare-metal program instead (no disk,
  *                        network), e.g. examples/build/hello.bin
  *   harts=<n>            default 4
  *   persist=0            don't keep the disk's changes (a throwaway session)
- *   memory=<MiB>         default 1024 for Debian, boot.json's, 64 for an image
+ *   memory=<MiB>         default 1024, 64 for an image
  *   display=<w>x<h>      the screen's size, fixed (by default it's the
  *                        page's room for it, and follows it: the guest
  *                        is asked for the new size, see show()); display=0:
  *                        no screen, the terminal only (as for an image,
- *                        unless it says display). The distributions' desktops
- *                        run on it. With it come a keyboard, which has the
+ *                        unless it says display). Debian's desktop runs
+ *                        on it. With it come a keyboard, which has the
  *                        keys while the screen has the focus (click it), and
  *                        a mouse. The page shows the screen or the terminal
  *                        (the buttons in the status bar), the screen fitted
@@ -62,7 +59,7 @@ import { Input, TABLET_MAX } from './virtio-input.js'
 import { playOnPage } from './web-audio.js'
 import { WebSocketNetwork } from './websocket-network.js'
 
-/** How to boot a distribution (images/<distribution>/boot.json; files relative to it). */
+/** How to boot Debian (images/debian/boot.json, if there; files relative to it). */
 interface BootConfig {
   firmware: string
   /** The next stage, after the firmware: a kernel, or a bootloader (U-Boot). */
@@ -74,7 +71,7 @@ interface BootConfig {
   memory?: number
 }
 
-/** Debian's (its images/debian/ has no boot.json). */
+/** Debian's files as built (without a boot.json: npm run web). */
 const DEBIAN: BootConfig = { firmware: 'fw_dynamic.bin', kernel: 'u-boot.bin', disk: 'pristine.raw', memory: 1024 }
 /** Where U-Boot (or a kernel) goes in RAM, as npm start puts it. */
 const KERNEL_OFFSET = 0x200000
@@ -84,7 +81,6 @@ const SLICE = 200_000
 const params = new URLSearchParams(location.search)
 const page = document.body.dataset
 const image = params.get('image')
-const distribution = params.get('distribution') ?? page.distribution ?? 'debian'
 const harts = Number(params.get('harts') ?? 4)
 const relay = params.get('relay')
 const persist = params.get('persist') !== '0'
@@ -145,9 +141,10 @@ try {
     machine = new Machine({ ramSize: Number(params.get('memory') ?? 64) << 20, harts, output, display, sound: !!display })
     machine.boot(await fetchBytes(image))
   } else {
-    log(`loading ${distribution}…`)
-    const dir = new URL(`images/${distribution}/`, location.href)
-    const config = distribution === 'debian' ? DEBIAN : ((await (await fetch(new URL('boot.json', dir))).json()) as BootConfig)
+    log('loading Debian…')
+    const dir = new URL('images/debian/', location.href)
+    const boot = await fetch(new URL('boot.json', dir))
+    const config = boot.ok ? ((await boot.json()) as BootConfig) : DEBIAN
     const file = (name: string) => new URL(name, dir)
     const [firmware, kernel, initrd, disk] = await Promise.all([
       fetchBytes(file(config.firmware)),
@@ -334,7 +331,7 @@ function show(machine: Machine): void {
 
 /**
  * The disk's changes, over `base`: kept in this browser (unless the page says
- * not to, or another page of the same distribution keeps them already), or
+ * not to, or another page keeps them already), or
  * only in this page. Says which in the status bar.
  */
 async function keep(base: BlockStorage): Promise<SnapshotStorage> {
@@ -342,9 +339,9 @@ async function keep(base: BlockStorage): Promise<SnapshotStorage> {
   const throwaway = (why: string) => (show(`disk: changes not kept (${why})`), new SnapshotStorage(base))
   if (!persist) return throwaway('persist=0')
   if (!base.id || typeof indexedDB === 'undefined') return throwaway("can't tell this image from others")
-  if (!(await lock(`risc-emulator-disk-${distribution}`))) return throwaway("it's open in another page")
+  if (!(await lock('risc-emulator-disk-debian'))) return throwaway("it's open in another page")
 
-  const store = await IndexedDbStore.open(distribution, base.id)
+  const store = await IndexedDbStore.open('debian', base.id)
   const storage = new SnapshotStorage(base, store)
   storage.onsaveerror = error => show(`disk: changes not kept (${error})`)
   const reset = Object.assign(document.createElement('a'), { href: '#', textContent: 'start over' })

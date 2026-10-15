@@ -1,8 +1,7 @@
 /**
  * `npm run web`: the emulator in a web browser. Serves the page (web/) and
  * what it loads, then open http://localhost:8080/ (Debian, as npm start sets
- * it up; it must have been, once), /?distribution=alpine (npm run
- * alpine:build), or e.g. /?image=examples/build/hello.bin.
+ * it up; it must have been, once), or e.g. /?image=examples/build/hello.bin.
  *
  *   node scripts/web.ts [--port <port>]     (0: any free one)
  *
@@ -34,7 +33,6 @@ const SERVED: [string, string][] = [
   ['/dist/', 'dist/'],
   ['/build/hart.wasm', 'build/hart.wasm'],
   ['/images/debian/', 'images/debian/'],
-  ['/images/alpine/', 'images/alpine/'],
   ['/examples/build/', 'examples/build/'],
   ['/xterm/', 'node_modules/@xterm/xterm/'],
   ['/xterm-fit/', 'node_modules/@xterm/addon-fit/'],

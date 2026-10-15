@@ -62,6 +62,10 @@ MASKED=(
   e2scrub_reap.service        # cleans up after ext4 checks of LVM snapshots
   systemd-binfmt.service      # registers handlers for foreign executable formats
   systemd-timesyncd.service   # sets the clock by NTP: the emulator's clock is the host's
+  # A login on the serial port (the kernel's console) as well as hvc0's: the
+  # emulator's terminal shows both, their prompts mixed up; typing goes to
+  # hvc0. (The serial port keeps the kernel's messages.)
+  serial-getty@ttyS0.service
 )
 
 die() { echo "error: $*" >&2; exit 1; }

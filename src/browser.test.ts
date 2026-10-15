@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { chromium } from 'playwright'
+import { chromium, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { fit } from './fit.js'
 
@@ -52,11 +52,11 @@ describe.skipIf(!existsSync(chromium.executablePath()))('in a browser (npm run w
 /**
  * npm run site's site/ (made into build/test-site/), from a plain web server,
  * as GitHub Pages serves it: no cross-origin isolation headers (the page's
- * service worker adds them), no Range requests, no network but through a
- * relay on this machine (npm run relay). Needs Alpine's images (npm run
- * alpine:build).
+ * service worker adds them), no Range requests (the disk in chunks), no
+ * network but through a relay on this machine (npm run relay). Needs
+ * Debian's images (npm run debian:build).
  */
-describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root, 'images/alpine/boot.json')))(
+describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root, 'images/debian/pristine.raw')))(
   'the static site (npm run site), in a browser (Chromium)',
   () => {
     let server: Server
@@ -85,28 +85,42 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
       })
       await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
       url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`
-    }, 300_000)
+    }, 600_000)
     afterAll(() => {
       server?.close()
       relay?.kill()
     })
 
-    it('boots Alpine to its shell and its desktop, which follows the size of the page, on 4 harts, isolated by the service worker, with a network through the relay', { timeout: 240_000 }, async () => {
+    /** What the page's machine printed; waiting for `text` in it (after `from`). */
+    const session = (page: Page) => {
+      const output = () => page.evaluate(() => (window as unknown as { emulatorOutput?: string }).emulatorOutput ?? '').catch(() => '')
+      const until = async (text: string, from = 0) => {
+        const deadline = Date.now() + 400_000
+        while (!(await output()).includes(text, from) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 200))
+        expect((await output()).slice(from)).toContain(text)
+      }
+      // root, on the console (hvc0: the serial port has none, its prompt
+      // would be mixed up with this one); the keys go to the terminal once
+      // it's shown.
+      const login = async () => {
+        await until('debian login: ')
+        if (await page.isVisible('#show-terminal')) await page.click('#show-terminal')
+        const from = (await output()).length
+        await page.keyboard.type('root\n')
+        await until('root@debian:~# ', from)
+      }
+      return { output, until, login }
+    }
+
+    it('boots Debian, from the disk in chunks, to its console and its desktop, which follows the size of the page, on 4 harts, isolated by the service worker, with a network through the relay', { timeout: 900_000 }, async () => {
       const browser = await chromium.launch()
       try {
         const page = await browser.newPage()
         await page.goto(`${url}?relay=${relayUrl}`)
-        const output = () => page.evaluate(() => (window as unknown as { emulatorOutput?: string }).emulatorOutput ?? '').catch(() => '')
-        const until = async (text: string) => {
-          const deadline = Date.now() + 90_000
-          while (!(await output()).includes(text) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 200))
-        }
-        await until('alpine:~# ')
-        expect(await output()).toContain('Welcome to Alpine Linux, on risc-emulator')
-        expect(await output()).toContain('alpine:~# ')
+        const { output, until, login } = session(page)
+        await until('debian login: ')
         expect(await page.evaluate(() => crossOriginIsolated)).toBe(true)
         expect(await page.evaluate(() => document.getElementById('status')!.textContent)).toBe('running on 4 harts')
-        // The address from the relay's NAT, by DHCP.
         expect(await page.evaluate(() => document.getElementById('network')!.textContent)).toBe(`network: through ${relayUrl}`)
 
         // The page shows the screen first; the status bar's buttons switch.
@@ -117,45 +131,52 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
             pressed: document.getElementById('show-screen')!.getAttribute('aria-pressed'),
           }))
         expect(await shown()).toEqual({ screen: true, terminal: false, pressed: 'true' })
-        await page.click('#show-terminal')
+        await login()
         expect(await shown()).toEqual({ screen: false, terminal: true, pressed: 'false' })
+        // The address from the relay's NAT, by DHCP.
+        const from = (await output()).length
+        await page.keyboard.type('ip -4 addr show eth0 | grep -o "inet [0-9./]*"\n')
+        await until('inet 10.0.2.15/24', from)
         await page.click('#show-screen')
         expect(await shown()).toEqual({ screen: true, terminal: false, pressed: 'true' })
 
         // The mouse lands where it's clicked, though the screen is scaled to the
-        // page: holding its button down on the desktop (3/4 of the way across
-        // and down), Fluxbox's menu is right there, in the canvas (its title at
-        // the pointer, its items below, on #eeeeee: ~/.fluxbox/styles/emulator).
+        // page: a right-click on the desktop (2/5 of the way across, 1/4 down),
+        // and Xfce's menu is right there, in the canvas (white, to the click's
+        // lower right); Escape closes it.
         // (The screen's size: the page's room for it, once X is on the GPU.)
         const canvas = () => page.evaluate(() => [document.querySelector<HTMLCanvasElement>('#screen')!.width, document.querySelector<HTMLCanvasElement>('#screen')!.height])
         const where = async () => {
           const box = (await page.locator('#screen').boundingBox())!
           const [width, height] = await canvas()
           const area = fit(width!, height!, box.width, box.height)
-          return { x: box.x + area.x + 0.75 * area.width, y: box.y + area.y + 0.75 * area.height }
+          return { x: box.x + area.x + 0.4 * area.width, y: box.y + area.y + 0.25 * area.height }
         }
         const menu = () =>
           page.evaluate(() => {
             const screen = document.querySelector<HTMLCanvasElement>('#screen')!
-            const [x, y] = [Math.round(0.75 * screen.width), Math.round(0.75 * screen.height)]
-            const pixels = screen.getContext('2d')!.getImageData(x - 20, y + 30, 40, 60).data
-            let items = 0
-            for (let i = 0; i < pixels.length; i += 4) if (pixels[i] === 0xee && pixels[i + 1] === 0xee && pixels[i + 2] === 0xee) items++
-            return items
+            const [x, y] = [Math.round(0.4 * screen.width), Math.round(0.25 * screen.height)]
+            // (Most of it: an item is highlighted, in blue.)
+            const pixels = screen.getContext('2d')!.getImageData(x + 10, y + 10, 180, 110).data
+            let white = 0
+            for (let i = 0; i < pixels.length; i += 4) if (pixels[i]! > 0xe0 && pixels[i + 1]! > 0xe0 && pixels[i + 2]! > 0xe0) white++
+            return white > 180 * 110 * 0.5
           })
         let opened = false
-        for (let i = 0, deadline = Date.now() + 90_000; !opened && Date.now() < deadline; i++) {
-          // (Until X and Fluxbox are up: again and again, a pixel apart, as Linux
+        for (let i = 0, deadline = Date.now() + 400_000; !opened && Date.now() < deadline; i++) {
+          // (Until X and Xfce are up: again and again, a pixel apart, as Linux
           // passes on a position only when it changes, and X only listens
           // once it's up.)
           const at = await where()
           await page.mouse.move(at.x + (i % 2), at.y + (i % 2))
-          await page.mouse.down()
-          await page.waitForTimeout(1500)
-          opened = (await menu()) > 40 * 60 * 0.5
-          await page.mouse.up()
+          await page.mouse.click(at.x + (i % 2), at.y + (i % 2), { button: 'right' })
+          await page.waitForTimeout(2000)
+          opened = await menu()
         }
         expect(opened).toBe(true)
+        await page.keyboard.press('Escape')
+        for (const deadline = Date.now() + 60_000; (await menu()) && Date.now() < deadline; ) await page.waitForTimeout(500)
+        expect(await menu()).toBe(false)
 
         // The screen follows the page's room for it: a smaller window, a smaller
         // screen (the width a multiple of 8, as Linux makes modes).
@@ -167,52 +188,43 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
           })
         await page.setViewportSize({ width: 900, height: 600 })
         let fitted = false
-        for (const deadline = Date.now() + 60_000; !fitted && Date.now() < deadline; await page.waitForTimeout(500)) {
+        for (const deadline = Date.now() + 120_000; !fitted && Date.now() < deadline; await page.waitForTimeout(500)) {
           const { screen, room } = await sizes()
           fitted = screen[0] === room[0] && screen[1] === room[1]
         }
         expect(await sizes()).toMatchObject({ screen: (await sizes()).room })
-
-        // (The keys go to the terminal once it's shown.)
-        await page.click('#show-terminal')
-        await page.keyboard.type('ip -4 addr show eth0 | grep -o "inet [0-9./]*"\n')
-        await until('inet 10.0.2.15/24')
-        expect(await output()).toContain('inet 10.0.2.15/24')
       } finally {
         await browser.close()
       }
     })
 
-    it('keeps the disk across reloads (in IndexedDB), until asked to start over', { timeout: 180_000 }, async () => {
+    it('keeps the disk across reloads (in IndexedDB), until asked to start over', { timeout: 900_000 }, async () => {
       const browser = await chromium.launch()
       try {
         const page = await browser.newPage()
         page.on('dialog', dialog => void dialog.accept()) // "Start over …?"
-        const output = () => page.evaluate(() => (window as unknown as { emulatorOutput?: string }).emulatorOutput ?? '').catch(() => '')
-        const until = async (text: string) => {
-          const deadline = Date.now() + 90_000
-          while (!(await output()).includes(text) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 200))
-          expect(await output()).toContain(text)
+        const { output, until, login } = session(page)
+        const type = async (text: string, expected: string) => {
+          const from = (await output()).length
+          await page.keyboard.type(text)
+          await until(expected, from)
         }
         const disk = () => page.evaluate(() => document.getElementById('disk')!.textContent)
         // (No screen: no desktop to start, the terminal only. Reloads keep it so.)
         await page.goto(`${url}?display=0`)
-        await until('alpine:~# ')
+        await login()
         expect(await disk()).toBe('disk: changes kept in this browser · start over')
-        await page.keyboard.type('echo "kept-$((6*7))" > /root/note.txt; sync; echo synced-$((0+1))\n')
-        await until('synced-1\r\n')
+        await type('echo "kept-$((6*7))" > /root/note.txt; sync; echo synced-$((0+1))\n', 'synced-1\r\n')
         await new Promise(resolve => setTimeout(resolve, 3000)) // (saved within 2 s)
 
         await page.reload()
-        await until('alpine:~# ')
-        await page.keyboard.type('cat /root/note.txt\n')
-        await until('kept-42\r\n')
+        await login()
+        await type('cat /root/note.txt\n', 'kept-42\r\n')
 
         // Start over: confirmed, it reloads.
         await Promise.all([page.waitForEvent('framenavigated'), page.click('#disk a')])
-        await until('alpine:~# ')
-        await page.keyboard.type('ls /root/note.txt; echo listed-$((0+1))\n')
-        await until('listed-1\r\n')
+        await login()
+        await type('ls /root/note.txt; echo listed-$((0+1))\n', 'listed-1\r\n')
         expect(await output()).toContain('No such file')
       } finally {
         await browser.close()

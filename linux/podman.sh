@@ -4,7 +4,7 @@
 # linux/<distribution>/Containerfile, so the build doesn't depend on the
 # host's distribution or tools:
 #
-#   linux/podman.sh [<distribution>] [build.sh's arguments]   (debian, the default; alpine)
+#   linux/podman.sh [<distribution>] [build.sh's arguments]   (debian, the default and the one there is)
 #
 #   - the project directory is bind-mounted at /work: linux/<distribution>/
 #     goes in, images/<distribution>/ comes out
@@ -15,7 +15,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 case "${1:-}" in
-  debian | alpine) DISTRIBUTION=$1; shift ;;
+  debian) DISTRIBUTION=$1; shift ;;
   *) DISTRIBUTION=debian ;;
 esac
 IMAGE=localhost/risc-emulator-$DISTRIBUTION

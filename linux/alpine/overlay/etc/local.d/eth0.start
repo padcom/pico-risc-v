@@ -1,6 +1,0 @@
-#!/bin/sh
-# The network, if the machine has a card (npm start, npm run web; a page on
-# its own, on GitHub Pages say, has no network).
-if [ -e /sys/class/net/eth0 ]; then
-  ifup eth0
-fi

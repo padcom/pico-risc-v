@@ -3,7 +3,7 @@
 # Prints a fingerprint (SHA-256) of everything a distribution's image is
 # built from (linux/<distribution>/):
 #
-#   linux/inputs-hash.sh [<distribution>]   (debian, the default; alpine)
+#   linux/inputs-hash.sh [<distribution>]   (debian, the default and the one there is)
 #
 # linux/<distribution>/build.sh stores it next to the image; `npm start`
 # rebuilds the image when it no longer matches. Works on the host (macOS:
