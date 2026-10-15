@@ -69,11 +69,10 @@ async function playsSound(s: LinuxSession, heard: number[], done: number): Promi
   expect(wave.length).toBe(2 * WAVE_FRAMES)
   expect(wave.every((x, i) => x === ((i >> 2) & 1 ? -0.5 : 0.5))).toBe(true)
 
+  // Freedoom, as its menu entry starts it: freedoom1, the launcher (a bash
+  // script) that finds the engine.
   heard.length = 0
-  s.type(
-    'cd /tmp; DISPLAY=:0 XAUTHORITY=/root/.Xauthority PATH=$PATH:/usr/games ' +
-      'chocolate-doom -iwad /usr/share/games/doom/freedoom1.wad >doom.log 2>&1 &\n',
-  )
+  s.type('cd /tmp; DISPLAY=:0 XAUTHORITY=/root/.Xauthority PATH=$PATH:/usr/games freedoom1 >doom.log 2>&1 &\n')
   let checked = 0
   let peak = 0
   await until(s, "Freedoom's sound", () => {
