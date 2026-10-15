@@ -686,7 +686,7 @@ describe('virtio sound card', () => {
     expect(h.status(h.control([PCM_INFO, 1, 1, 32], [], 4 + 32))).toBe(0x8001) // no stream 1
   })
 
-  it("plays what it's sent at the sound's own pace: each message goes back once it has played", () => {
+  it("plays what it's sent at the sound's own pace: each message goes back 50 ms before it has played, the last once it has", () => {
     const h = soundHarness()
     const [fields, bytes] = params(2, 5, 6) // stereo, S16, 44.1 kHz
     expect(h.status(h.control([...fields], [...bytes]))).toBe(OK)
@@ -699,25 +699,25 @@ describe('virtio sound card', () => {
     expect(h.status(h.control([START, 0]))).toBe(OK)
     expect(h.played.map(({ samples, rate }) => [samples.length, rate])).toEqual([[882, 44100], [882, 44100]])
     expect(h.played[0]!.samples.slice(0, 2)).toEqual([-1, 0.5])
-    expect([h.used(2), h.sound.dueIn()]).toEqual([0, 10_000])
-    h.clock.time = 9_999
+    // The first (playing till 10 ms) goes back now; the second, the last,
+    // once it has played (at 20 ms)...
+    expect([h.used(2), h.sound.dueIn()]).toEqual([0, 0])
     h.sound.tick()
-    expect(h.used(2)).toBe(0)
-    h.clock.time = 10_000
-    h.sound.tick()
-    expect([h.used(2), h.irq(), h.view.getUint32(first, true)]).toEqual([1, true, OK])
-    // The last one, played (at 20 ms), is held until the next comes: a bit
-    // late (at 25 ms), not too late (30 ms more, at most). That one plays
-    // from then.
-    expect(h.sound.dueIn()).toBe(40_000)
-    h.clock.time = 25_000
-    h.sound.tick()
-    expect(h.used(2)).toBe(1)
+    expect([h.used(2), h.irq(), h.view.getUint32(first, true), h.sound.dueIn()]).toEqual([1, true, OK, 20_000])
+    // ...unless another comes first (at 15 ms: it plays from 20 ms, to 30 ms).
+    h.clock.time = 15_000
     h.play(period([0, 0]))
-    expect([h.used(2), h.sound.dueIn()]).toEqual([2, 40_000])
-    h.clock.time = 65_000
+    expect([h.used(2), h.sound.dueIn()]).toEqual([2, 15_000])
+    h.clock.time = 29_999
+    h.sound.tick()
+    expect(h.used(2)).toBe(2)
+    h.clock.time = 30_000
     h.sound.tick()
     expect(h.used(2)).toBe(3)
+    // One that comes after all have played plays from then (40 ms, to 50 ms).
+    h.clock.time = 40_000
+    h.play(period([0, 0]))
+    expect(h.sound.dueIn()).toBe(10_000)
   })
 
   it('takes 8-bit and mono sound (the same on both sides), not what it cannot play; RELEASE hands everything back', () => {

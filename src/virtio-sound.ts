@@ -25,10 +25,10 @@ const RATES: Record<number, number> = { 1: 8000, 2: 11025, 3: 16000, 4: 22050, 5
 const PCM_INFO = 32
 const CHMAP_INFO = 24
 /**
- * How long a message is held after it has played (µs), if it's the last:
- * until the next one comes, at most this long (see VirtioSound).
+ * How long before it has played a message goes back (µs), unless it's the
+ * last: how far ahead the guest keeps the sound (see VirtioSound).
  */
-const HOLD = 30_000
+const LEAD = 50_000
 /** Channel positions (VIRTIO_SND_CHMAP_*): front left, front right. */
 const FL = 3
 const FR = 4
@@ -48,17 +48,20 @@ interface Playing {
  * 48 kHz. What the guest plays goes to `output`, as stereo float samples
  * (-1 to 1, left and right in turn) at its rate.
  *
- * The guest sends the sound in messages (a period each, as ALSA has them);
- * each is handed back once it has played (on the machine's clock: `now`,
- * in µs), which is what keeps the guest's programs going at the sound's own
- * pace. tick() hands back those that have; dueIn() says when the next will
- * have. Except the last, while no other has come yet, for a while (HOLD): a
- * program keeps a short buffer (SDL's, two periods of 10 ms or so), and the
- * next message comes a little late now and then, as the host and the
- * emulated machine take their time; handed back on time, the guest would
- * find its buffer run dry (an underrun: a click, its sound restarted).
- * Held, it sends the next a bit late (the host may have a gap there to
- * play over, see Speaker).
+ * The guest sends the sound in messages (a period each, as ALSA has them),
+ * which play one after another on the machine's clock (`now`, in µs); each
+ * is handed back as it plays, which is what keeps the guest's programs going
+ * at the sound's own pace. tick() hands back those that are due; dueIn()
+ * says when the next is. A message goes back a while (LEAD) before it has
+ * played: a program keeps a short buffer (SDL's, two periods of 10 ms or
+ * so), and the next message comes a little late now and then, as the host
+ * and the emulated machine take their time (the page's main thread, which
+ * serves the devices, most of all); were they handed back once played, its
+ * buffer would run dry then, or the device would, and the sound would have
+ * gaps (and less of it come than plays: the host's own buffer would run
+ * dry). Ahead by LEAD, it's late only when later than that. The last one
+ * goes back once it has played, so that the guest knows when all of it has
+ * (aplay ends then, say).
  *
  * No jacks, no recording, no controls (volume: the host's).
  */
@@ -88,13 +91,13 @@ export class VirtioSound extends VirtioMmioDevice {
     this.playing = []
   }
 
-  /** µs until a message is done playing (Infinity if none is going). */
+  /** µs until a message is due to go back (Infinity if none is going). */
   dueIn(): number {
     const next = this.running && this.playing.length ? this.handBackAt(0) : Infinity
     return next === Infinity ? Infinity : Math.max(0, next - this.now())
   }
 
-  /** Hand back the messages that are done playing. */
+  /** Hand back the messages that are due. */
   tick(): void {
     if (!this.running || !this.playing.length || this.handBackAt(0) > this.now()) return
     const now = this.now()
@@ -104,10 +107,10 @@ export class VirtioSound extends VirtioMmioDevice {
     })
   }
 
-  /** When message `i` goes back: once played; the last, once another comes, or HOLD after that. */
+  /** When message `i` goes back: LEAD before it has played; the last, once it has. */
   private handBackAt(i: number): number {
     const { done } = this.playing[i]!
-    return i === this.playing.length - 1 ? done + HOLD : done
+    return i === this.playing.length - 1 ? done : done - LEAD
   }
 
   protected deviceFeatures(): number {
