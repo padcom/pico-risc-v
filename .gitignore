@@ -7,6 +7,6 @@ build/
 packages/*/core/target/
 packages/*/dist/
 packages/*/build/
-packages/*/*.tsbuildinfo
+*.tsbuildinfo
 .claude/scheduled_tasks.lock
 packages/*/examples/**/*.elf
