@@ -11,6 +11,8 @@ import { VirtioBlock } from './virtio-blk.js'
 import { VirtioConsole } from './virtio-console.js'
 import { Input, TABLET_MAX, VirtioInput } from './virtio-input.js'
 import { VirtioGpu } from './virtio-gpu.js'
+import { VirtioSound } from './virtio-sound.js'
+import { Resampler } from './resample.js'
 import { LINUX_KEYS } from './keymap.js'
 
 describe('PLIC', () => {
@@ -593,6 +595,164 @@ describe('virtio GPU', () => {
     expect([h.gpu.read32(0x100), h.irq()]).toEqual([0, false])
     h.gpu.resize(1285, 720) // (the same, rounded)
     expect(h.irq()).toBe(false)
+  })
+})
+
+describe('virtio sound card', () => {
+  /**
+   * A driver for its control queue (0) and its playback queue (2), 64
+   * entries each; the clock is `h.time` (µs).
+   */
+  function soundHarness() {
+    const ram = new Uint8Array(1 << 20)
+    const view = new DataView(ram.buffer)
+    let irq = false
+    const clock = { time: 0 }
+    const memory = (addr: number, length: number) => ram.subarray(addr, addr + length)
+    const sound = new VirtioSound(memory, high => (irq = high), () => clock.time)
+    const played: { samples: number[]; rate: number }[] = []
+    sound.output = (samples, rate) => played.push({ samples: [...samples], rate })
+    const queue = (index: number) => ({ desc: 0x1000 + 0x4000 * index, avail: 0x2000 + 0x4000 * index, used: 0x3000 + 0x4000 * index })
+    sound.write32(0x070, 1 | 2)
+    sound.write32(0x024, 1)
+    sound.write32(0x020, 1) // VIRTIO_F_VERSION_1
+    sound.write32(0x070, 1 | 2 | 8)
+    for (const index of [0, 2]) {
+      sound.write32(0x030, index)
+      sound.write32(0x038, 64)
+      sound.write32(0x080, queue(index).desc)
+      sound.write32(0x090, queue(index).avail)
+      sound.write32(0x0a0, queue(index).used)
+      sound.write32(0x044, 1)
+    }
+    sound.write32(0x070, 1 | 2 | 8 | 4)
+    const avail = [0, 0, 0]
+    let at = 0x20000
+    /** Offer a chain (readable `request`, then `writable` bytes) on `index`; returns where the writable part is. */
+    const offer = (index: number, request: Uint8Array, writable: number) => {
+      const q = queue(index)
+      const slot = 2 * (avail[index]! % 32)
+      const [readAt, writeAt] = [at, at + request.length]
+      at += request.length + writable
+      ram.set(request, readAt)
+      const descriptor = (i: number, addr: number, length: number, flags: number, next: number) => {
+        view.setUint32(q.desc + 16 * i, addr, true)
+        view.setUint32(q.desc + 16 * i + 8, length, true)
+        view.setUint16(q.desc + 16 * i + 12, flags, true)
+        view.setUint16(q.desc + 16 * i + 14, next, true)
+      }
+      descriptor(slot, readAt, request.length, 1, slot + 1) // NEXT
+      descriptor(slot + 1, writeAt, writable, 2, 0) // WRITE
+      view.setUint16(q.avail + 4 + 2 * (avail[index]! % 64), slot, true)
+      view.setUint16(q.avail + 2, ++avail[index]!, true)
+      sound.write32(0x050, index)
+      return writeAt
+    }
+    const u32s = (...values: number[]) => new Uint8Array(new Uint32Array(values).buffer)
+    /** A control request (32-bit fields; then bytes); returns its response. */
+    const control = (fields: number[], bytes: number[] = [], response = 4) => {
+      const request = new Uint8Array([...u32s(...fields), ...bytes])
+      return new DataView(ram.buffer, offer(0, request, response), response)
+    }
+    const status = (response: DataView) => response.getUint32(0, true)
+    /** Play `samples` (16-bit, as many channels as set): a message; returns where its status goes. */
+    const play = (samples: number[]) => offer(2, new Uint8Array([...u32s(0), ...new Uint8Array(new Int16Array(samples).buffer)]), 8)
+    const used = (index: number) => view.getUint16(queue(index).used + 2, true)
+    return { sound, view, clock, played, control, status, play, used, irq: () => irq }
+  }
+  const OK = 0x8000
+  // Requests
+  const PCM_INFO = 0x0100
+  const SET_PARAMS = 0x0101
+  const PREPARE = 0x0102
+  const RELEASE = 0x0103
+  const START = 0x0104
+  /** SET_PARAMS for stream 0: buffer and period bytes, no features; channels, format, rate. */
+  const params = (channels: number, format: number, rate: number) => [[SET_PARAMS, 0, 8192, 2048, 0], [channels, format, rate, 0]] as const
+
+  it('tells the driver its one output stream, stereo, and what it plays', () => {
+    const h = soundHarness()
+    expect(h.sound.read32(0x008)).toBe(25) // device ID: sound
+    expect([0x100, 0x104, 0x108].map(at => h.sound.read32(at))).toEqual([0, 1, 1]) // jacks, streams, chmaps
+    const info = h.control([PCM_INFO, 0, 1, 32], [], 4 + 32)
+    expect(h.status(info)).toBe(OK)
+    const formats = info.getBigUint64(4 + 8, true)
+    const rates = info.getBigUint64(4 + 16, true)
+    expect([formats & (1n << 5n), rates & (1n << 6n), rates & (1n << 7n)]).toEqual([1n << 5n, 1n << 6n, 1n << 7n]) // S16; 44.1, 48 kHz
+    expect([info.getUint8(4 + 24), info.getUint8(4 + 25), info.getUint8(4 + 26)]).toEqual([0, 1, 2]) // output, 1 to 2 channels
+    const chmap = h.control([0x0200, 0, 1, 24], [], 4 + 24) // CHMAP_INFO
+    expect([h.status(chmap), chmap.getUint8(4 + 5), chmap.getUint8(4 + 6), chmap.getUint8(4 + 7)]).toEqual([OK, 2, 3, 4]) // 2: FL, FR
+    expect(h.status(h.control([0x0001, 0, 1, 24], [], 4 + 24))).toBe(0x8001) // JACK_INFO: there are none
+    expect(h.status(h.control([PCM_INFO, 1, 1, 32], [], 4 + 32))).toBe(0x8001) // no stream 1
+  })
+
+  it("plays what it's sent at the sound's own pace: each message goes back once it has played", () => {
+    const h = soundHarness()
+    const [fields, bytes] = params(2, 5, 6) // stereo, S16, 44.1 kHz
+    expect(h.status(h.control([...fields], [...bytes]))).toBe(OK)
+    expect(h.status(h.control([PREPARE, 0]))).toBe(OK)
+    // Two periods of 441 frames (10 ms each), the first starting -32768, 16384.
+    const period = (first: number[]) => [...first, ...new Array(2 * 440).fill(0)]
+    const first = h.play(period([-32768, 16384]))
+    h.play(period([0, 0]))
+    expect(h.played).toEqual([]) // (not started)
+    expect(h.status(h.control([START, 0]))).toBe(OK)
+    expect(h.played.map(({ samples, rate }) => [samples.length, rate])).toEqual([[882, 44100], [882, 44100]])
+    expect(h.played[0]!.samples.slice(0, 2)).toEqual([-1, 0.5])
+    expect([h.used(2), h.sound.dueIn()]).toEqual([0, 10_000])
+    h.clock.time = 9_999
+    h.sound.tick()
+    expect(h.used(2)).toBe(0)
+    h.clock.time = 10_000
+    h.sound.tick()
+    expect([h.used(2), h.irq(), h.view.getUint32(first, true)]).toEqual([1, true, OK])
+    // The last one, played (at 20 ms), is held until the next comes: a bit
+    // late (at 25 ms), not too late (30 ms more, at most). That one plays
+    // from then.
+    expect(h.sound.dueIn()).toBe(40_000)
+    h.clock.time = 25_000
+    h.sound.tick()
+    expect(h.used(2)).toBe(1)
+    h.play(period([0, 0]))
+    expect([h.used(2), h.sound.dueIn()]).toEqual([2, 40_000])
+    h.clock.time = 65_000
+    h.sound.tick()
+    expect(h.used(2)).toBe(3)
+  })
+
+  it('takes 8-bit and mono sound (the same on both sides), not what it cannot play; RELEASE hands everything back', () => {
+    const h = soundHarness()
+    const [fields] = params(2, 5, 6)
+    expect(h.status(h.control([...fields], [6, 5, 6, 0]))).toBe(0x8002) // 6 channels
+    expect(h.status(h.control([...fields], [2, 1, 6, 0]))).toBe(0x8002) // mu-law
+    expect(h.status(h.control([...fields], [1, 4, 1, 0]))).toBe(OK) // mono, U8, 8 kHz
+    expect(h.status(h.control([PREPARE, 0]))).toBe(OK)
+    expect(h.status(h.control([START, 0]))).toBe(OK)
+    // (U8: 0, 128 (silence), 192, as 16-bit samples: 2 bytes each, read as 4 U8 samples.)
+    h.play([0x8000, 0xc080 - 0x10000])
+    expect(h.played[0]).toEqual({ samples: [-1, -1, 0, 0, 0, 0, 0.5, 0.5], rate: 8000 })
+    expect(h.used(2)).toBe(0)
+    expect(h.status(h.control([RELEASE, 0]))).toBe(OK)
+    expect(h.used(2)).toBe(1)
+  })
+})
+
+describe('resampler', () => {
+  it('takes sound to another rate, carrying on from chunk to chunk', () => {
+    const r = new Resampler(48_000)
+    // A second of 44.1 kHz sound, in 10 ms chunks: a second at 48 kHz.
+    let frames = 0
+    for (let i = 0; i < 100; i++) frames += r.push(new Float32Array(2 * 441).fill(0.25), 44_100).length / 2
+    expect(Math.abs(frames - 48_000)).toBeLessThanOrEqual(1)
+    // A ramp, upsampled 2×: in between, the values in between. (A frame
+    // behind: from the previous chunk's last, silence at first; the rest of
+    // this one comes with the next.)
+    const twice = new Resampler(16_000)
+    expect([...twice.push(Float32Array.of(0, 0, 1, -1, 2, -2), 8_000)]).toEqual([0, 0, 0, 0, 0, 0, 0.5, -0.5, 1, -1, 1.5, -1.5])
+    expect([...twice.push(Float32Array.of(3, -3), 8_000)]).toEqual([2, -2, 2.5, -2.5])
+    // At its own rate: as it is.
+    const same = Float32Array.of(0.5, -0.5)
+    expect(new Resampler(48_000).push(same, 48_000)).toBe(same)
   })
 })
 

@@ -66,7 +66,8 @@ mouse, and Debian starts its desktop (Xfce) on it, as in the page
 `@kmamal/sdl` package, which `npm install` installs where it can); the keys
 go to the guest by their place on the keyboard, so Debian's keyboard layout
 says what they type; resizing the window resizes the desktop (see the
-screen, below); closing the window quits the emulator.
+screen, below); closing the window quits the emulator. The machine has a
+sound card too, which plays on this machine's speakers (see sound, below).
 
 `--vnc 5900` shows the screen to VNC viewers on this machine too (or
 instead, without `--display`): open `vnc://localhost:5900` in macOS's Screen
@@ -246,6 +247,19 @@ set up once (`npm start` does it).
   `/dev/input/`): click the screen, and the keys go there, by their place on
   the keyboard (Linux's keyboard layout says what they type); the mouse is
   an absolute one, a tablet, so the guest's pointer is where yours is.
+- **Sound**: with the screen comes a sound card (virtio-snd: Linux's
+  `virtio_snd`, an ALSA card; `aplay`, `speaker-test` and `alsamixer` are
+  there to try it), played through Web Audio (`npm start -- --display`: SDL).
+  Browsers let a page make sound only once it's been clicked or typed in:
+  until then, what the guest plays isn't heard. The card hands each piece of
+  sound back to Linux once it has played, which is what keeps programs going
+  at the sound's pace.
+- **Freedoom**, a free Doom, is there to play, in both distributions:
+  `freedoom1` or `freedoom2` on the desktop (Xfce's menu: Games; twm's menu
+  on Alpine), on Chocolate Doom, in a small window (320×200: quick to draw),
+  with sound and music (Chocolate Doom's own OPL synthesizer). Keyboard only:
+  the mouse is a tablet, which Doom's turning doesn't work with. Its settings
+  are in `~/.local/share/chocolate-doom/`.
 
 The harts' threads share memory (`SharedArrayBuffer`), which browsers only
 allow on a cross-origin isolated page: the server sends the headers for
@@ -255,7 +269,7 @@ connect.
 ## Alpine Linux, and a static web site: `npm run site`
 
 Besides Debian there's [Alpine Linux](https://alpinelinux.org/), much
-smaller (a 140 MB disk) and quicker to boot (a shell in about 10 seconds),
+smaller (a 230 MB disk, a third of it Freedoom) and quicker to boot (a shell in about 10 seconds),
 mainly for the emulator as a static web site, where there's no server to
 read a big disk from or to give the guest a network.
 
@@ -272,6 +286,9 @@ There's no udev, so X is told where the keyboard, the mouse and the GPU
 are (`/etc/X11/xorg.conf.d`; the GPU's card when X starts), and its session
 looks for another screen size every 2 seconds (`~/.xinitrc`); Mesa's 3D
 drivers, which X's packages bring along (180 MB, with LLVM), are left out.
+Alpine has Freedoom, but not Chocolate Doom: the build makes it from its
+source, for riscv64, against Alpine's SDL libraries, with Zig's C compiler
+(a cross-compiler: the container can't run riscv64 programs).
 
 - In the page: `npm run web`, then <http://localhost:8080/?distribution=alpine>
   (with the network, as Debian).
@@ -282,7 +299,7 @@ drivers, which X's packages bring along (180 MB, with LLVM), are left out.
     --bootargs 'console=ttyS0 root=/dev/vda quiet' --net images/alpine/fw_dynamic.bin
   ```
 
-`npm run site` puts the whole of it in `site/`, about 70 MB, for any plain
+`npm run site` puts the whole of it in `site/`, about 105 MB, for any plain
 web server, GitHub Pages say: the page, the emulator, and Alpine, its disk in
 gzipped 1 MiB chunks (all-zero ones left out), which the page fetches only as
 Alpine reads them. What Alpine writes, the browser keeps, as with `npm run

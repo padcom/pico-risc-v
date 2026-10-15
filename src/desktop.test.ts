@@ -44,6 +44,47 @@ function lit(rgba: Uint8Array, top: number, bottom: number): number {
   return count
 }
 
+/** A square wave (16-bit stereo): 4 frames a cycle, ±0.5, 2^12 cycles. */
+const WAVE_FRAMES = 4 << 12
+
+/**
+ * The sound card (heard: what the host got): what aplay plays, a square wave
+ * at 22.05 kHz, made in the guest, the host gets as it is, at its pace (in
+ * the guest's time). And Freedoom, on Chocolate Doom, plays (its demos,
+ * with music): heard.
+ */
+async function playsSound(s: LinuxSession, heard: number[], done: number): Promise<void> {
+  s.type(
+    `printf '${'\\000\\100'.repeat(4)}${'\\000\\300'.repeat(4)}' >/tmp/wave; ` +
+      `for i in $(seq 12); do cat /tmp/wave /tmp/wave >/tmp/twice; mv /tmp/twice /tmp/wave; done; ` +
+      `time aplay -q -t raw -f S16_LE -c 2 -r 22050 /tmp/wave; echo "done-$((${done}+0))"\n`,
+  )
+  await s.waitForAsync(`done-${done}\r\n`, BUDGET, 600_000)
+  // (The guest's shell's time: bash's "0m0.770s", BusyBox's "0m 0.77s".)
+  const seconds = Number(/real\s+0m\s*([\d.]+)s/.exec(s.screen)?.[1])
+  expect(seconds).toBeGreaterThanOrEqual(WAVE_FRAMES / 22_050)
+  expect(seconds).toBeLessThan(WAVE_FRAMES / 22_050 + 0.5)
+  const start = heard.findIndex(x => x !== 0)
+  const wave = heard.slice(start, start + 2 * WAVE_FRAMES)
+  expect(wave.length).toBe(2 * WAVE_FRAMES)
+  expect(wave.every((x, i) => x === ((i >> 2) & 1 ? -0.5 : 0.5))).toBe(true)
+
+  heard.length = 0
+  s.type(
+    'cd /tmp; DISPLAY=:0 XAUTHORITY=/root/.Xauthority PATH=$PATH:/usr/games ' +
+      'chocolate-doom -iwad /usr/share/games/doom/freedoom1.wad >doom.log 2>&1 &\n',
+  )
+  let checked = 0
+  let peak = 0
+  await until(s, "Freedoom's sound", () => {
+    for (; checked < heard.length; checked++) peak = Math.max(peak, Math.abs(heard[checked]!))
+    return peak > 0.1
+  })
+  s.type(`pkill chocolate-doom; grep Precaching doom.log; echo "done-$((${done + 1}+0))"\n`)
+  await s.waitForAsync(`done-${done + 1}\r\n`, BUDGET, 600_000)
+  expect(s.screen).toContain('I_SDL_PrecacheSounds: Precaching all sound effects')
+}
+
 const DEBIAN = new URL('../images/debian/', import.meta.url)
 const DEBIAN_DISK = fileURLToPath(new URL('pristine.raw', DEBIAN))
 
@@ -54,8 +95,8 @@ const DEBIAN_DISK = fileURLToPath(new URL('pristine.raw', DEBIAN))
  */
 describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => existsSync(new URL(f, DEBIAN))))('Debian with a screen', () => {
   it(
-    'has the screen (efifb), the keyboard and the mouse, and starts Xfce on them (on the GPU); a VNC viewer sees it and uses it; it takes another size',
-    { timeout: 1_800_000 },
+    'has the screen (efifb), the keyboard and the mouse, and starts Xfce on them (on the GPU); a VNC viewer sees it and uses it; it takes another size; it plays sound, and Freedoom',
+    { timeout: 3_600_000 },
     async () => {
       const file = new FileStorage(DEBIAN_DISK, { readOnly: true })
       try {
@@ -70,8 +111,11 @@ describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => exi
             disk: new SnapshotStorage(file),
             instructionsPerMicrosecond: 100, // (see debian.test.ts)
             display: { width: WIDTH, height: HEIGHT },
+            sound: true,
           },
         )
+        const heard: number[] = []
+        s.machine.sound!.output = samples => heard.push(...samples)
         // The console's login (hvc0), the one typing goes to.
         await s.waitForAsync('debian hvc0\r\n\r\ndebian login: ', 60_000_000_000, 900_000)
         s.type('root\n')
@@ -168,6 +212,8 @@ describe.skipIf(!['fw_dynamic.bin', 'u-boot.bin', 'pristine.raw'].every(f => exi
         s.machine.setDisplaySize(1280, 720)
         await until(s, 'the new size', () => s.machine.output?.width === 1280 && s.machine.output.height === 720)
 
+        await playsSound(s, heard, 10)
+
         s.type('poweroff\n')
         expect(s.runToPowerOff(20_000_000_000)).toBe('poweroff')
       } finally {
@@ -185,7 +231,7 @@ const ALPINE = new URL('../images/alpine/', import.meta.url)
  * (tty1) by itself.
  */
 describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen', () => {
-  it('starts X with twm and an xterm on it (on the GPU), with the keyboard and the mouse (evdev); it takes another size', { timeout: 600_000 }, async () => {
+  it('starts X with twm and an xterm on it (on the GPU), with the keyboard and the mouse (evdev); it takes another size; it plays sound, and Freedoom', { timeout: 1_800_000 }, async () => {
     const config = JSON.parse(readFileSync(new URL('boot.json', ALPINE), 'utf8')) as { bootargs: string; memory: number }
     const file = new FileStorage(fileURLToPath(new URL('pristine.raw', ALPINE)), { readOnly: true })
     try {
@@ -205,8 +251,11 @@ describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen
           bootargs: config.bootargs,
           instructionsPerMicrosecond: 100,
           display: { width: WIDTH, height: HEIGHT },
+          sound: true,
         },
       )
+      const heard: number[] = []
+      s.machine.sound!.output = samples => heard.push(...samples)
       // The console (hvc0) logs in by itself.
       await s.waitForAsync(':~# ', 20_000_000_000, 600_000)
 
@@ -234,6 +283,8 @@ describe.skipIf(!existsSync(new URL('boot.json', ALPINE)))('Alpine with a screen
       expect(s.machine.output).not.toBe(s.machine.screen) // (X is on the GPU)
       s.machine.setDisplaySize(1280, 720)
       await until(s, 'the new size', () => s.machine.output?.width === 1280 && s.machine.output.height === 720)
+
+      await playsSound(s, heard, 10)
 
       s.type('poweroff\n')
       expect(s.runToPowerOff(5_000_000_000)).toBe('poweroff')

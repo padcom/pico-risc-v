@@ -27,6 +27,8 @@ Button3 = : title : f.lower
 menu "desktop" {
     "Alpine"    f.title
     "Terminal"  f.exec "xterm &"
+    "Freedoom 1" f.exec "freedoom1 &"
+    "Freedoom 2" f.exec "freedoom2 &"
     "Raise"     f.raise
     "Lower"     f.lower
     "Close"     f.delete

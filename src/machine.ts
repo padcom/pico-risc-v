@@ -15,6 +15,7 @@ import { VirtioBlock } from './virtio-blk.js'
 import { VirtioConsole } from './virtio-console.js'
 import { VirtioGpu } from './virtio-gpu.js'
 import { VirtioInput } from './virtio-input.js'
+import { VirtioSound } from './virtio-sound.js'
 import { type NetworkBackend, VirtioNet } from './virtio-net.js'
 
 /**
@@ -29,6 +30,7 @@ import { type NetworkBackend, VirtioNet } from './virtio-net.js'
  *   0x1000_4000 - 0x1000_4fff   virtio keyboard (with a screen), PLIC source 6
  *   0x1000_5000 - 0x1000_5fff   virtio tablet (with a screen), PLIC source 7
  *   0x1000_6000 - 0x1000_6fff   virtio GPU (with a screen), PLIC source 8
+ *   0x1000_7000 - 0x1000_7fff   virtio sound card (if asked for), PLIC source 9
  *   0x1100_0000 - 0x1100_ffff   CLINT (timer + software interrupt)
  *   0x1110_0000 - 0x1110_0fff   Syscon (power-off / reboot)
  *   0x8000_0000 - ...           RAM; execution starts at its first byte,
@@ -46,6 +48,7 @@ export const MemoryMap = {
   VIRTIO_KEYBOARD: 0x1000_4000,
   VIRTIO_TABLET: 0x1000_5000,
   VIRTIO_GPU: 0x1000_6000,
+  VIRTIO_SOUND: 0x1000_7000,
   CLINT: 0x1100_0000,
   SYSCON: 0x1110_0000,
   RAM: 0x8000_0000,
@@ -114,6 +117,8 @@ export interface MachineOptions {
    * (a tablet), see VirtioInput.
    */
   display?: { width: number; height: number }
+  /** A sound card (VirtioSound): what the OS plays goes to `sound.output`. */
+  sound?: boolean
 }
 
 export interface BootOptions {
@@ -205,6 +210,8 @@ export class Machine {
   readonly tablet: VirtioInput | undefined
   /** The screen's GPU, if it has one. */
   readonly gpu: VirtioGpu | undefined
+  /** The sound card, if it has one (MachineOptions.sound). */
+  readonly sound: VirtioSound | undefined
   private readonly network: NetworkBackend | undefined
   /** The harts, by mhartid. */
   readonly cpus: CPU[]
@@ -257,6 +264,7 @@ export class Machine {
     harts = 1,
     console = true,
     display,
+    sound,
   }: MachineOptions = {}) {
     this.bootargs = bootargs
     this.virtual = clock === 'virtual'
@@ -310,6 +318,7 @@ export class Machine {
       return this.ram.bytes.subarray(offset, offset + length)
     }
     this.gpu = display && new VirtioGpu(dma, read, high => this.plic.setLevel(GPU_IRQ, high), display.width, display.height)
+    this.sound = sound ? new VirtioSound(dma, high => this.plic.setLevel(SOUND_IRQ, high), () => this.now()) : undefined
 
     this.bus
       .map(MemoryMap.RAM, ramSize, this.ram)
@@ -324,6 +333,7 @@ export class Machine {
     if (this.keyboard) this.bus.map(MemoryMap.VIRTIO_KEYBOARD, VirtioInput.SIZE, this.keyboard)
     if (this.tablet) this.bus.map(MemoryMap.VIRTIO_TABLET, VirtioInput.SIZE, this.tablet)
     if (this.gpu) this.bus.map(MemoryMap.VIRTIO_GPU, VirtioGpu.SIZE, this.gpu)
+    if (this.sound) this.bus.map(MemoryMap.VIRTIO_SOUND, VirtioSound.SIZE, this.sound)
   }
 
   /**
@@ -419,6 +429,7 @@ export class Machine {
     this.keyboard?.reset()
     this.tablet?.reset()
     this.gpu?.reset()
+    this.sound?.reset()
     // All harts start at the start of RAM (firmware picks one to boot).
     for (const cpu of this.cpus) {
       cpu.setRegister(10, cpu.id) // a0: hart id
@@ -451,6 +462,7 @@ export class Machine {
     let remaining = maxSteps
     while (remaining > 0) {
       this.clint.update()
+      this.sound?.tick()
       const slice = Math.min(SLICE, remaining)
       // Steps used and instructions retired in this round: the most any hart did.
       let used = 0
@@ -521,7 +533,9 @@ export class Machine {
         if (failure) throw failure
         const result = this.serveHarts()
         if (result) return result
-        const wait = MAX_WAIT
+        this.sound?.tick()
+        // (Waking for the sound card's next message back, too.)
+        const wait = Math.min(MAX_WAIT, Math.ceil((this.sound?.dueIn() ?? Infinity) / 1000))
         if (waitAsync) {
           const { async, value } = Atomics.waitAsync(control, DOORBELL, doorbell, wait)
           if (async) await value
@@ -628,10 +642,12 @@ export class Machine {
     // asynchronously), virtual time must not race ahead: its timeouts would
     // expire before the host answers.
     if (!this.virtual || this.network?.busy || this.disk?.busy) return false
-    const wait = this.microsUntilTimer()
+    // (Or the sound card's next message back: it's played.)
+    const wait = Math.min(this.microsUntilTimer(), Math.ceil(this.sound?.dueIn() ?? Infinity))
     if (wait === Infinity) return false
     this.skippedMicros += wait
     this.clint.update()
+    this.sound?.tick()
     return interrupted()
   }
 
@@ -828,6 +844,16 @@ export class Machine {
                 },
               },
             }),
+            ...(this.sound && {
+              [`virtio_mmio@${hex(MemoryMap.VIRTIO_SOUND)}`]: {
+                props: {
+                  compatible: 'virtio,mmio',
+                  reg: reg(MemoryMap.VIRTIO_SOUND, VirtioSound.SIZE),
+                  'interrupt-parent': PLIC_PHANDLE,
+                  interrupts: SOUND_IRQ,
+                },
+              },
+            }),
             ...(this.disk && {
               [`virtio_mmio@${hex(MemoryMap.VIRTIO_DISK)}`]: {
                 props: {
@@ -856,6 +882,7 @@ const TERMINAL_IRQ = 4
 const KEYBOARD_IRQ = 6
 const TABLET_IRQ = 7
 const GPU_IRQ = 8
+const SOUND_IRQ = 9
 
 /**
  * Start a thread running a hart (hart-worker.ts): `message` hears from it

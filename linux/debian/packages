@@ -18,3 +18,9 @@ dbus-x11
 fonts-dejavu-core
 # SVG images (GdkPixbuf's loader): Xfce's wallpaper, and icons, are SVGs
 librsvg2-common
+# Sound (the sound card: ALSA; aplay, speaker-test, alsamixer to try it)
+alsa-utils
+# Freedoom (freedoom1, freedoom2: Doom, free; in Xfce's menu too), on
+# Chocolate Doom
+chocolate-doom
+freedoom

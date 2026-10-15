@@ -2,10 +2,12 @@
 # downloading Alpine's minimal root file system and installing packages onto
 # it (curl, apk: this is Alpine), making the initramfs (cpio, gzip) and the
 # disk (e2fsprogs), indexing X's fonts (mkfontscale: what the font packages'
-# install scripts would do).
+# install scripts would do), and building Chocolate Doom for riscv64 (Zig's C
+# compiler, CMake, pkg-config; patchelf).
 FROM docker.io/library/alpine:3.24
 
-RUN apk add --no-cache bash curl tar coreutils findutils cpio gzip e2fsprogs mkfontscale
+RUN apk add --no-cache bash curl tar coreutils findutils cpio gzip e2fsprogs mkfontscale \
+  zig cmake make pkgconf patchelf
 
 # Tells linux/alpine/build.sh it is already inside the build container.
 ENV RISC_EMULATOR_BUILD_CONTAINER=1

@@ -27,8 +27,8 @@
  * port 22 (e.g. ssh -p 2222 root@localhost).
  *
  * --display gives the machine a screen (1024×768), with a keyboard and a
- * mouse, and opens a window that shows it and takes the keys and the mouse
- * (closing it quits). It takes the optional package @kmamal/sdl (SDL, which
+ * mouse, and a sound card, and opens a window that shows it and takes the
+ * keys and the mouse (closing it quits), and plays its sound. It takes the optional package @kmamal/sdl (SDL, which
  * npm installs where it can). --vnc <port> shows the screen to VNC viewers
  * on this machine too (or instead, without --display): macOS's Screen
  * Sharing (vnc://localhost:5900 with --vnc 5900; any password), TigerVNC...
@@ -41,6 +41,7 @@ import { type BlockStorage, SnapshotStorage } from './block-storage.js'
 import { openWindow } from './display-window.js'
 import { FileStorage } from './file-storage.js'
 import { Machine } from './machine.js'
+import { openSpeaker } from './speaker.js'
 import { UserNetwork } from './net/user-network.js'
 import { VncServer } from './vnc-server.js'
 
@@ -124,6 +125,7 @@ const machine = new Machine({
   network,
   bootargs: values.bootargs,
   display: values.display || vncPort !== undefined ? { width: 1024, height: 768 } : undefined,
+  sound: values.display,
   clock: values['virtual-clock'] ? 'virtual' : 'realtime',
   output: byte => {
     // (Threads run on their own: flush soon, rather than after a slice.)
@@ -154,6 +156,9 @@ if (display && values.display) {
   await openWindow(display, 'risc-emulator', () => quit(0, '[risc-emulator] the window was closed')).catch((e: Error) =>
     process.stderr.write(`[risc-emulator] can't open a window for the screen (${e.message}); --vnc <port> shows it to VNC viewers\n`),
   )
+}
+if (machine.sound) {
+  await openSpeaker(machine.sound).catch((e: Error) => process.stderr.write(`[risc-emulator] no sound (${e.message})\n`))
 }
 
 function quit(code: number, message?: string): never {

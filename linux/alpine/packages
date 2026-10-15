@@ -24,6 +24,14 @@ font-misc-misc
 font-cursor-misc
 font-alias
 
+# Sound (the sound card: ALSA; aplay, speaker-test, alsamixer to try it), and
+# Freedoom (freedoom1, freedoom2: Doom, free), on Chocolate Doom, which Alpine
+# doesn't have: build.sh makes it, these are the libraries it needs
+alsa-utils
+freedoom
+sdl2_mixer
+sdl2_net
+
 # To try things with (there may be no network to apk add more)
 htop
 mc

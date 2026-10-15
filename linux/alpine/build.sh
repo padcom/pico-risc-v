@@ -11,6 +11,9 @@
 #     is done here instead (and the kernel package comes with its modules'
 #     index, which kmod's would make).
 #   - OpenSBI, from Alpine's opensbi package
+#   - Chocolate Doom (for Freedoom: Alpine has the game, not this engine for
+#     it), built here from its source for riscv64, against Alpine's SDL
+#     libraries (Zig's C compiler: a cross-compiler for musl)
 #
 # Booting goes OpenSBI → Linux (Alpine's linux-lts) with a small initramfs
 # made here (BusyBox and the modules it takes to mount the disk) → OpenRC.
@@ -44,6 +47,9 @@ BOOTARGS='console=ttyS0 root=/dev/vda quiet'
 # Modules the initramfs loads to mount the root file system (and what they
 # need, from modules.dep).
 INITRAMFS_MODULES=(virtio_mmio virtio_blk ext4)
+# Chocolate Doom's source (a release of github.com/chocolate-doom), and its SHA-256.
+CHOCOLATE_DOOM=3.1.0
+CHOCOLATE_DOOM_SHA256=f2c64843dcec312032b180c3b2f34b4cb26c4dcdaa7375a1601a3b1df11ef84d
 # OpenRC's services in each runlevel, as setup-alpine sets them up (less what
 # the machine doesn't have: no keyboard, no hardware clock to sync with).
 # (A plain list: macOS's bash 3 runs this far, before the container does
@@ -61,7 +67,7 @@ step() { echo; echo "==> $*"; }
 if [ -z "${RISC_EMULATOR_BUILD_CONTAINER:-}" ] && [ "${NATIVE:-}" != 1 ]; then
   exec bash "$ROOT/linux/podman.sh" alpine "$@"
 fi
-for tool in curl apk cpio gzip mkfs.ext4 e2fsck sha256sum mkfontdir; do
+for tool in curl apk cpio gzip mkfs.ext4 e2fsck sha256sum mkfontdir zig cmake make pkg-config patchelf; do
   command -v "$tool" >/dev/null || die "missing $tool"
 done
 
@@ -93,6 +99,43 @@ kernel_version=$(ls root/lib/modules)
 # (Nor is GLX, X's 3D, which would load them: off in xorg.conf.d.)
 rm -rf root/usr/lib/libLLVM.so.* root/usr/lib/libgallium-*.so root/usr/lib/dri root/usr/lib/gbm
 echo "    ${#packages[@]} packages, $(apk --root root info 2>/dev/null | wc -l) with what they need; kernel $kernel_version"
+
+step "Building Chocolate Doom $CHOCOLATE_DOOM (for riscv64)"
+# Against Alpine's SDL libraries (the development packages, in a root of their
+# own: what it's built against), with Zig's C compiler (cc, ar, ranlib: CMake
+# wants a program for each).
+"${APK[@]}" --root sysroot --initdb add musl-dev sdl2-dev sdl2_mixer-dev sdl2_net-dev >>apk.log 2>&1 || { cat apk.log; die "apk add (Chocolate Doom's libraries) failed"; }
+mkdir -p bin
+for tool in cc ar ranlib; do
+  case $tool in cc) command='zig cc -target riscv64-linux-musl' ;; *) command="zig $tool" ;; esac
+  printf '#!/bin/sh\nexec %s "$@"\n' "$command" >"bin/$tool"
+  chmod +x "bin/$tool"
+done
+cat >riscv64.cmake <<EOF
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR riscv64)
+set(CMAKE_C_COMPILER $PWD/bin/cc)
+set(CMAKE_AR $PWD/bin/ar)
+set(CMAKE_RANLIB $PWD/bin/ranlib)
+set(CMAKE_SYSROOT $PWD/sysroot)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+EOF
+source=chocolate-doom-$CHOCOLATE_DOOM.tar.gz
+curl -fsSL -o "$source" "https://github.com/chocolate-doom/chocolate-doom/archive/refs/tags/chocolate-doom-$CHOCOLATE_DOOM.tar.gz"
+echo "$CHOCOLATE_DOOM_SHA256  $source" | sha256sum -c - >/dev/null || die "$source: checksum mismatch"
+tar -xzf "$source"
+(
+  export PKG_CONFIG_SYSROOT_DIR=$PWD/sysroot PKG_CONFIG_LIBDIR=$PWD/sysroot/usr/lib/pkgconfig:$PWD/sysroot/usr/share/pkgconfig
+  cmake -S "chocolate-doom-chocolate-doom-$CHOCOLATE_DOOM" -B doom -DCMAKE_TOOLCHAIN_FILE="$PWD/riscv64.cmake" \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS=-s
+  make -C doom -j"$(nproc)" chocolate-doom
+) >doom.log 2>&1 || { tail -40 doom.log; die "building Chocolate Doom failed"; }
+# (Zig's C library is musl too, but its name for it is the development one.)
+patchelf --replace-needed libc.so libc.musl-riscv64.so.1 doom/src/chocolate-doom
+install -D -m 755 doom/src/chocolate-doom root/usr/local/bin/chocolate-doom
+echo "    $(($(stat -c %s root/usr/local/bin/chocolate-doom) / 1024)) KB"
 
 step "Setting the system up"
 # What mkinitfs's install script does (so mkinitfs works in the guest too).
@@ -164,6 +207,7 @@ Alpine $(cat root/etc/alpine-release) ($minirootfs)
 kernel $kernel_version (linux-lts)
 opensbi $(apk --root opensbi info -v 2>/dev/null | sed -n 's/^opensbi-//p')
 packages: ${packages[*]}
+chocolate-doom $CHOCOLATE_DOOM (built here)
 EOF
 cat >boot.json <<EOF
 {

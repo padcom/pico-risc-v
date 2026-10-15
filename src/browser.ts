@@ -41,7 +41,9 @@
  *                        keys while the screen has the focus (click it), and
  *                        a mouse. The page shows the screen or the terminal
  *                        (the buttons in the status bar), the screen fitted
- *                        to the page, or full screen
+ *                        to the page, or full screen. And with it, a
+ *                        sound card, heard (Web Audio) once the page has
+ *                        been clicked or typed in
  *
  * How the machine stopped ends up in the page's `data-result` attribute,
  * and everything it printed in `window.emulatorOutput` (for tests).
@@ -57,6 +59,7 @@ import { HttpStorage } from './http-storage.js'
 import { IndexedDbStore } from './indexeddb-store.js'
 import { Machine, type RunResult } from './machine.js'
 import { Input, TABLET_MAX } from './virtio-input.js'
+import { playOnPage } from './web-audio.js'
 import { WebSocketNetwork } from './websocket-network.js'
 
 /** How to boot a distribution (images/<distribution>/boot.json; files relative to it). */
@@ -139,7 +142,7 @@ try {
 
   let machine: Machine
   if (image) {
-    machine = new Machine({ ramSize: Number(params.get('memory') ?? 64) << 20, harts, output, display })
+    machine = new Machine({ ramSize: Number(params.get('memory') ?? 64) << 20, harts, output, display, sound: !!display })
     machine.boot(await fetchBytes(image))
   } else {
     log(`loading ${distribution}…`)
@@ -162,10 +165,12 @@ try {
       bootargs: config.bootargs,
       output,
       display,
+      sound: !!display,
     })
     machine.boot(firmware, { load: [{ offset: KERNEL_OFFSET, data: kernel }], next: { offset: KERNEL_OFFSET }, initrd })
   }
   if (machine.screen) show(machine)
+  if (machine.sound) playOnPage(machine.sound)
   terminal.onData(data => machine.type(data))
   // The terminal's size, and changes to it (fit() follows the window).
   machine.resize(terminal.cols, terminal.rows)
