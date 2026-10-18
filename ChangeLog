@@ -4,6 +4,12 @@ What changed, day by day, newest first: one line per commit (its short
 hash and subject; `git show <hash>` has the whole story). Every line of
 code was written by Claude (Anthropic), in Claude Code; @padcom directed.
 
+2026-10-18  Speed
+
+	* JIT: MULH* and FENCE compiled, CSR instructions (but satp) go on in
+	          compiled code, and jumps back to a page's own function go
+	          through its switch, not a call (Debian's boot 4% faster)
+
 2026-10-15  Doom: a sound card, Freedoom, a day of fixes, Debian only, and a name: Pico RISC-V
 
 	* Packages: @padcom/pico-risc-v-hart (the core, a computer for bare-metal

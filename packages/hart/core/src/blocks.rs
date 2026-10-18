@@ -136,7 +136,7 @@ pub struct Op {
     /// 16 bits (an illegal-instruction trap reports those).
     pub(crate) imm: i32,
     /// The 32-bit instruction (expanded, if compressed), for `Execute`.
-    inst: u32,
+    pub(crate) inst: u32,
 }
 
 impl Op {

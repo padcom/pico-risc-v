@@ -49,10 +49,13 @@
 //! - Each compiled function is named after its page's physical address
 //!   ("pa_80a3f000"), as profilers (node --cpu-prof) show it.
 //! - Whatever isn't compiled (floating point, atomics, CSRs, system
-//!   instructions, MULH*) also runs through `jit_op` (passed the decoded
+//!   instructions) also runs through `jit_op` (passed the decoded
 //!   instruction). Only `jit_op` can reach devices, so it also ends the
 //!   function when one raised an interrupt or stopped the CPU, or when code
-//!   was written (which may be the function's own).
+//!   was written (which may be the function's own). CSR instructions (but
+//!   for satp) go on after it; the other system instructions end the block.
+//! - A jump that the chain cache finds on the function's own page (a return
+//!   to it, say) goes on through the switch, without a call.
 //!
 //! Functions take the page's virtual address as a parameter: the same
 //! physical code may run at several (shared libraries).
@@ -1125,6 +1128,8 @@ const I64_SHR_U: u8 = 0x88;
 const I32_WRAP_I64: u8 = 0xa7;
 const I64_EXTEND_I32_S: u8 = 0xac;
 const I64_EXTEND_I32_U: u8 = 0xad;
+const ATOMIC_PREFIX: u8 = 0xfe;
+const ATOMIC_FENCE: u8 = 0x03;
 
 // A compiled page's locals: the parameters (Compiled), then x1..x31 (x[r]
 // in local X + r), then scratch.
@@ -1317,6 +1322,8 @@ struct Emitter<'a> {
     /// The memory groups of the block being compiled, by instruction.
     members: Vec<Option<Member>>,
     chain: u32,
+    /// The function's RAM page (physical).
+    ppn: u32,
     exit: u32,
     helper_exit: u32,
     // Where the hart's things are, from its start (so that the code works
@@ -1350,6 +1357,7 @@ impl<'a> Emitter<'a> {
             self_loop: None,
             members: Vec::new(),
             chain: 0,
+            ppn: 0,
             exit: 0,
             helper_exit: 0,
             x: at(hart.x.as_ptr()),
@@ -1927,6 +1935,69 @@ impl<'a> Emitter<'a> {
         self.set_reg(op.rd as u32);
     }
 
+    /// x[rd] = the high 64 bits of x[rs1] * x[rs2], from four 32-bit
+    /// products; then, for signed operands, less the other operand for each
+    /// negative one (two's complement).
+    fn multiply_high(&mut self, op: &Op, signed_a: bool, signed_b: bool) {
+        const LOW: i64 = 0xffff_ffff;
+        let half = |e: &mut Self, local, high: bool| {
+            e.local(LOCAL_GET, local);
+            if high {
+                e.i64c(32);
+                e.o(I64_SHR_U);
+            } else {
+                e.i64c(LOW);
+                e.o(I64_AND);
+            }
+        };
+        self.reg(op.rs1 as u32);
+        self.local(LOCAL_SET, A);
+        self.reg(op.rs2 as u32);
+        self.local(LOCAL_SET, B);
+        // ADDR = a.low * b.high, PC_OUT = a.high * b.low (scratch here).
+        half(self, A, false);
+        half(self, B, true);
+        self.o(I64_MUL);
+        self.local(LOCAL_SET, ADDR);
+        half(self, A, true);
+        half(self, B, false);
+        self.o(I64_MUL);
+        self.local(LOCAL_SET, PC_OUT);
+        // a.high * b.high + the cross products' high halves...
+        half(self, A, true);
+        half(self, B, true);
+        self.o(I64_MUL);
+        half(self, ADDR, true);
+        self.o(I64_ADD);
+        half(self, PC_OUT, true);
+        self.o(I64_ADD);
+        // ...plus the carry out of the middle: (a.low * b.low).high + the
+        // cross products' low halves.
+        half(self, A, false);
+        half(self, B, false);
+        self.o(I64_MUL);
+        self.i64c(32);
+        self.o(I64_SHR_U);
+        half(self, ADDR, false);
+        self.o(I64_ADD);
+        half(self, PC_OUT, false);
+        self.o(I64_ADD);
+        self.i64c(32);
+        self.o(I64_SHR_U);
+        self.o(I64_ADD);
+        for (signed, negative, other) in [(signed_a, A, B), (signed_b, B, A)] {
+            if signed {
+                self.local(LOCAL_GET, other);
+                self.local(LOCAL_GET, negative);
+                self.i64c(63);
+                self.o(I64_SHR_S);
+                self.o(I64_AND);
+                self.o(I64_SUB);
+            }
+        }
+        self.set_reg(op.rd as u32);
+    }
+
     /// A conditional branch: if taken, go to its target.
     fn branch(&mut self, k: u32, offset: i64, op: &Op, opcode: u8, case_at: &[u16]) {
         self.reg(op.rs1 as u32);
@@ -1950,10 +2021,11 @@ impl<'a> Emitter<'a> {
         self.mem(I64_LOAD, self.ctx);
         self.local(LOCAL_SET, CTX);
 
+        self.ppn = cases.first().map_or(0, |&index| (hart.blocks[index as usize].pa >> 12) as u32);
         self.exit = self.open(BLOCK, EMPTY);
+        self.top = self.open(LOOP, EMPTY);
         self.chain = self.open(BLOCK, EMPTY);
         self.helper_exit = self.open(BLOCK, EMPTY);
-        self.top = self.open(LOOP, EMPTY);
         // The switch: case i's code follows the end of the i-th innermost block.
         for _ in 0..=n {
             self.open(BLOCK, EMPTY);
@@ -2030,7 +2102,6 @@ impl<'a> Emitter<'a> {
         }
         self.close();
         self.o(UNREACHABLE);
-        self.close(); // the loop
         self.close(); // helper_exit: jit_op set pc and retired; ENTRY is 1 or 2
         self.local(LOCAL_GET, ENTRY);
         self.i32c(1);
@@ -2052,6 +2123,7 @@ impl<'a> Emitter<'a> {
         self.local(LOCAL_SET, BASE);
         self.close(); // chain: (registers written back)
         self.chain_lookup();
+        self.close(); // the loop (not found in the chain cache)
         self.close(); // exit: (registers written back)
         self.hart();
         self.local(LOCAL_GET, PC_OUT);
@@ -2116,6 +2188,25 @@ impl<'a> Emitter<'a> {
         self.o(I32_EQ);
         self.o(I32_AND);
         self.open(IF, EMPTY);
+        // Code of this function (on its page, at the same virtual address):
+        // on in it, through the switch.
+        self.local(LOCAL_GET, PC_OUT);
+        self.local(LOCAL_GET, PAGE);
+        self.o(I64_XOR);
+        self.i64c(12);
+        self.o(I64_SHR_U);
+        self.o(I64_EQZ);
+        self.local(LOCAL_GET, ENTRY);
+        self.mem(I32_LOAD, 24);
+        self.i32c(self.ppn as i32);
+        self.o(I32_EQ);
+        self.o(I32_AND);
+        self.open(IF, EMPTY);
+        self.local(LOCAL_GET, ENTRY);
+        self.mem(I32_LOAD, 20);
+        self.local(LOCAL_SET, NEXT);
+        self.br(self.top);
+        self.close();
         self.local(LOCAL_GET, HART);
         self.local(LOCAL_GET, PC_OUT);
         self.i64c(!0xfff);
@@ -2222,8 +2313,28 @@ impl<'a> Emitter<'a> {
                 self.exit_to_stack(true);
                 return true;
             }
+            Mulhu => self.multiply_high(op, false, false),
+            Mulh => self.multiply_high(op, true, true),
+            Mulhsu => self.multiply_high(op, true, false),
+            // FENCE: order this hart's memory accesses as other harts
+            // (threads) see them, as the interpreter does.
+            Execute if op.inst & 0x707f == 0x0f => {
+                self.o(ATOMIC_PREFIX);
+                self.o(ATOMIC_FENCE);
+                self.o(0);
+            }
             // Through the interpreter, continuing.
-            Mulh | Mulhsu | Mulhu | Execute => self.interpret(k, offset, op),
+            Execute => self.interpret(k, offset, op),
+            // A CSR instruction, but for satp (the function assumes the
+            // page's translation stays): through the interpreter, then on
+            // (jit_op leaves for an interrupt it made pending). The data
+            // accesses' context may have changed (mstatus.SUM, MXR, MPRV).
+            ExecuteEnd if op.inst & 0x7f == 0x73 && op.inst >> 12 & 7 != 0 && op.inst >> 20 != 0x180 => {
+                self.interpret(k, offset, op);
+                self.hart();
+                self.mem(I64_LOAD, self.ctx);
+                self.local(LOCAL_SET, CTX);
+            }
             // Through the interpreter, then on through the chain cache:
             // these can change privilege, translation (which the function
             // assumes doesn't change), interrupts (jit_op leaves for those).
