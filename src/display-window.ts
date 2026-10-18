@@ -1,6 +1,7 @@
 import type { Display } from './display.js'
 import { fit } from './fit.js'
 import { linuxKeyOfScancode } from './keymap.js'
+import { dropWindowMenu } from './macos-menus.js'
 import { Input, TABLET_MAX } from './virtio-input.js'
 
 /** How often to look for changes on the screen to show (ms). */
@@ -24,6 +25,8 @@ export async function openWindow(display: Display, title: string, closed: () => 
   const { keyboard, tablet } = display
   const first = display.output
   const window = sdl.video.createWindow({ title, width: first?.width ?? 1024, height: first?.height ?? 768, resizable: true })
+  // (macOS: F11 and the like are the guest's, not the Window menu's.)
+  await dropWindowMenu().catch(() => {})
   // What's shown, as big as the output is (now).
   let width = 0
   let height = 0

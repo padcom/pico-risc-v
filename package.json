@@ -46,9 +46,11 @@
     "vitest": "^5.0.3"
   },
   "optionalDependencies": {
-    "@kmamal/sdl": "^0.11.13"
+    "@kmamal/sdl": "^0.11.13",
+    "koffi": "^2.16.3"
   },
   "allowScripts": {
-    "@kmamal/sdl": true
+    "@kmamal/sdl": true,
+    "koffi": false
   }
 }

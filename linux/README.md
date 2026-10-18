@@ -65,7 +65,9 @@ mouse, and Debian starts its desktop (Xfce) on it, as in the page
 (`?display`, below). It opens in a window of its own (SDL, through the
 `@kmamal/sdl` package, which `npm install` installs where it can); the keys
 go to the guest by their place on the keyboard, so Debian's keyboard layout
-says what they type; resizing the window resizes the desktop (see the
+says what they type (on macOS, function keys too that macOS has window
+commands on, such as F11 for Fill: the window has no Window menu, which
+takes them first; with the `koffi` package, installed with it); resizing the window resizes the desktop (see the
 screen, below); closing the window quits the emulator. The machine has a
 sound card too, which plays on this machine's speakers (see sound, below).
 
