@@ -25,8 +25,8 @@ jobs:
     # (Building Debian's image, when it isn't in the cache, takes a while.)
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 26
           cache: npm
@@ -42,7 +42,7 @@ jobs:
         name: What Debian's image is built from
         run: echo "hash=$(bash linux/inputs-hash.sh debian)" >>"$GITHUB_OUTPUT"
       - id: cached
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: debian.tar
           key: debian-${{ steps.debian.outputs.hash }}
@@ -53,15 +53,17 @@ jobs:
         if: steps.cached.outputs.cache-hit != 'true'
         run: npm run debian:build && tar --sparse -cf debian.tar images/debian
       - if: steps.cached.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: debian.tar
           key: debian-${{ steps.debian.outputs.hash }}
       - name: The site
         run: npm run site
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
+          # (.nojekyll: hidden files are left out unless asked for.)
+          include-hidden-files: true
 
   deploy:
     needs: build
@@ -71,4 +73,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
