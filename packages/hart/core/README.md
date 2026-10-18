@@ -41,9 +41,10 @@ which V8 compiles to machine code. The unit is a page of RAM: once a page has
 run 2000 instructions from the cache, its blocks become one function, a loop
 around a switch over them, so jumps and branches within the page stay in
 compiled code. Registers are WebAssembly locals within a block; loads and
-stores to RAM go straight to memory through a TLB of the JIT's own;
-everything else (floating point, atomics, CSRs, a TLB miss) goes back to the
-interpreter for that instruction. The functions are put into the core's
+stores to RAM go straight to memory through a TLB of the JIT's own, and so
+do most atomics (with WebAssembly's atomic instructions); everything else
+(floating point, most CSRs, a TLB miss) goes back to the interpreter for
+that instruction. The functions are put into the core's
 function table, so `run()` calls them directly, and when code jumps to
 another page that's compiled, its function goes on in that page's (a tail
 call), without returning to `run()`. A page compiled again for
@@ -150,6 +151,7 @@ run executes exactly the same instructions:
 | (the same, measured with Node 24) | 4555 MIPS | 4885 MIPS | 885 MIPS, 12.6 s |
 | ...MULH* and FENCE compiled, CSR instructions going on, jumps back to a page's own function through its switch | 4470 MIPS | 4855 MIPS | 927 MIPS, 12.0 s |
 | ...jumps to a block further on in the page straight there, not through the switch | 4945 MIPS | 4915 MIPS | 956 MIPS, 11.6 s |
+| ...atomics compiled, and sstatus's SIE set and cleared | 4430 MIPS | 4840 MIPS | 967 MIPS, 11.5 s |
 
 Measured on an Apple Silicon Mac with Node 26. Earlier, when the core also
 did RV32 (see the git history), the TypeScript CPU it replaced ran the

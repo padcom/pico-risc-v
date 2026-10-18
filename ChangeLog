@@ -6,8 +6,10 @@ code was written by Claude (Anthropic), in Claude Code; @padcom directed.
 
 2026-10-18  Speed
 
-	* JIT: jumps to a block further on in the page go straight to its code,
-	          not through the switch (Debian's boot 3% faster)
+	* JIT: atomics (AMOs but MIN/MAX, LR, SC) compiled, and reading
+	          sstatus or setting or clearing its SIE
+	* fa49d60 JIT: jumps to a block further on in the page go straight to
+	          its code, not through the switch (Debian's boot 3% faster)
 	* 6c58de1 JIT: MULH* and FENCE compiled, CSR instructions (but satp) go
 	          on in compiled code, and jumps back to a page's own function
 	          go through its switch, not a call (Debian's boot 4% faster)

@@ -46,9 +46,9 @@ const MSTATUS_WRITABLE: u64 = MSTATUS_SIE | MSTATUS_MIE | MSTATUS_SPIE | MSTATUS
     | MSTATUS_MPP | MSTATUS_FS | MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_TVM | MSTATUS_TW
     | MSTATUS_TSR;
 /// The part of mstatus writable through sstatus...
-const SSTATUS_WRITABLE: u64 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_FS | MSTATUS_SUM | MSTATUS_MXR;
+pub(crate) const SSTATUS_WRITABLE: u64 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_FS | MSTATUS_SUM | MSTATUS_MXR;
 /// ...and visible through it (also UXL; SD is added when read).
-const SSTATUS_VISIBLE: u64 = SSTATUS_WRITABLE | 3 << 32;
+pub(crate) const SSTATUS_VISIBLE: u64 = SSTATUS_WRITABLE | 3 << 32;
 const MIE_WRITABLE: u64 = MIP_SSIP | MIP_MSIP | MIP_STIP | MIP_MTIP | MIP_SEIP | MIP_MEIP;
 /// mip bits software may write; the machine ones are driven by devices (CLINT).
 const MIP_WRITABLE: u64 = MIP_SSIP | MIP_STIP | MIP_SEIP;
@@ -58,7 +58,7 @@ const MEDELEG_WRITABLE: u64 = 0xb3ff;
 const COUNTEREN_WRITABLE: u64 = 0x7; // cycle, time, instret
 
 /// No LR reservation (addresses are aligned, so this never matches).
-const NO_RESERVATION: u64 = u64::MAX;
+pub(crate) const NO_RESERVATION: u64 = u64::MAX;
 
 // Opcodes
 const LOAD: u32 = 0x03;
@@ -150,8 +150,8 @@ pub struct Hart {
     pub(crate) paging: Paging,
     /// Physical address reserved by LR, and the value it read (SC succeeds
     /// if memory still holds it).
-    reservation: u64,
-    reserved_value: u64,
+    pub(crate) reservation: u64,
+    pub(crate) reserved_value: u64,
 
     /// RAM: `ram_size` bytes at `ram`, at physical address `ram_base`.
     pub(crate) ram: *mut u8,

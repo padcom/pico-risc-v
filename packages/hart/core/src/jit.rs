@@ -50,8 +50,12 @@
 //!   takes a range on two pages that follow each other in RAM.
 //! - Each compiled function is named after its page's physical address
 //!   ("pa_80a3f000"), as profilers (node --cpu-prof) show it.
-//! - Whatever isn't compiled (floating point, atomics, CSRs, system
-//!   instructions) also runs through `jit_op` (passed the decoded
+//! - Atomics (AMOs but MIN/MAX, LR, SC) to RAM go straight to memory too,
+//!   with WebAssembly's atomic instructions, when naturally aligned on a
+//!   page the JIT TLB has for stores (for LR, loads), without code.
+//! - Whatever isn't compiled (floating point, AMOMIN/MAX, CSRs but reading
+//!   sstatus or setting or clearing its SIE, system instructions) also
+//!   runs through `jit_op` (passed the decoded
 //!   instruction). Only `jit_op` can reach devices, so it also ends the
 //!   function when one raised an interrupt or stopped the CPU, or when code
 //!   was written (which may be the function's own). CSR instructions (but
@@ -63,7 +67,8 @@
 //! physical code may run at several (shared libraries).
 
 use crate::blocks::{Block, FETCH_CACHE, Kind, Op, SINK};
-use crate::hart::Hart;
+use crate::csr::{MSTATUS_FS, MSTATUS_SIE, PRIV_S};
+use crate::hart::{Hart, NO_RESERVATION, SSTATUS_VISIBLE, SSTATUS_WRITABLE};
 use crate::mmu::TLB_SIZE;
 use core::cell::UnsafeCell;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
@@ -834,6 +839,8 @@ impl Hart {
         let op = Op::unpack(a, b);
         let next = pc.wrapping_add(op.len as u64);
         let addr = self.x[op.rs1 as usize].wrapping_add(op.imm as i64 as u64);
+        // (An atomic's address: rs1 alone, its immediate is its bits.)
+        let atomic = (op.kind == Kind::Execute && op.inst & 0x7f == 0x2f).then(|| self.x[op.rs1 as usize]);
         let group = core::mem::take(&mut self.jit_group);
         let result = self.execute_op(&op, pc, next);
         // Code was written, by this instruction or another hart since this
@@ -852,6 +859,8 @@ impl Hart {
                     self.jit_fill(addr, false);
                 } else if op.kind.is_store() {
                     self.jit_fill(addr, true);
+                } else if let Some(addr) = atomic {
+                    self.jit_fill(addr, op.inst >> 27 != 0b00010); // (LR: a load)
                 }
                 if group != 0 {
                     // A memory group's first access: its range, from where
@@ -1130,6 +1139,7 @@ const I64_SHR_U: u8 = 0x88;
 const I32_WRAP_I64: u8 = 0xa7;
 const I64_EXTEND_I32_S: u8 = 0xac;
 const I64_EXTEND_I32_U: u8 = 0xad;
+const I32_OR: u8 = 0x72;
 const ATOMIC_PREFIX: u8 = 0xfe;
 const ATOMIC_FENCE: u8 = 0x03;
 
@@ -1341,6 +1351,12 @@ struct Emitter<'a> {
     retired: u32,
     ctx: u32,
     group: u32,
+    reservation: u32,
+    reserved_value: u32,
+    privilege: u32,
+    mstatus: u32,
+    mie: u32,
+    mip: u32,
     group_ok: u32,
     tlb: u32,
     chain_base: u32,
@@ -1350,6 +1366,7 @@ struct Emitter<'a> {
     fetch_ctx: u32,
     // ...and the RAM's, in linear memory.
     ram: u32,
+    ram_base: u64,
     code_lines: u32,
 }
 
@@ -1375,6 +1392,12 @@ impl<'a> Emitter<'a> {
             pc: at(&hart.pc),
             retired: at(&hart.retired),
             ctx: at(&hart.jit_ctx),
+            reservation: at(&hart.reservation),
+            reserved_value: at(&hart.reserved_value),
+            privilege: at((&hart.priv_ as *const u32).cast()),
+            mstatus: at(&hart.mstatus),
+            mie: at(&hart.mie),
+            mip: at(hart.mip.as_ptr()),
             group: at(&hart.jit_group),
             group_ok: at(hart.jit_group_ok.as_ptr().cast()),
             tlb: at(hart.jit_tlb.as_ptr().cast()),
@@ -1384,6 +1407,7 @@ impl<'a> Emitter<'a> {
             fetch_pages: at(hart.fetch_pages.as_ptr().cast()),
             fetch_ctx: at(&hart.fetch_ctx),
             ram: hart.ram as u32,
+            ram_base: hart.ram_base,
             code_lines: hart.code.lines.as_ptr() as u32,
         }
     }
@@ -1956,6 +1980,248 @@ impl<'a> Emitter<'a> {
         self.set_reg(op.rd as u32);
     }
 
+    /// An atomic instruction (AMO, LR or SC, of `Execute` op), compiled: if
+    /// it's naturally aligned, on a page in the JIT TLB (to store to, but
+    /// for LR; and without code), with WebAssembly's atomic instructions,
+    /// otherwise through jit_op. Returns false for those it doesn't do.
+    fn atomic(&mut self, k: u32, offset: i64, op: &Op) -> bool {
+        let funct5 = op.inst >> 27;
+        let w = op.inst >> 12 & 7 == 2;
+        let (width, align) = if w { (4, 2) } else { (8, 3) };
+        // (WebAssembly's i32 and i64 forms are 1 apart.)
+        let rmw = match funct5 {
+            0b00000 => 0x1e, // add
+            0b00001 => 0x41, // xchg
+            0b01100 => 0x2c, // and
+            0b01000 => 0x33, // or
+            0b00100 => 0x3a, // xor
+            0b00010 | 0b00011 => 0, // LR, SC
+            _ => return false,
+        };
+        let (lr, sc) = (funct5 == 0b00010, funct5 == 0b00011);
+        let rd = op.rd as u32;
+        // The address is rs1's (an atomic's immediate is its bits).
+        let at = Op { imm: 0, ..*op };
+        if !lr {
+            self.reg(op.rs2 as u32);
+            self.local(LOCAL_SET, B);
+        }
+        self.tlb_lookup(&at, width, !lr);
+        self.local(LOCAL_GET, ADDR);
+        self.i64c(width - 1);
+        self.o(I64_AND);
+        self.o(I64_EQZ);
+        self.o(I32_AND);
+        self.open(IF, I32);
+        self.host_address();
+        self.local(LOCAL_TEE, HOST);
+        if lr {
+            self.o(DROP);
+            self.i32c(1);
+        } else {
+            // No code on the page (Code::lines of its RAM page is 0).
+            self.i32c(self.ram as i32);
+            self.o(I32_SUB);
+            self.i32c(12);
+            self.o(I32_SHR_U);
+            self.i32c(3);
+            self.o(I32_SHL);
+            self.mem(I64_LOAD, self.code_lines);
+            self.o(I64_EQZ);
+        }
+        self.o(ELSE);
+        self.i32c(0);
+        self.close();
+        self.open(IF, I64);
+        let atomic = |e: &mut Self, opcode: u8| {
+            e.o(ATOMIC_PREFIX);
+            e.o(opcode + !w as u8);
+            e.o(align);
+            e.o(0);
+        };
+        // The access's physical address (for the reservation).
+        let physical = |e: &mut Self| {
+            e.local(LOCAL_GET, HOST);
+            e.i32c(e.ram as i32);
+            e.o(I32_SUB);
+            e.o(I64_EXTEND_I32_U);
+            e.i64c(e.ram_base as i64);
+            e.o(I64_ADD);
+        };
+        if lr {
+            // Load, and reserve (the address, and the value: see Hart::amo).
+            self.local(LOCAL_GET, HOST);
+            atomic(self, 0x10);
+            if w {
+                self.o(I64_EXTEND_I32_U);
+            }
+            self.local(LOCAL_SET, A);
+            self.hart();
+            self.local(LOCAL_GET, A);
+            self.mem(I64_STORE, self.reserved_value);
+            self.hart();
+            physical(self);
+            self.mem(I64_STORE, self.reservation);
+            self.local(LOCAL_GET, A);
+            if w {
+                self.o(I32_WRAP_I64);
+                self.o(I64_EXTEND_I32_S);
+            }
+        } else if sc {
+            // Store, if the reservation is this address's and memory still
+            // holds what LR read; rd = 0 if so, else 1. Either way the
+            // reservation is gone.
+            self.hart();
+            self.mem(I64_LOAD, self.reservation);
+            physical(self);
+            self.o(I64_EQ);
+            self.hart();
+            self.i64c(NO_RESERVATION as i64);
+            self.mem(I64_STORE, self.reservation);
+            self.open(IF, I64);
+            self.local(LOCAL_GET, HOST);
+            self.hart();
+            self.mem(I64_LOAD, self.reserved_value);
+            self.local(LOCAL_TEE, A);
+            if w {
+                self.o(I32_WRAP_I64);
+            }
+            self.local(LOCAL_GET, B);
+            if w {
+                self.o(I32_WRAP_I64);
+            }
+            atomic(self, 0x48); // cmpxchg: the old value
+            if w {
+                self.o(I64_EXTEND_I32_U);
+            }
+            self.local(LOCAL_GET, A);
+            self.o(I64_NE);
+            self.o(I64_EXTEND_I32_U);
+            self.o(ELSE);
+            self.i64c(1);
+            self.close();
+        } else {
+            self.local(LOCAL_GET, HOST);
+            self.local(LOCAL_GET, B);
+            if w {
+                self.o(I32_WRAP_I64);
+            }
+            atomic(self, rmw);
+            if w {
+                self.o(I64_EXTEND_I32_S);
+            }
+        }
+        self.o(ELSE);
+        self.slow_path(k, offset, op);
+        if rd == 0 {
+            self.i64c(0);
+        } else {
+            self.hart();
+            self.mem(I64_LOAD, self.x + 8 * rd);
+        }
+        self.close();
+        self.set_reg(rd);
+        true
+    }
+
+    /// CSRRS / CSRRC (or their immediate forms) on sstatus (of `ExecuteEnd`
+    /// op), compiled when they only read it, or set or clear SIE: in S-mode
+    /// or above, and, if SIE may be set, with no interrupt pending (jit_op
+    /// leaves for those); otherwise through jit_op. Returns false for those
+    /// it doesn't do (writes to other fields).
+    fn sstatus(&mut self, k: u32, offset: i64, op: &Op) -> bool {
+        let funct3 = op.inst >> 12 & 7;
+        let set = funct3 & 3 == 2;
+        let (imm, src) = (funct3 & 4 != 0, op.rs1 as u32);
+        let others = SSTATUS_WRITABLE & !MSTATUS_SIE;
+        if imm && src as u64 & others != 0 {
+            return false;
+        }
+        let writes = src != 0;
+        let rd = op.rd as u32;
+        if writes {
+            if imm {
+                self.i64c(src as i64);
+            } else {
+                self.reg(src);
+            }
+            self.local(LOCAL_SET, B);
+        }
+        // S-mode or above...
+        self.hart();
+        self.mem(I32_LOAD, self.privilege);
+        self.i32c(PRIV_S as i32);
+        self.o(I32_GE_U);
+        if writes && !imm {
+            // ...SIE alone...
+            self.local(LOCAL_GET, B);
+            self.i64c(others as i64);
+            self.o(I64_AND);
+            self.o(I64_EQZ);
+            self.o(I32_AND);
+        }
+        if writes && set && (!imm || src as u64 & MSTATUS_SIE != 0) {
+            // ...and no interrupt it could let in.
+            self.local(LOCAL_GET, B);
+            self.i64c(MSTATUS_SIE as i64);
+            self.o(I64_AND);
+            self.o(I64_EQZ);
+            self.hart();
+            self.mem(I64_LOAD, self.mip);
+            self.hart();
+            self.mem(I64_LOAD, self.mie);
+            self.o(I64_AND);
+            self.o(I64_EQZ);
+            self.o(I32_OR);
+            self.o(I32_AND);
+        }
+        self.open(IF, I64);
+        // The old value (with SD for a dirty FS), and the new.
+        self.hart();
+        self.mem(I64_LOAD, self.mstatus);
+        self.local(LOCAL_TEE, A);
+        self.i64c(SSTATUS_VISIBLE as i64);
+        self.o(I64_AND);
+        self.local(LOCAL_GET, A);
+        self.i64c(MSTATUS_FS as i64);
+        self.o(I64_AND);
+        self.i64c(MSTATUS_FS as i64);
+        self.o(I64_EQ);
+        self.o(I64_EXTEND_I32_U);
+        self.i64c(63);
+        self.o(I64_SHL);
+        self.o(I64_OR);
+        if writes {
+            self.hart();
+            self.local(LOCAL_GET, A);
+            self.local(LOCAL_GET, B);
+            self.i64c(MSTATUS_SIE as i64);
+            self.o(I64_AND);
+            if set {
+                self.o(I64_OR);
+            } else {
+                self.i64c(-1);
+                self.o(I64_XOR);
+                self.o(I64_AND);
+            }
+            self.mem(I64_STORE, self.mstatus);
+        }
+        self.o(ELSE);
+        self.slow_path(k, offset, op);
+        self.hart();
+        self.mem(I64_LOAD, self.ctx);
+        self.local(LOCAL_SET, CTX);
+        if rd == 0 {
+            self.i64c(0);
+        } else {
+            self.hart();
+            self.mem(I64_LOAD, self.x + 8 * rd);
+        }
+        self.close();
+        self.set_reg(rd);
+        true
+    }
+
     /// x[rd] = the high 64 bits of x[rs1] * x[rs2], from four 32-bit
     /// products; then, for signed operands, less the other operand for each
     /// negative one (two's complement).
@@ -2348,8 +2614,18 @@ impl<'a> Emitter<'a> {
                 self.o(ATOMIC_FENCE);
                 self.o(0);
             }
+            // Atomics (but AMOMIN/MAX*): to RAM in the JIT TLB, compiled.
+            Execute if op.inst & 0x707f == 0x202f || op.inst & 0x707f == 0x302f => {
+                if !self.atomic(k, offset, op) {
+                    self.interpret(k, offset, op);
+                }
+            }
             // Through the interpreter, continuing.
             Execute => self.interpret(k, offset, op),
+            // Reading sstatus, or setting or clearing its SIE alone
+            // (interrupts on and off): compiled.
+            ExecuteEnd if op.inst & 0x7f == 0x73 && op.inst >> 20 == 0x100 && op.inst >> 12 & 3 >= 2
+                && self.sstatus(k, offset, op) => {}
             // A CSR instruction, but for satp (the function assumes the
             // page's translation stays): through the interpreter, then on
             // (jit_op leaves for an interrupt it made pending). The data
