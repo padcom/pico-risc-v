@@ -180,6 +180,16 @@ describe.skipIf(!existsSync(chromium.executablePath()) || !existsSync(join(root,
         for (const deadline = Date.now() + 60_000; (await menu()) && Date.now() < deadline; ) await page.waitForTimeout(500)
         expect(await menu()).toBe(false)
 
+        // The function keys are the screen's wherever the focus is on the page
+        // (but the terminal): not the browser's (F11: full screen).
+        await page.focus('#show-terminal')
+        await page.evaluate(() => {
+          const seen: boolean[] = ((window as unknown as { f11: boolean[] }).f11 = [])
+          addEventListener('keydown', event => event.isTrusted && event.code === 'F11' && seen.push(event.defaultPrevented))
+        })
+        await page.keyboard.press('F11')
+        expect(await page.evaluate(() => [(window as unknown as { f11: boolean[] }).f11, document.activeElement?.id])).toEqual([[true], 'screen'])
+
         // The screen follows the page's room for it: a smaller window, a smaller
         // screen (the width a multiple of 8, as Linux makes modes).
         const sizes = () =>

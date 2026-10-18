@@ -299,6 +299,29 @@ function show(machine: Machine): void {
     for (const key of held) keyboard.send([Input.EV_KEY, key, 0])
     held.clear()
   })
+  // The function keys, the screen's while it's shown, wherever the focus is
+  // (but the terminal): not the browser's (F11 full screen, F5 reload...).
+  const FUNCTION_KEYS = Array.from({ length: 12 }, (_, i) => `F${i + 1}`)
+  for (const type of ['keydown', 'keyup'] as const) {
+    addEventListener(
+      type,
+      event => {
+        if (event.target === canvas || screenView.hidden || !FUNCTION_KEYS.includes(event.code)) return
+        if (event.target instanceof Node && terminalView.contains(event.target)) return
+        event.preventDefault()
+        canvas.focus()
+        canvas.dispatchEvent(new KeyboardEvent(type, event))
+      },
+      true,
+    )
+  }
+  // Full screen: the keyboard lock (where there is one: Chromium) keeps
+  // them from the system and the browser there too.
+  const lock = (navigator as { keyboard?: { lock(codes: string[]): Promise<void>; unlock(): void } }).keyboard
+  document.addEventListener('fullscreenchange', () => {
+    if (document.fullscreenElement) void lock?.lock(FUNCTION_KEYS).catch(() => {})
+    else lock?.unlock()
+  })
 
   const BUTTONS = [Input.BTN_LEFT, Input.BTN_MIDDLE, Input.BTN_RIGHT] // by MouseEvent.button
   const at = (event: MouseEvent): [number, number, number][] => {

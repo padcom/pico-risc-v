@@ -6,7 +6,9 @@ code was written by Claude (Anthropic), in Claude Code; @padcom directed.
 
 2026-10-18  Speed
 
-	* JIT: atomics (AMOs but MIN/MAX, LR, SC) compiled, and reading
+	* The page: the function keys are the screen's wherever the focus is
+	          (but the terminal), and in full screen, the keyboard lock's
+	* 5da8c09 JIT: atomics (AMOs but MIN/MAX, LR, SC) compiled, and reading
 	          sstatus or setting or clearing its SIE
 	* fa49d60 JIT: jumps to a block further on in the page go straight to
 	          its code, not through the switch (Debian's boot 3% faster)
