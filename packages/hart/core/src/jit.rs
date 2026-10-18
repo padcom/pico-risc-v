@@ -3,7 +3,9 @@
 //!
 //! The unit is a page of RAM: its hot blocks (blocks.rs) become one
 //! function, a loop around a switch over them, so jumps between them (loops,
-//! branches, calls within the page) stay inside the function. When the code
+//! branches, calls within the page) stay inside the function; those to a
+//! block further on go straight to its code, the others through the
+//! switch. When the code
 //! leaves the page, or jumps through a register (JALR), the function looks
 //! the target up in the chain cache (`Hart::chain`) and, if it's compiled,
 //! goes on there with a tail call: so compiled code mostly runs from one
@@ -1318,6 +1320,12 @@ struct Emitter<'a> {
     /// Open blocks, and the depths of the ones jumps go to.
     depth: u32,
     top: u32,
+    /// The depth of the switch's outermost block (case i's code follows the
+    /// end of the one at `cases + n - i`), the number of cases, and the case
+    /// being compiled.
+    cases: u32,
+    n: u32,
+    case: u32,
     self_loop: Option<SelfLoop>,
     /// The memory groups of the block being compiled, by instruction.
     members: Vec<Option<Member>>,
@@ -1354,6 +1362,9 @@ impl<'a> Emitter<'a> {
             dirty: 0,
             depth: 0,
             top: 0,
+            cases: 0,
+            n: 0,
+            case: 0,
             self_loop: None,
             members: Vec::new(),
             chain: 0,
@@ -1535,7 +1546,9 @@ impl<'a> Emitter<'a> {
             return;
         }
         let case = if (0..4096).contains(&offset) && offset & 1 == 0 { case_at[offset as usize / 2] } else { 0 };
-        if case != 0 {
+        if case != 0 && case as u32 - 1 > self.case {
+            self.enter(case as u32 - 1);
+        } else if case != 0 {
             self.i32c(case as i32 - 1);
             self.local(LOCAL_SET, NEXT);
             self.flush();
@@ -1544,6 +1557,14 @@ impl<'a> Emitter<'a> {
             self.pc_at(offset);
             self.exit_to_stack(true);
         }
+    }
+
+    /// Go on in case `i`, further on in the function: straight there (to
+    /// the end of the switch's block its code follows), not through the
+    /// switch.
+    fn enter(&mut self, i: u32) {
+        self.flush();
+        self.br(self.cases + self.n - i);
     }
 
     /// Run instruction `k` of a block (`op`, at `offset` in the page)
@@ -2026,7 +2047,10 @@ impl<'a> Emitter<'a> {
         self.top = self.open(LOOP, EMPTY);
         self.chain = self.open(BLOCK, EMPTY);
         self.helper_exit = self.open(BLOCK, EMPTY);
-        // The switch: case i's code follows the end of the i-th innermost block.
+        // The switch: case i's code follows the end of the i-th innermost
+        // block (the outermost, after the last case, is its default).
+        self.cases = self.depth + 1;
+        self.n = n;
         for _ in 0..=n {
             self.open(BLOCK, EMPTY);
         }
@@ -2037,6 +2061,7 @@ impl<'a> Emitter<'a> {
             uleb(self.out, i as u64);
         }
         for (case, &index) in cases.iter().enumerate() {
+            self.case = case as u32;
             self.close();
             (self.loaded, self.dirty) = (0, 0);
             let block = hart.blocks[index as usize];

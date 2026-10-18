@@ -149,6 +149,7 @@ run executes exactly the same instructions:
 | ...pages compiled after 8000 instructions, not 2000 | 5095 MIPS | 5610 MIPS | 976 MIPS, 11.4 s |
 | (the same, measured with Node 24) | 4555 MIPS | 4885 MIPS | 885 MIPS, 12.6 s |
 | ...MULH* and FENCE compiled, CSR instructions going on, jumps back to a page's own function through its switch | 4470 MIPS | 4855 MIPS | 927 MIPS, 12.0 s |
+| ...jumps to a block further on in the page straight there, not through the switch | 4945 MIPS | 4915 MIPS | 956 MIPS, 11.6 s |
 
 Measured on an Apple Silicon Mac with Node 26. Earlier, when the core also
 did RV32 (see the git history), the TypeScript CPU it replaced ran the
